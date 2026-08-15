@@ -4,3 +4,4 @@ pandas
 numpy
 python-dotenv
 matplotlib
+yfinance==1.6.0

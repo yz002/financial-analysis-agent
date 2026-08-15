@@ -36,3 +36,14 @@
   column). `get_concept` passes these fields through as-is; don't assume
   `fiscal_year` alone reliably groups a period to when it originally
   occurred without cross-checking `period_end`.
+
+- **`market.py` depends on yfinance, an unofficial API.** yfinance scrapes
+  Yahoo Finance rather than calling a supported, licensed API — it can
+  break without warning whenever Yahoo changes something on their end, and
+  its failure modes for invalid data aren't consistently documented (see
+  the differing behavior across `.history()`, `.fast_info`, and `.info` in
+  `market.py`'s module docstring, each confirmed empirically rather than
+  from official docs). This is an accepted tradeoff for a portfolio
+  project — it's free and requires no API key — but it isn't a dependable
+  production data source. A real deployment would use a licensed market
+  data vendor instead.
