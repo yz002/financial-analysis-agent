@@ -80,7 +80,9 @@ Answer + charts + sources
 
 ## Roadmap
 
-- [ ] Phase 1 — Data layer (EDGAR + market data)
+- [ ] Phase 1 — Data layer
+  - [x] EDGAR (ticker resolution, cached HTTP client, financial concept extraction)
+  - [ ] Market data
 - [ ] Phase 2 — Analysis layer (ratios, deltas, anomalies, forecasting)
 - [ ] Phase 3 — Agent layer (tool calling, reasoning loop)
 - [ ] Phase 4 — Guardrails (source grounding, consistency checks)
