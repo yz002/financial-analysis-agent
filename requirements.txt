@@ -1,0 +1,6 @@
+anthropic
+requests
+pandas
+numpy
+python-dotenv
+matplotlib
