@@ -54,17 +54,19 @@ These are the questions the agent needs to answer correctly. They double as the 
 
 ## Architecture
 
+```
 Question
-↓
-Agent layer — decides which tools to call, in what order
-↓
-Data layer — SEC EDGAR (XBRL financials, filing text), market data
-↓
-Analysis layer — ratios, period deltas, anomaly flags, forecasts (Python, deterministic)
-↓
-Guardrails — source attribution, consistency checks, uncertainty flags
-↓
+   ↓
+Agent layer      — decides which tools to call, in what order
+   ↓
+Data layer       — SEC EDGAR (XBRL financials, filing text), market data
+   ↓
+Analysis layer   — ratios, period deltas, anomaly flags, forecasts (Python, deterministic)
+   ↓
+Guardrails       — source attribution, consistency checks, uncertainty flags
+   ↓
 Answer + charts + sources
+```
 
 
 ## Design decisions
