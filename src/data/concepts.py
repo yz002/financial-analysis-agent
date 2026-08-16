@@ -117,6 +117,15 @@ CONCEPTS = {
         ],
         "kind": "instant",
     },
+    "stockholders_equity": {
+        "tags": [
+            "StockholdersEquity",
+            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        ],
+        "kind": "instant",
+    },
+    "current_assets": {"tags": ["AssetsCurrent"], "kind": "instant"},
+    "current_liabilities": {"tags": ["LiabilitiesCurrent"], "kind": "instant"},
 }
 
 

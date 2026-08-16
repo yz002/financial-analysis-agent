@@ -31,16 +31,22 @@ with sources attached. Not an investment advisor — it reports and analyzes; th
 
 ## Commands
 
-No test suite, linter, or build tooling is set up yet (`evals/` and `notebooks/` are currently
-empty placeholders). Modules have no `__main__` entry points — exercise them by importing
-functions in a Python session or a one-liner, e.g.:
+Tests: `pytest` from the repo root (`tests/`, config in `pytest.ini`). Runs fully offline against
+EDGAR data already cached under `data/cache/` for MSFT, NVDA, and Ford — the three companies
+`tests/conftest.py`'s fixtures are built around (Ford deliberately, since it has no `gross_profit`
+data at all and exercises the graceful-degradation paths). Run a single file/test with
+`pytest tests/test_ratios.py` or `pytest tests/test_ratios.py::test_name`. No linter or build
+tooling is set up yet (`evals/` and `notebooks/` are currently empty placeholders).
+
+Modules other than tests have no `__main__` entry points — exercise them by importing functions in
+a Python session or a one-liner, e.g.:
 
 ```
 python -c "from src.data.concepts import get_concept; print(get_concept('AAPL', 'revenue'))"
 ```
 
 Dependencies: `pip install -r requirements.txt` (Python, requests, pandas, numpy,
-python-dotenv, matplotlib, yfinance, anthropic).
+python-dotenv, matplotlib, yfinance, anthropic, pytest).
 
 Environment: copy `.env.example` to `.env` and set `SEC_USER_AGENT` (required — EDGAR rejects
 requests without a descriptive `Name email` User-Agent) and `ANTHROPIC_API_KEY`.
@@ -61,8 +67,8 @@ Guardrails       — source attribution, consistency checks, uncertainty flags
 Answer + charts + sources                                              (src/app/ — Streamlit)
 ```
 
-Only the data layer (`src/data/`) is built so far; `analysis/`, `agent/`, and `app/` are empty
-packages awaiting Phase 2+ (see README.md roadmap).
+The data and analysis layers (`src/data/`, `src/analysis/`) are built; `agent/` and `app/` are
+still empty packages awaiting Phase 3+ (see README.md roadmap).
 
 ### Data layer (`src/data/`)
 
@@ -101,13 +107,48 @@ packages awaiting Phase 2+ (see README.md roadmap).
   near-empty dict depending on which call) — every function here normalizes that into a single
   `MarketDataError`.
 
+### Analysis layer (`src/analysis/`)
+
+- **`statements.py`** — `get_statement(ticker, period_length="quarterly", periods=None)`: joins
+  all 12 `CONCEPTS` (the original 9 plus `stockholders_equity`/`current_assets`/
+  `current_liabilities`, added specifically to unblock ROE/current ratio below) into one wide
+  DataFrame per ticker, indexed by `period_end` — never `fiscal_year`, per this project's core
+  design principle. Every ticker gets the identical column schema regardless of what data is
+  actually available (a concept with zero usable data, e.g. Ford's `gross_profit`, still gets its
+  columns, filled with NaN/None/False) so `ratios.py` never needs `hasattr`/`in df.columns`
+  guards. This is also the one place in the codebase allowed to synthesize a Q4 value
+  (`Q4 = FY − (Q1+Q2+Q3)`, per concepts.py's documented Q4 problem) — every derived row is marked
+  via a companion `{concept}_is_derived` boolean column, and derivation is refused (leaving that
+  concept/year absent rather than emitting a wrong number) unless the real Q1/Q2/Q3 periods
+  actually tile the fiscal year within a small tolerance; see the module docstring for exactly
+  what's checked and why the check is about period *tiling*, not the arithmetic. Also handles a
+  real EDGAR data quirk found while building this: two duration rows can share the same
+  `period_end` with a one-day-different `period_start` (`_dedupe_by_period_end`; see NOTES.md).
+- **`ratios.py`** — margins, growth (QoQ/YoY), free cash flow, leverage, and returns, each a
+  function taking the whole statement DataFrame and returning a DataFrame aligned by `period_end`
+  with a `value` column plus the named input columns behind it. `value` columns are `dtype=object`
+  holding literal `None` (never a silently-propagated `NaN`, never an exception) for anything
+  uncomputable — division by zero, a missing input, or not enough history for a growth lag. This
+  means they don't behave like normal numeric pandas columns; see NOTES.md before doing vectorized
+  math on one.
+- **`trends.py`** — `trailing_stats`/`detect_anomalies` are a generic, domain-agnostic rolling
+  z-score primitive (baseline excludes the point itself, to avoid look-ahead bias). The important
+  piece is `growth_anomalies`: running the primitive on raw levels over-flags a company like NVDA,
+  whose real, sustained triple-digit growth is itself statistically extreme — `growth_anomalies`
+  runs it on period-over-period growth rates instead, so a *consistent* growth rate isn't flagged
+  and only a break from it is. Read the module docstring before adding a new caller — it's
+  explicit about which of two different questions each function answers.
+
 ## Known limitations (see NOTES.md for full detail)
 
 - EDGAR cache (`data/cache/`) has no expiration — delete stale entries manually if needed.
 - The EDGAR rate limiter doesn't coordinate across processes/instances.
-- `get_concept` never derives a Q4 value; callers needing it must compute
-  `FY − (Q1+Q2+Q3)` themselves at the analysis layer.
 - `fiscal_year`/`fiscal_period` on EDGAR facts can reflect a later filing's comparative-column
   attribution rather than the period's original context — always key on `period_end` instead.
+- `get_concept` can return two duration rows for the same `period_end` differing only by a
+  one-day `period_start` — `statements.py` handles this (`_dedupe_by_period_end`), but a caller
+  going straight to `get_concept` should be aware duplicates are possible.
+- `ratios.py`'s `value` columns are `dtype=object`/`None`, not `float64`/`NaN` — `.astype("float64")`
+  before vectorized numeric ops.
 - `market.py`/yfinance is not a dependable long-term data source; a production system would
   swap in a licensed market data vendor.

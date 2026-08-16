@@ -37,6 +37,40 @@
   `fiscal_year` alone reliably groups a period to when it originally
   occurred without cross-checking `period_end`.
 
+- **`get_concept` can return two duration rows for the same `period_end`
+  with a one-day-different `period_start`.** Confirmed in real MSFT data:
+  the quarter ending 2016-09-30 is tagged with `period_start=2016-07-01`
+  in one filing and `period_start=2016-07-02` in another. `concepts.py`'s
+  own dedup doesn't catch this because it keys duration facts on the pair
+  `(period_start, period_end)`, not `period_end` alone, so these count as
+  two distinct periods there. `src/analysis/statements.py`
+  (`get_statement`) joins on `period_end` alone, so this surfaced there as
+  a crash in the `period_start`-coalescing merge. Fixed by
+  `statements._dedupe_by_period_end`, collapsing to one row per
+  `period_end` with the latest `filed` date winning — the same tie-break
+  rule `concepts._merge_and_dedupe` already uses for its own (finer-grained)
+  dedup. Instant concepts (`total_assets`, `stockholders_equity`, etc.)
+  aren't at risk of this: `concepts.py` keys their dedup on `period_end`
+  alone (an instant fact has no `period_start` to begin with), so two
+  instant rows can never survive concepts.py's own dedup with the same
+  `period_end` — confirmed empirically across all six instant concepts for
+  MSFT, NVDA, and Ford.
+
+- **`ratios.py`'s `value` columns are `dtype=object`, not a normal numeric
+  pandas column.** They hold literal Python `None` (not `NaN`) for
+  anything uncomputable, so "missing" and "genuinely zero" stay
+  distinguishable — but this means the column doesn't behave like a
+  regular `float64` column. Vectorized numeric operations (`.sum()`,
+  `.mean()`, comparisons, `.rolling()`, etc.) either raise or silently
+  misbehave on an `object` column holding a mix of `float` and `None`.
+  Consumers that need to do math on a ratio's `value` column must
+  `.astype("float64")` first — which correctly turns any surviving `None`
+  into `NaN`, pandas' own idiom once you're in a numeric-computation
+  context rather than the source-attribution context where `None`
+  matters. `src/analysis/trends.py` avoids this entirely by pulling raw
+  numeric statement columns directly rather than going through
+  `ratios.py`.
+
 - **`market.py` depends on yfinance, an unofficial API.** yfinance scrapes
   Yahoo Finance rather than calling a supported, licensed API — it can
   break without warning whenever Yahoo changes something on their end, and
