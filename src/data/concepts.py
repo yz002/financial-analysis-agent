@@ -5,10 +5,12 @@ EDGAR's XBRL companyfacts API (https://data.sec.gov/api/xbrl/companyfacts/)
 returns every fact a company has ever tagged, keyed by raw XBRL tag name —
 not by a stable "revenue" or "net income" concept. Different companies (and
 the same company at different times) tag the same real-world line item with
-different tags: revenue in particular has three common tags spanning the
+different tags: revenue in particular has several common tags spanning the
 2018 ASC 606 revenue-recognition transition
 (RevenueFromContractWithCustomerExcludingAssessedTax, Revenues,
-SalesRevenueNet). CONCEPTS below maps plain concept names to a prioritized
+SalesRevenueNet), plus SalesRevenueGoodsNet, used by at least one
+consumer-goods company (Coca-Cola, confirmed 2009-2018) for its top-line
+revenue pre-transition. CONCEPTS below maps plain concept names to a prioritized
 list of tags to try. Companies routinely switch tags mid-history (e.g. NVDA
 tagged revenue under RevenueFromContractWithCustomerExcludingAssessedTax
 only in 10-Ks filed 2017-2022 as stale comparative columns, while its real
@@ -80,6 +82,7 @@ CONCEPTS = {
             "RevenueFromContractWithCustomerExcludingAssessedTax",
             "Revenues",
             "SalesRevenueNet",
+            "SalesRevenueGoodsNet",
         ],
         "kind": "duration",
     },

@@ -71,6 +71,28 @@
   numeric statement columns directly rather than going through
   `ratios.py`.
 
+- **Cash flow items are commonly filed as fiscal-year-to-date cumulative
+  figures rather than discrete quarters, so `get_concept`'s
+  `period_length="quarterly"` filter correctly excludes them — and
+  `statements.py` has no way to recover a discrete quarter from that YTD
+  data.** Confirmed across MSFT, NVDA, Ford, and Coca-Cola:
+  `operating_cash_flow`/`capex`'s `quarterly`-classified coverage runs
+  25–75% below the same company's income-statement concepts (e.g. NVDA
+  `capex`: only 15 of ~66 real quarters have a discrete-quarter fact at
+  all; the rest exist only as 6-/9-/12-month cumulative figures). This is
+  specific to cash-flow-statement items — `revenue`/`gross_profit`/
+  `operating_income`/`net_income` also pick up a meaningful share of
+  extra YTD-classified ("other") facts, but their `quarterly` coverage
+  still spans essentially the entire real history in every company
+  checked, because those get a clean discrete-quarter figure filed
+  alongside any YTD comparative. `statements.get_statement` only derives
+  a *missing Q4* from a fiscal year's Q1+Q2+Q3 (see its module docstring);
+  it does not derive discrete quarters from mid-year YTD figures (e.g.
+  Q2 = H1 − Q1, Q3 = 9-month − H1) — that's a different, not-yet-built
+  piece of analysis-layer work. Until then, `ratios.free_cash_flow` is
+  sparse — often majority-`None` — for companies that report cash flow
+  this way.
+
 - **`market.py` depends on yfinance, an unofficial API.** yfinance scrapes
   Yahoo Finance rather than calling a supported, licensed API — it can
   break without warning whenever Yahoo changes something on their end, and
