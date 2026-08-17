@@ -113,3 +113,34 @@
   a check that walks the trace `run_agent` returns and verifies every numeric figure in
   `final_answer` traces back to a value that actually appears in one of that run's
   `tool_calls[].tool_result` payloads, flagging (or blocking) anything that doesn't.
+
+- **Rolling/shift windows in `trends.py` and `ratios.py` are positional, not calendar-aware.**
+  `trends.trailing_stats` (`.rolling(window)`) and `ratios._growth`/`ratios._ttm`
+  (`.shift(lag)` / `.rolling(4)`) all operate on row position within whatever series or
+  statement they're given — "8 trailing periods" means 8 rows back, not 8 calendar quarters.
+  This is safe only when every `period_end` in the requested cadence is actually present as a
+  row. It breaks in at least one confirmed, non-hypothetical way: a fiscal-calendar transition
+  produces a stub period that `concepts._classify_period_length` buckets as `"other"` (not
+  `"quarterly"`/`"annual"`), which `get_concept`'s `period_length` filter then drops entirely —
+  so that period_end never appears as a row in `get_statement`'s output, and a rolling/shift
+  window that spans it silently treats two non-adjacent periods as adjacent. `trends.py` makes
+  this worse by calling `.dropna()` before windowing (in `growth_anomalies` and any caller doing
+  `stmt.set_index("period_end")[metric].dropna()`), which additionally collapses any column with
+  real reporting gaps — `operating_cash_flow`/`capex` are the concrete case already documented
+  above (majority-`None` for companies that file cash flow as YTD-only). Fixing this properly
+  means either asserting the window's `period_end` span matches its row count (and refusing like
+  `statements._derive_q4` does on a tiling check) or switching to a calendar-aware rolling join
+  keyed on `period_end` deltas rather than row position — not yet done anywhere in the codebase.
+
+- **`agent/tools.py`'s `get_ratios` provenance attachment is positional, not joined on
+  `period_end`.** It does `zip(stmt.itertuples(), ratio_df.itertuples())` to pair each ratio
+  row with the statement row it draws tag/filed/is_derived provenance from. This is correct
+  today only because every function in `ratios.py` builds its result via the shared
+  `_ratio_frame` helper, which copies `stmt["period_end"]` and `stmt.index` directly — same
+  length, same order, same rows, by construction. Nothing enforces that invariant at the
+  `tools.py` call site, though: a future ratio function that filters or reorders rows (e.g. one
+  that only returns periods where the underlying computation is meaningful) would silently
+  misattribute provenance to the wrong period, with no error to catch it. Joining on
+  `period_end` explicitly instead of trusting position would make that class of bug structurally
+  impossible; worth doing before any new ratio function is added that doesn't go through
+  `_ratio_frame` unchanged.

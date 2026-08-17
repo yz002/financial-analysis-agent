@@ -13,6 +13,8 @@ on hit, and a full call-by-call trace returned to the caller for Phase 5
 and awkward to guarantee through the tool runner's internals.
 """
 
+import json
+
 import anthropic
 
 from . import tools
@@ -123,12 +125,31 @@ def run_agent(
 
         tool_results = []
         for block in tool_use_blocks:
-            try:
-                result_text = tools.execute_tool(block.name, block.input)
-                is_error = False
-            except Exception as e:  # noqa: BLE001 -- surfaced to the model as a tool error, not raised
-                result_text = f"Tool {block.name!r} failed: {e}"
+            # Checked up front (rather than relying on the KeyError execute_tool raises for an
+            # unknown name) so that case gets its own error_type instead of being indistinguishable
+            # from a genuine crash inside a tool function -- both used to surface as the same bare
+            # string here, invisible to the error_type branching the system prompt asks for.
+            if block.name not in tools.TOOL_NAMES:
+                result_text = json.dumps(
+                    {
+                        "error_type": "invalid_input",
+                        "error": f"Unknown tool {block.name!r}; valid tools: {sorted(tools.TOOL_NAMES)}",
+                    }
+                )
                 is_error = True
+            else:
+                try:
+                    result_text = tools.execute_tool(block.name, block.input)
+                    is_error = False
+                except Exception as e:  # noqa: BLE001 -- a bug in the tool, not evidence data is missing
+                    result_text = json.dumps(
+                        {
+                            "error_type": "source_error",
+                            "error": f"Tool {block.name!r} crashed unexpectedly: {e}",
+                            "tool_input": block.input,
+                        }
+                    )
+                    is_error = True
 
             trace_calls.append(
                 {

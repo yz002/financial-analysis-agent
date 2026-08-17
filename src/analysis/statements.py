@@ -223,10 +223,15 @@ def _derive_q4(qtr_df: pd.DataFrame, ann_df: pd.DataFrame) -> pd.DataFrame:
     (see module docstring). Returns only the successfully-derived rows, in
     the same shape as a get_concept duration result plus "is_derived".
     """
+    tol = pd.Timedelta(days=_TILE_TOLERANCE_DAYS)
     rows = []
     for fy in ann_df.itertuples():
+        # Same tolerance _quarters_tile_fiscal_year uses on q1.period_start vs fy_start below --
+        # a strict >= here would silently drop a Q1 that starts a day or two before fy_start
+        # (a real EDGAR reporting quirk; see _dedupe_by_period_end's docstring) before the tiling
+        # check ever runs, undercounting candidates and skipping a derivation it would have accepted.
         candidates = qtr_df[
-            (qtr_df["period_start"] >= fy.period_start) & (qtr_df["period_end"] <= fy.period_end)
+            (qtr_df["period_start"] >= fy.period_start - tol) & (qtr_df["period_end"] <= fy.period_end)
         ].sort_values("period_start")
 
         if len(candidates) != 3:

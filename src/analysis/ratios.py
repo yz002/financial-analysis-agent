@@ -126,20 +126,56 @@ def current_ratio(stmt: pd.DataFrame) -> pd.DataFrame:
     return _ratio(stmt, "current_assets", "current_liabilities")
 
 
-def roa(stmt: pd.DataFrame) -> pd.DataFrame:
+def _ttm(series: pd.Series) -> pd.Series:
     """
-    net_income / total_assets, per period. net_income is a period (duration)
-    figure while total_assets is a point-in-time (instant) figure; this
-    uses the period's ending balance as the denominator rather than an
-    average of beginning/ending balances -- a documented simplification,
-    not a bug.
+    Trailing-twelve-month sum: the current row plus the 3 immediately
+    preceding it. NaN until 4 real rows are available (min_periods=4, no
+    partial-window sum) -- consistent with _growth's "not enough history
+    yet -> None" convention rather than understating an incomplete window.
+    Like _growth's shift(lag), this is positional over stmt's rows, not
+    calendar-aware -- see NOTES.md for when a reporting gap can make that
+    misalign with real calendar quarters.
     """
-    return _ratio(stmt, "net_income", "total_assets")
+    return series.rolling(4, min_periods=4).sum()
 
 
-def roe(stmt: pd.DataFrame) -> pd.DataFrame:
+def _return_ratio(stmt: pd.DataFrame, denominator_col: str, period_length: str) -> pd.DataFrame:
+    """Shared by roa/roe -- see their docstrings for the numerator/denominator handling."""
+    if period_length == "quarterly":
+        numerator, numerator_col = _ttm(stmt["net_income"]), "net_income_ttm"
+    elif period_length == "annual":
+        numerator, numerator_col = stmt["net_income"], "net_income"
+    else:
+        raise ValueError('period_length must be "quarterly" or "annual"')
+    denominator = stmt[denominator_col]
+    values = [_safe_divide(n, d) for n, d in zip(numerator, denominator)]
+    return _ratio_frame(stmt, values, {numerator_col: numerator, denominator_col: denominator})
+
+
+def roa(stmt: pd.DataFrame, period_length: str = "quarterly") -> pd.DataFrame:
     """
-    net_income / stockholders_equity, per period. Same ending-balance
-    simplification as roa (see its docstring).
+    Return on assets: net_income / total_assets, annualized. On a
+    quarterly-cadence `stmt` (period_length="quarterly", the default --
+    matching this module's assumed-cadence convention elsewhere, e.g.
+    revenue_growth_qoq), net_income is the trailing-twelve-month sum
+    (current quarter plus the prior 3, see _ttm) rather than the single
+    quarter's figure: dividing one quarter's net_income by a full-year-scale
+    total_assets understates ROA by roughly 4x versus any published
+    (annualized) figure. The first 3 rows of a quarterly `stmt` have no
+    full trailing window yet, so their value is None. On
+    period_length="annual", net_income is already a full fiscal year and
+    is used as-is, unmodified. total_assets is always the period's ending
+    balance rather than a beginning/ending average -- a documented
+    simplification, not a bug. Raises ValueError for any other
+    period_length.
     """
-    return _ratio(stmt, "net_income", "stockholders_equity")
+    return _return_ratio(stmt, "total_assets", period_length)
+
+
+def roe(stmt: pd.DataFrame, period_length: str = "quarterly") -> pd.DataFrame:
+    """
+    Return on equity: net_income / stockholders_equity, annualized. Same
+    trailing-twelve-month numerator and ending-balance denominator
+    handling as roa (see its docstring).
+    """
+    return _return_ratio(stmt, "stockholders_equity", period_length)

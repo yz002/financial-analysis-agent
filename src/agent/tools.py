@@ -32,6 +32,16 @@ from ..data.market import (
 )
 
 DEFAULT_PERIODS = 8
+# Bounds get_financial_statement/get_ratios payload size when periods is null (or a caller
+# passes an oversized value) -- get_statement's own `periods` truncation happens after full-
+# history Q4 derivation (see statements.py), so capping the request doesn't affect correctness,
+# only how much of the tail gets returned. 40 quarters is ~10 years -- plenty for trend analysis
+# -- and a full KO-style history (71 quarters) would otherwise run ~110KB/~27K tokens per call,
+# resent on every subsequent turn of the agent loop.
+MAX_PERIODS = 40
+# Trading days beyond which get_price_history_tool downsamples to weekly bars instead of
+# returning one row per day.
+MAX_DAILY_PRICE_ROWS = 120
 ALL_CONCEPTS = DURATION_CONCEPTS + INSTANT_CONCEPTS
 
 # ratio name -> (function, [statement concept columns it's computed from]).
@@ -88,6 +98,18 @@ def _error(ticker: str, error_type: str, message: str, **extra) -> str:
     return json.dumps({"ticker": ticker, "error_type": error_type, "error": message, **extra})
 
 
+def _cap_periods(periods: int | None) -> tuple[int, bool]:
+    """
+    Clamp a requested `periods` (None means "full history") to MAX_PERIODS.
+    Returns (effective_periods, was_capped) -- was_capped reflects that the
+    *request* asked for more than the cap, not whether the ticker actually
+    had more periods than that on file.
+    """
+    if periods is None or periods > MAX_PERIODS:
+        return MAX_PERIODS, True
+    return periods, False
+
+
 def _get_statement_or_error(ticker: str, period_length: str, periods: int | None):
     """
     get_statement, converted into a (stmt, error_json) pair so every tool
@@ -120,15 +142,25 @@ def get_financial_statement(
     source tag, filing date, and (for duration concepts) whether it was
     derived. A concept with zero usable data for this ticker is listed in
     "concepts_unavailable" with a plain-English note, and every one of its
-    per-period values is null rather than silently missing.
+    per-period values is null rather than silently missing. `periods`
+    (including null, meaning "full history") is capped at MAX_PERIODS
+    periods to bound response size -- pass a smaller `periods` and repeat
+    the call to page through a longer history.
     """
     ticker = ticker.upper()
-    stmt, error = _get_statement_or_error(ticker, period_length, periods)
+    effective_periods, capped = _cap_periods(periods)
+    stmt, error = _get_statement_or_error(ticker, period_length, effective_periods)
     if error is not None:
         return error
 
     unavailable = [c for c in ALL_CONCEPTS if stmt[c].isna().all()]
     notes = [_unavailable_note(c, ticker) for c in unavailable]
+    if capped:
+        notes.append(
+            f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
+            f"(requested periods={periods!r}). Call again with a smaller `periods` for a "
+            "narrower, uncapped window."
+        )
 
     periods_out = []
     for row in stmt.itertuples():
@@ -174,7 +206,9 @@ def get_ratios(
     value, the raw inputs, and provenance (tag/filed/is_derived) for every
     concept the ratio is built from. A ratio that can't be computed because
     an input concept isn't reported for this ticker still appears -- its
-    values are null and a note in "notes" explains why.
+    values are null and a note in "notes" explains why. `periods`
+    (including null, meaning "full history") is capped at MAX_PERIODS
+    periods to bound response size.
     """
     ticker = ticker.upper()
     if ratio_names is None:
@@ -185,11 +219,18 @@ def get_ratios(
             ticker, "invalid_input", f"Unknown ratio name(s) {unknown}; valid names: {sorted(RATIOS)}"
         )
 
-    stmt, error = _get_statement_or_error(ticker, period_length, periods)
+    effective_periods, capped = _cap_periods(periods)
+    stmt, error = _get_statement_or_error(ticker, period_length, effective_periods)
     if error is not None:
         return error
 
     notes = []
+    if capped:
+        notes.append(
+            f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
+            f"(requested periods={periods!r}). Call again with a smaller `periods` for a "
+            "narrower, uncapped window."
+        )
     ratios_out = {}
     for name in ratio_names:
         func, concept_cols = RATIOS[name]
@@ -199,7 +240,21 @@ def get_ratios(
                 if note not in notes:
                     notes.append(note)
 
-        ratio_df = func(stmt)
+        if name in ("roa", "roe"):
+            ratio_df = func(stmt, period_length=period_length)
+            if period_length == "quarterly":
+                note = (
+                    f"{name} uses trailing-twelve-month net_income (current quarter + prior 3, "
+                    "field 'net_income_ttm' in inputs below) rather than the single quarter's "
+                    "figure, so it's comparable to a published annual ROA/ROE. Its "
+                    "'net_income' provenance below is for the current quarter's contributing "
+                    "filing only, not all four summed quarters. The first 3 periods have no "
+                    "full trailing window yet, so their value is null."
+                )
+                if note not in notes:
+                    notes.append(note)
+        else:
+            ratio_df = func(stmt)
         rows = []
         for srow, rrow in zip(stmt.itertuples(), ratio_df.itertuples()):
             inputs = {
@@ -356,8 +411,12 @@ def detect_anomalies(
 
 def get_price_history_tool(ticker: str, start: str | None = None, end: str | None = None) -> str:
     """
-    Return daily split/dividend-adjusted OHLCV price history for `ticker`
+    Return split/dividend-adjusted OHLCV price history for `ticker`
     (default: the trailing 90 days) via Yahoo Finance, as a JSON string.
+    Daily bars beyond MAX_DAILY_PRICE_ROWS trading days are downsampled to
+    weekly bars (Open=first, High=max, Low=min, Close=last, Volume=summed)
+    to bound response size -- a long requested range no longer means
+    dumping one row per day for years of history.
     """
     ticker = ticker.upper()
     if start is None:
@@ -372,6 +431,13 @@ def get_price_history_tool(ticker: str, start: str | None = None, end: str | Non
             ticker, "source_error", f"Price history lookup failed for {ticker}: {e}", start=start, end=end
         )
 
+    resolution = "daily"
+    if len(df) > MAX_DAILY_PRICE_ROWS:
+        df = df.resample("W").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        ).dropna(how="all")
+        resolution = "weekly"
+
     prices = [
         {
             "date": _iso(idx),
@@ -384,12 +450,20 @@ def get_price_history_tool(ticker: str, start: str | None = None, end: str | Non
         for idx, row in df.iterrows()
     ]
 
+    note = "Split/dividend-adjusted OHLCV via Yahoo Finance (yfinance); not SEC-filed data."
+    if resolution == "weekly":
+        note += (
+            f" Downsampled to weekly bars because the range exceeded {MAX_DAILY_PRICE_ROWS} "
+            "trading days; pass a narrower start/end for daily granularity."
+        )
+
     result = {
         "ticker": ticker,
         "start": start,
         "end": end,
-        "note": "Split/dividend-adjusted daily OHLCV via Yahoo Finance (yfinance); not SEC-filed data.",
-        "days_returned": len(prices),
+        "resolution": resolution,
+        "note": note,
+        "rows_returned": len(prices),
         "prices": prices,
     }
     return json.dumps(result, indent=2)
@@ -420,8 +494,9 @@ TOOL_DEFINITIONS = [
                 "periods": {
                     "type": ["integer", "null"],
                     "description": (
-                        f"Most recent N periods to return. Defaults to {DEFAULT_PERIODS}. "
-                        "Pass null for full available history."
+                        f"Most recent N periods to return. Defaults to {DEFAULT_PERIODS}. Pass "
+                        f"null for the longest available history, capped at {MAX_PERIODS} most "
+                        "recent periods to bound response size."
                     ),
                 },
             },
@@ -457,7 +532,8 @@ TOOL_DEFINITIONS = [
                     "type": ["integer", "null"],
                     "description": (
                         f"Most recent N periods. Defaults to {DEFAULT_PERIODS}. Pass null for "
-                        "full available history."
+                        f"the longest available history, capped at {MAX_PERIODS} most recent "
+                        "periods to bound response size."
                     ),
                 },
             },
@@ -530,8 +606,9 @@ TOOL_DEFINITIONS = [
     {
         "name": "get_price_history",
         "description": (
-            "Get daily split/dividend-adjusted OHLCV price history for a ticker, via Yahoo "
-            "Finance."
+            f"Get split/dividend-adjusted OHLCV price history for a ticker, via Yahoo Finance. "
+            f"Daily bars beyond {MAX_DAILY_PRICE_ROWS} trading days are downsampled to weekly "
+            "bars to bound response size -- check the result's \"resolution\" field."
         ),
         "input_schema": {
             "type": "object",
@@ -556,12 +633,18 @@ _TOOL_FUNCTIONS = {
     "get_price_history": get_price_history_tool,
 }
 
+# Public so agent.py can check a tool name is known *before* calling execute_tool -- that lets
+# it classify "unknown tool" as invalid_input up front, rather than relying on catching the
+# KeyError execute_tool raises for it (which would be indistinguishable from a KeyError raised
+# by an actual bug inside a tool function).
+TOOL_NAMES = frozenset(_TOOL_FUNCTIONS)
+
 
 def execute_tool(name: str, tool_input: dict) -> str:
     """
     Dispatch a tool call by name to its implementation, returning the
     already-JSON-serialized result string. Raises KeyError for an unknown
-    tool name -- the agent loop catches that and surfaces it as a tool
-    error result rather than raising through to the caller.
+    tool name -- callers that haven't already checked `name in TOOL_NAMES`
+    should expect that.
     """
     return _TOOL_FUNCTIONS[name](**tool_input)
