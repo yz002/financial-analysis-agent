@@ -86,7 +86,7 @@ Answer + charts + sources
 - [ ] Phase 2 — Analysis layer
   - [x] Statements, ratios, growth, and anomaly detection (deterministic Python, source-attributed)
   - [ ] Forecasting
-- [ ] Phase 3 — Agent layer (tool calling, reasoning loop)
+- [x] Phase 3 — Agent layer (tool calling, reasoning loop)
 - [ ] Phase 4 — Guardrails (source grounding, consistency checks)
 - [ ] Phase 5 — Streamlit interface
 - [ ] Phase 6 — Evaluation harness

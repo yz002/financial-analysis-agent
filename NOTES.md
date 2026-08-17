@@ -103,3 +103,13 @@
   project — it's free and requires no API key — but it isn't a dependable
   production data source. A real deployment would use a licensed market
   data vendor instead.
+
+- **The no-arithmetic constraint on the agent layer is enforced only by the system prompt,
+  with no verification.** `src/agent/agent.py`'s system prompt tells the model never to
+  compute, estimate, or recall a figure from its own knowledge — every number must come from
+  a tool result — but nothing in the current code checks that this actually held for a given
+  answer. A model that ignores the instruction (does arithmetic in its head, or restates a
+  number with a transcription error) would currently go undetected. Phase 4 (guardrails) needs
+  a check that walks the trace `run_agent` returns and verifies every numeric figure in
+  `final_answer` traces back to a value that actually appears in one of that run's
+  `tool_calls[].tool_result` payloads, flagging (or blocking) anything that doesn't.
