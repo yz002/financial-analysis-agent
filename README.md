@@ -51,6 +51,8 @@ These are the questions the agent needs to answer correctly. They double as the 
 - **Microsoft** — clean, predictable financials. Baseline case.
 - **Nvidia** — high growth and volatile. Stresses trend logic.
 - **Ford** — different sector, capital-intensive, messier. Stresses generalization.
+- **Coca-Cola** — mature, seasonal consumer staple; pre-2018 revenue is tagged under a different
+  XBRL tag (`SalesRevenueGoodsNet`), stressing tag-fallback logic.
 
 ## Architecture
 
@@ -94,7 +96,7 @@ Answer + charts + sources
 
 ## Stack
 
-Python · SEC EDGAR API · pandas · scikit-learn · Streamlit · Anthropic API
+Python · SEC EDGAR API · pandas · Streamlit · Anthropic API
 
 ## Notes on how this was built
 

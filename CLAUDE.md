@@ -31,12 +31,15 @@ with sources attached. Not an investment advisor — it reports and analyzes; th
 
 ## Commands
 
-Tests: `pytest` from the repo root (`tests/`, config in `pytest.ini`). Runs fully offline against
-EDGAR data already cached under `data/cache/` for MSFT, NVDA, and Ford — the three companies
-`tests/conftest.py`'s fixtures are built around (Ford deliberately, since it has no `gross_profit`
-data at all and exercises the graceful-degradation paths). Run a single file/test with
-`pytest tests/test_ratios.py` or `pytest tests/test_ratios.py::test_name`. No linter or build
-tooling is set up yet (`evals/` and `notebooks/` are currently empty placeholders).
+Tests: `pytest` from the repo root (`tests/`, config in `pytest.ini`). Runs offline once
+`data/cache/` is warm for MSFT, NVDA, and Ford — the three companies `tests/conftest.py`'s
+fixtures are built around (Ford deliberately, since it has no `gross_profit` data at all and
+exercises the graceful-degradation paths). `data/cache/` is gitignored, though, so a fresh
+clone's *first* `pytest` run makes live requests to SEC EDGAR to populate it (needs network
+access and a valid `SEC_USER_AGENT`) — only subsequent runs are actually offline. Run a single
+file/test with `pytest tests/test_ratios.py` or `pytest tests/test_ratios.py::test_name`. No
+linter or build tooling is set up yet (`evals/` and `notebooks/` are currently empty
+placeholders).
 
 Modules other than tests have no `__main__` entry points — exercise them by importing functions in
 a Python session or a one-liner, e.g.:
@@ -67,8 +70,8 @@ Guardrails       — source attribution, consistency checks, uncertainty flags
 Answer + charts + sources                                              (src/app/ — Streamlit)
 ```
 
-The data and analysis layers (`src/data/`, `src/analysis/`) are built; `agent/` and `app/` are
-still empty packages awaiting Phase 3+ (see README.md roadmap).
+The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`) are built;
+`app/` is still an empty package awaiting Phase 5 (see README.md roadmap).
 
 ### Data layer (`src/data/`)
 
@@ -139,6 +142,36 @@ still empty packages awaiting Phase 3+ (see README.md roadmap).
   and only a break from it is. Read the module docstring before adding a new caller — it's
   explicit about which of two different questions each function answers.
 
+### Agent layer (`src/agent/`)
+
+- **`tools.py`** — wraps the data/analysis layers as 5 coarse-grained Claude tool definitions
+  (`get_financial_statement`, `get_ratios`, `get_market_data`, `detect_anomalies`,
+  `get_price_history`). Every tool returns a JSON string, never a raw DataFrame, and every value
+  carries provenance (source tag, filed date, `is_derived`) so the model can cite it. Absence is
+  always legible — a concept a company doesn't report (e.g. Ford's `gross_profit`) comes back
+  `null` with a plain-English note, never an empty frame or a silent omission. Errors carry a
+  typed `error_type` (`data_unavailable` — a fact to relay, e.g. nothing reported or an
+  unrecognized ticker; `source_error` — the underlying EDGAR/market request itself failed, not
+  evidence the data doesn't exist; `invalid_input` — the tool call was malformed) via the shared
+  `_get_statement_or_error`/`_error` helpers, so a network failure can't be mistaken for "not
+  reported." `get_financial_statement`/`get_ratios` cap at `MAX_PERIODS` (40) periods even for
+  `periods=null`, and `get_price_history` downsamples to weekly bars past `MAX_DAILY_PRICE_ROWS`
+  (120) trading days, to bound how much a single tool result can inflate the agent loop's
+  resent-every-turn message history. `roa`/`roe` default to a trailing-twelve-month `net_income`
+  numerator on a quarterly-cadence statement (see `ratios.py`), not the single quarter's figure,
+  so they're comparable to a published annual ROA/ROE rather than roughly a quarter of it.
+- **`agent.py`** — `run_agent(question, ...)`: a manual tool-calling loop against the Claude API
+  (not the SDK's beta `tool_runner`), chosen deliberately for a hard iteration cap
+  (`DEFAULT_MAX_ITERATIONS = 8`) with a legible note rather than a silent failure when hit, and a
+  full call-by-call trace returned for Phase 5 (display) and Phase 6 (eval) to consume. The
+  system prompt states this project's core constraint explicitly and goes further than "don't
+  invent numbers": no arithmetic of the model's own on tool-returned numbers *at all*, including
+  a forecast/projection framed as "illustrative math on filed figures" — there's no forecasting
+  tool, so a forecast question must be declined, not hand-computed. The prompt also tells the
+  model how to react to each `error_type` from `tools.py` (relay `data_unavailable`, report
+  `source_error` as a failed lookup rather than working around it, fix the call on
+  `invalid_input`).
+
 ## Known limitations (see NOTES.md for full detail)
 
 - EDGAR cache (`data/cache/`) has no expiration — delete stale entries manually if needed.
@@ -152,3 +185,15 @@ still empty packages awaiting Phase 3+ (see README.md roadmap).
   before vectorized numeric ops.
 - `market.py`/yfinance is not a dependable long-term data source; a production system would
   swap in a licensed market data vendor.
+- `operating_cash_flow`/`capex` are commonly filed as fiscal-year-to-date cumulative figures
+  rather than discrete quarters, so `ratios.free_cash_flow` is often majority-`None` for
+  companies that report cash flow this way.
+- The agent layer's no-arithmetic constraint (`src/agent/agent.py`'s system prompt) is enforced
+  by instruction only, with no automated check that a given answer's figures actually trace back
+  to a tool result.
+- `trends.py`'s rolling windows and `ratios.py`'s `shift`/`_ttm` windows are positional (row-based),
+  not calendar-aware — a dropped or gapped period (e.g. a fiscal-calendar stub period) can make
+  an "N-period" window silently span more calendar time than intended.
+- `agent/tools.py`'s `get_ratios` attaches provenance to ratio rows positionally (`zip`), not
+  joined on `period_end` — correct today only because every `ratios.py` function preserves row
+  order and count.
