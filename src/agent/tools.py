@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from ..analysis import forecast as forecast_mod
 from ..analysis import ratios as ratios_mod
 from ..analysis.statements import DURATION_CONCEPTS, INSTANT_CONCEPTS, get_statement
 from ..analysis.trends import detect_anomalies as _detect_anomalies_raw
@@ -42,6 +43,9 @@ MAX_PERIODS = 40
 # Trading days beyond which get_price_history_tool downsamples to weekly bars instead of
 # returning one row per day.
 MAX_DAILY_PRICE_ROWS = 120
+# A naive linear/growth/seasonal projection gets less trustworthy the further out it runs --
+# this bounds how far forecast_metric_tool will project regardless of what a caller requests.
+MAX_FORECAST_PERIODS_AHEAD = 8
 ALL_CONCEPTS = DURATION_CONCEPTS + INSTANT_CONCEPTS
 
 # ratio name -> (function, [statement concept columns it's computed from]).
@@ -409,6 +413,88 @@ def detect_anomalies(
     return json.dumps(result, indent=2)
 
 
+def forecast_metric_tool(
+    ticker: str,
+    column: str,
+    periods_ahead: int = 2,
+    method: str = "trend",
+    period_length: str = "quarterly",
+    lookback: int | None = None,
+) -> str:
+    """
+    Project a statement concept `periods_ahead` periods into the future via
+    src.analysis.forecast.forecast_metric -- the only source of a forward-
+    looking number in this codebase (see CLAUDE.md: the model itself never
+    computes or estimates a figure). Every successful result carries the
+    method's fitted assumptions (slope/growth rate, historical periods
+    used, fit quality, seasonal factors where relevant) in "assumptions",
+    which must be relayed alongside any projected value -- these are not
+    filed figures. When there isn't enough usable history, a gap in the
+    period sequence, or a fit too poor to trust, "forecast_available" is
+    false with a plain-English "reason" instead of a guessed number.
+    """
+    ticker = ticker.upper()
+    if column not in ALL_CONCEPTS:
+        return _error(
+            ticker, "invalid_input", f"Unknown column {column!r}; valid columns: {sorted(ALL_CONCEPTS)}"
+        )
+    if method not in forecast_mod.METHODS:
+        return _error(
+            ticker, "invalid_input", f"Unknown method {method!r}; valid methods: {sorted(forecast_mod.METHODS)}"
+        )
+    if not (1 <= periods_ahead <= MAX_FORECAST_PERIODS_AHEAD):
+        return _error(
+            ticker,
+            "invalid_input",
+            f"periods_ahead must be between 1 and {MAX_FORECAST_PERIODS_AHEAD}, got {periods_ahead}",
+        )
+
+    stmt, error = _get_statement_or_error(ticker, period_length, MAX_PERIODS)
+    if error is not None:
+        return error
+
+    if stmt[column].isna().all():
+        return _error(ticker, "data_unavailable", _unavailable_note(column, ticker), column=column)
+
+    try:
+        result_df = forecast_mod.forecast_metric(
+            stmt, column, periods_ahead=periods_ahead, method=method, lookback=lookback
+        )
+    except ValueError as e:
+        return _error(ticker, "invalid_input", str(e))
+
+    attrs = result_df.attrs
+    result = {
+        "ticker": ticker,
+        "column": column,
+        "period_length": period_length,
+        "method": method,
+        "periods_ahead": periods_ahead,
+        "historical_periods_used": attrs["historical_periods_used"],
+        "forecast_available": not attrs["refused"],
+    }
+    if attrs["refused"]:
+        result["reason"] = attrs["reason"]
+        result["projections"] = []
+    else:
+        result["assumptions"] = attrs["assumptions"]
+        result["note"] = (
+            "This is a projection computed deterministically from the assumptions above, not "
+            "a filed figure or a prediction -- always state the method and assumptions when "
+            "relaying a projected value."
+        )
+        result["projections"] = [
+            {
+                "period_end": _iso(row.period_end),
+                "value": _num(row.value),
+                "lower": _num(row.lower),
+                "upper": _num(row.upper),
+            }
+            for row in result_df.itertuples()
+        ]
+    return json.dumps(result, indent=2)
+
+
 def get_price_history_tool(ticker: str, start: str | None = None, end: str | None = None) -> str:
     """
     Return split/dividend-adjusted OHLCV price history for `ticker`
@@ -604,6 +690,58 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "forecast_metric",
+        "description": (
+            "Project a statement concept (e.g. revenue, net_income) forward using a "
+            "deterministic model -- the only way to get a forward-looking figure from this "
+            "system; there is no other forecasting capability. method='trend' fits a linear "
+            "regression on recent history; method='growth' compounds the average recent "
+            "period-over-period growth rate; method='seasonal' adds a fiscal-quarter seasonal "
+            "adjustment on top of the trend (needs at least 8 quarters of quarterly-cadence "
+            "history). Every result carries the fitted assumptions (slope or growth rate, how "
+            "many historical periods were used, fit quality, seasonal factors) that must be "
+            "relayed alongside any projected value. Refuses -- forecast_available=false with a "
+            "plain-English reason -- rather than guess, when there isn't enough history, a gap "
+            "in the period sequence, or a fit too poor to trust."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "column": {
+                    "type": "string",
+                    "enum": sorted(ALL_CONCEPTS),
+                    "description": "Which statement concept to project.",
+                },
+                "periods_ahead": {
+                    "type": "integer",
+                    "description": (
+                        f"How many future periods to project, 1-{MAX_FORECAST_PERIODS_AHEAD}. "
+                        "Defaults to 2."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "enum": list(forecast_mod.METHODS),
+                    "description": "Defaults to 'trend'.",
+                },
+                "period_length": {
+                    "type": "string",
+                    "enum": ["quarterly", "annual"],
+                    "description": "Defaults to 'quarterly'.",
+                },
+                "lookback": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "How many of the most recent historical periods to fit on. Defaults to "
+                        "8, capped by however much history is actually available."
+                    ),
+                },
+            },
+            "required": ["ticker", "column"],
+        },
+    },
+    {
         "name": "get_price_history",
         "description": (
             f"Get split/dividend-adjusted OHLCV price history for a ticker, via Yahoo Finance. "
@@ -630,6 +768,7 @@ _TOOL_FUNCTIONS = {
     "get_ratios": get_ratios,
     "get_market_data": get_market_data,
     "detect_anomalies": detect_anomalies,
+    "forecast_metric": forecast_metric_tool,
     "get_price_history": get_price_history_tool,
 }
 

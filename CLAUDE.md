@@ -141,13 +141,29 @@ The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`
   runs it on period-over-period growth rates instead, so a *consistent* growth rate isn't flagged
   and only a break from it is. Read the module docstring before adding a new caller — it's
   explicit about which of two different questions each function answers.
+- **`forecast.py`** — `forecast_metric(stmt, column, periods_ahead, method, lookback)`: the only
+  place in the codebase that produces a number the company hasn't filed yet, which is why the
+  agent calls it as a tool rather than ever projecting a value itself. Three methods: `"trend"`
+  (OLS on the last `lookback` periods), `"growth"` (average period-over-period growth rate,
+  compounded forward), `"seasonal"` (the trend plus a fiscal-quarter seasonal offset, needing at
+  least 8 quarters — bucketed by row position modulo 4, not calendar month, since
+  `get_statement`'s output has no `fiscal_period` to key on and many companies' fiscal quarters
+  don't align to calendar ones anyway). Every returned row carries its assumptions (fitted
+  slope/growth rate, historical periods used, R²/growth-rate std, seasonal factors) in
+  `df.attrs["assumptions"]`, not just the docstring, so a caller has something concrete to relay.
+  Refuses (`df.attrs["refused"] = True` plus a `reason`) rather than guess when there's not enough
+  history, a gap in `period_end` (see NOTES.md's positional-window caveat — this module guards
+  against it explicitly instead of inheriting the bug), or a fit too poor to trust; raises
+  `ValueError` only for structurally malformed input (unknown method/column, non-positive
+  `periods_ahead`/`lookback`).
 
 ### Agent layer (`src/agent/`)
 
-- **`tools.py`** — wraps the data/analysis layers as 5 coarse-grained Claude tool definitions
+- **`tools.py`** — wraps the data/analysis layers as 6 coarse-grained Claude tool definitions
   (`get_financial_statement`, `get_ratios`, `get_market_data`, `detect_anomalies`,
-  `get_price_history`). Every tool returns a JSON string, never a raw DataFrame, and every value
-  carries provenance (source tag, filed date, `is_derived`) so the model can cite it. Absence is
+  `forecast_metric`, `get_price_history`). Every tool returns a JSON string, never a raw
+  DataFrame, and every value carries provenance (source tag, filed date, `is_derived`) so the
+  model can cite it. Absence is
   always legible — a concept a company doesn't report (e.g. Ford's `gross_profit`) comes back
   `null` with a plain-English note, never an empty frame or a silent omission. Errors carry a
   typed `error_type` (`data_unavailable` — a fact to relay, e.g. nothing reported or an
@@ -166,8 +182,9 @@ The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`
   full call-by-call trace returned for Phase 5 (display) and Phase 6 (eval) to consume. The
   system prompt states this project's core constraint explicitly and goes further than "don't
   invent numbers": no arithmetic of the model's own on tool-returned numbers *at all*, including
-  a forecast/projection framed as "illustrative math on filed figures" — there's no forecasting
-  tool, so a forecast question must be declined, not hand-computed. The prompt also tells the
+  a forecast/projection framed as "illustrative math on filed figures" — a forecast question must
+  go through the `forecast_metric` tool, with its `assumptions` relayed alongside the projected
+  value, never hand-computed. The prompt also tells the
   model how to react to each `error_type` from `tools.py` (relay `data_unavailable`, report
   `source_error` as a failed lookup rather than working around it, fix the call on
   `invalid_input`).

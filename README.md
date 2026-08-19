@@ -85,9 +85,9 @@ Answer + charts + sources
 - [x] Phase 1 — Data layer
   - [x] EDGAR (ticker resolution, cached HTTP client, financial concept extraction)
   - [x] Market data (price history, quotes, valuation metrics via yfinance)
-- [ ] Phase 2 — Analysis layer
+- [x] Phase 2 — Analysis layer
   - [x] Statements, ratios, growth, and anomaly detection (deterministic Python, source-attributed)
-  - [ ] Forecasting
+  - [x] Forecasting (trend/growth/seasonal, deterministic, assumptions surfaced for the agent to relay)
 - [x] Phase 3 — Agent layer (tool calling, reasoning loop)
 - [ ] Phase 4 — Guardrails (source grounding, consistency checks)
 - [ ] Phase 5 — Streamlit interface
