@@ -17,7 +17,7 @@ import json
 
 import anthropic
 
-from . import tools
+from . import guardrails, tools
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MAX_ITERATIONS = 8
@@ -101,7 +101,9 @@ def run_agent(
 
     Returns a dict: question, tool_calls (each: iteration, tool_name,
     tool_input, tool_result, is_error), final_answer, hit_iteration_cap,
-    iterations_used, stop_reason (of the last model response).
+    iterations_used, stop_reason (of the last model response), figure_check
+    (guardrails.check_figures's report on whether final_answer's numbers
+    trace back to tool_calls -- flags only, never alters final_answer).
     """
     if max_iterations < 1:
         # A configuration error, not a runtime condition -- there's no way to produce even
@@ -193,7 +195,7 @@ def run_agent(
             )
             final_answer = f"{partial}\n\n{note}".strip() if partial else note
 
-    return {
+    result = {
         "question": question,
         "tool_calls": trace_calls,
         "final_answer": final_answer,
@@ -201,3 +203,5 @@ def run_agent(
         "iterations_used": iteration,
         "stop_reason": stop_reason,
     }
+    result["figure_check"] = guardrails.check_figures(result)
+    return result
