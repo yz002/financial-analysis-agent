@@ -32,13 +32,7 @@ callers (ratios.py) never need `hasattr`/`in df.columns` guards.
 
 import pandas as pd
 
-from ..data.concepts import (
-    CONCEPTS,
-    ConceptNotFoundError,
-    _QUARTERLY_DAYS_MAX,
-    _QUARTERLY_DAYS_MIN,
-    get_concept,
-)
+from ..data.concepts import CONCEPTS, ConceptNotFoundError, get_concept
 from ..data.edgar_client import EdgarClient
 
 DURATION_CONCEPTS = [name for name, spec in CONCEPTS.items() if spec["kind"] == "duration"]
@@ -49,6 +43,18 @@ INSTANT_CONCEPTS = [name for name, spec in CONCEPTS.items() if spec["kind"] == "
 # calendars whose quarter boundaries don't fall on the exact same day of
 # the enclosing FY's start/end).
 _TILE_TOLERANCE_DAYS = 3
+
+# Bounds for the *implied* Q4 span (fy_end - q3_end) that _quarters_tile_fiscal_year accepts as a
+# plausible quarter -- deliberately separate from concepts._QUARTERLY_DAYS_MIN/_QUARTERLY_DAYS_MAX
+# (80-100), which classify a *reported* duration fact as quarterly-vs-YTD-vs-other and must stay
+# tight to avoid mistaking a 6-/9-month YTD cash-flow fact for a real quarter (see concepts.py's
+# module docstring and NOTES.md's cash-flow-YTD note). An implied Q4 is never itself a reported
+# fact to misclassify, so it can tolerate a wider range: 52/53-week retail fiscal calendars
+# (Costco confirmed; Walmart/Target/Kroger use the same convention) run Q1-Q3 at ~12 weeks each
+# but let Q4 absorb the leftover week(s), landing Q4 at ~16-17 weeks (111-118 days observed for
+# Costco) -- a real, correct quarter length that the classification-only bounds would wrongly
+# reject.
+_Q4_SPAN_DAYS_MIN, _Q4_SPAN_DAYS_MAX = 80, 125
 
 _ONE_DAY = pd.Timedelta(days=1)
 
@@ -263,10 +269,13 @@ def _quarters_tile_fiscal_year(q1, q2, q3, fy_start, fy_end) -> bool:
     True if q1/q2/q3 (sorted by period_start) are contiguous, non-
     overlapping, and start at fy_start with no gaps beyond
     _TILE_TOLERANCE_DAYS -- and the remaining implied Q4 span
-    (q3.period_end+1 to fy_end) is itself a plausible quarter length.
-    Refusing here is what prevents a missing quarter, a restatement that
-    shifted a period boundary, or a fiscal-calendar change from silently
-    producing a wrong derived Q4 value.
+    (q3.period_end+1 to fy_end) is itself a plausible quarter length, per
+    _Q4_SPAN_DAYS_MIN/_Q4_SPAN_DAYS_MAX (see that constant's comment for why
+    it's wider than concepts.py's classification bounds -- 52/53-week
+    retail fiscal calendars give Q4 a real ~16-17 week span). Refusing here
+    is what prevents a missing quarter, a restatement that shifted a period
+    boundary, or a fiscal-calendar change from silently producing a wrong
+    derived Q4 value.
     """
     tol = pd.Timedelta(days=_TILE_TOLERANCE_DAYS)
 
@@ -278,4 +287,4 @@ def _quarters_tile_fiscal_year(q1, q2, q3, fy_start, fy_end) -> bool:
         return False
 
     implied_q4_days = (fy_end - (q3.period_end + _ONE_DAY)).days
-    return _QUARTERLY_DAYS_MIN <= implied_q4_days <= _QUARTERLY_DAYS_MAX
+    return _Q4_SPAN_DAYS_MIN <= implied_q4_days <= _Q4_SPAN_DAYS_MAX

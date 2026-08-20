@@ -27,6 +27,25 @@
   themselves from the `"FY"` and `"Q1"`/`"Q2"`/`"Q3"` rows of the same
   fiscal year — this is analysis-layer work, not extraction.
 
+- **52/53-week retail fiscal calendars give some companies a genuinely longer Q4 than Q1-Q3.**
+  Costco (confirmed empirically; Walmart, Target, and Kroger are understood to follow the same
+  convention) reports on a 52/53-week fiscal year with roughly 12-week Q1-Q3 quarters, but lets
+  Q4 absorb the leftover week(s) — a real ~16-17 week (111-118 day) quarter, not a data error.
+  `statements._derive_q4`'s tiling check originally reused `concepts._QUARTERLY_DAYS_MIN`/
+  `_QUARTERLY_DAYS_MAX` (80-100 days — tight on purpose, to keep `concepts.py`'s *classification*
+  of a reported duration fact as quarterly-vs-YTD-vs-other from mistaking a 6-/9-month cash-flow
+  fact for a real quarter) to sanity-check the *implied* Q4 span too, which meant it refused to
+  derive Q4 for Costco every single fiscal year in its history — not sporadically, all 18 years —
+  even though Q1/Q2/Q3 tiled the fiscal year perfectly. Fixed by giving the implied-Q4-span check
+  its own, wider bounds (`statements._Q4_SPAN_DAYS_MIN`/`_Q4_SPAN_DAYS_MAX`, 80-125): an implied
+  span is never itself a reported fact that could be confused with a YTD figure, so it can safely
+  tolerate the wider range a retail calendar's Q4 needs. Spot-checked against Costco's own
+  reported numbers: the derived FY2025 Q4 revenue ($86.156B, which includes membership-fee
+  revenue) comes out to 31.3% of FY2025's total filed revenue ($275.235B) — closely matching the
+  16-of-52-weeks (30.8%) a 16-week Q4 should carry, and reconciling with the $84.4B Q4 "net sales"
+  Costco's press release reports once membership fees (which "net sales" excludes but the tracked
+  `revenue` concept includes) are added back in.
+
 - **`fiscal_year`/`fiscal_period` reflect the filing's own attribution, not
   necessarily the period's "true" fiscal year.** When the same period is
   reported again as a comparative column in a later filing, EDGAR's `fy`/
