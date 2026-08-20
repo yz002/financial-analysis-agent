@@ -150,6 +150,14 @@ def get_financial_statement(
     (including null, meaning "full history") is capped at MAX_PERIODS
     periods to bound response size -- pass a smaller `periods` and repeat
     the call to page through a longer history.
+
+    When a fiscal year's Q4 is a real filed fact rather than a synthesized
+    one, its entry may also carry "q4_subtraction_value" (what
+    FY-Q1-Q2-Q3 subtraction would have given for the same year) and
+    "q4_diverges_from_subtraction" (true if the two differ meaningfully) --
+    present only when applicable. A divergence reflects a real vintage
+    mismatch between the fiscal-year total and the quarters (see the
+    "notes" entry when this occurs), not an error in either figure.
     """
     ticker = ticker.upper()
     effective_periods, capped = _cap_periods(periods)
@@ -167,6 +175,7 @@ def get_financial_statement(
         )
 
     periods_out = []
+    any_q4_divergence = False
     for row in stmt.itertuples():
         period = {
             "period_end": _iso(row.period_end),
@@ -184,8 +193,26 @@ def get_financial_statement(
             }
             if concept in DURATION_CONCEPTS:
                 entry["is_derived"] = bool(getattr(row, f"{concept}_is_derived"))
+                q4_subtraction_value = getattr(row, f"{concept}_q4_subtraction_value")
+                if not pd.isna(q4_subtraction_value):
+                    entry["q4_subtraction_value"] = _num(q4_subtraction_value)
+                    diverges = bool(getattr(row, f"{concept}_q4_diverges_from_subtraction"))
+                    entry["q4_diverges_from_subtraction"] = diverges
+                    if diverges:
+                        any_q4_divergence = True
             period[concept] = entry
         periods_out.append(period)
+
+    if any_q4_divergence:
+        notes.append(
+            "Some fiscal years' Q4 figures are directly filed values that differ from what "
+            "Q1+Q2+Q3 subtracted from the fiscal-year total would give (see "
+            "q4_subtraction_value/q4_diverges_from_subtraction on the relevant period). This is "
+            "a real, filed number, not an error -- the divergence typically reflects the "
+            "fiscal-year total being sourced from a later filing's restated comparative column "
+            "under a possibly different tag than the quarters, which are filed together and "
+            "don't get that later refresh."
+        )
 
     result = {
         "ticker": ticker,
@@ -566,7 +593,13 @@ TOOL_DEFINITIONS = [
             "date it was filed, and (for income/cash-flow items) whether it was derived "
             "(synthesized Q4 = FY - Q1 - Q2 - Q3, marked is_derived=true). A concept the "
             "company doesn't report at all (e.g. Ford has no gross_profit) is called out "
-            "explicitly in concepts_unavailable/notes rather than silently omitted."
+            "explicitly in concepts_unavailable/notes rather than silently omitted. When a "
+            "fiscal year's Q4 is instead a real filed fact, its entry may carry "
+            "q4_subtraction_value (what FY-Q1-Q2-Q3 subtraction would have given) and "
+            "q4_diverges_from_subtraction (true if the two differ meaningfully) -- present only "
+            "when applicable; a divergence reflects a real vintage mismatch between the FY "
+            "total and the quarters, not an error, and is also called out in notes when it "
+            "occurs."
         ),
         "input_schema": {
             "type": "object",

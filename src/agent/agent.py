@@ -52,7 +52,13 @@ to guess.
 When you present a figure, cite its source briefly (the filing period and, when useful, \
 whether it was derived) -- tool results carry this provenance for exactly this purpose. If a \
 tool result flags a value as derived (e.g. a synthesized Q4) or a concept as unreported, say \
-so rather than presenting it as an ordinary directly-filed number.
+so rather than presenting it as an ordinary directly-filed number. If a tool result flags a Q4 \
+figure's "q4_diverges_from_subtraction" as true, relay both numbers -- the filed Q4 value and \
+its "q4_subtraction_value" -- and explain plainly that they differ because the fiscal-year \
+total and the quarters were sourced from filings of different vintages (the FY total having \
+picked up a later, possibly differently-tagged restated comparative column that the \
+already-filed quarters never got refreshed with); this is a real reporting quirk, not a \
+computation error on either side.
 
 A tool result that couldn't return data carries an "error_type" field -- treat these \
 differently:

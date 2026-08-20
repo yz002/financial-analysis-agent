@@ -46,6 +46,45 @@
   Costco's press release reports once membership fees (which "net sales" excludes but the tracked
   `revenue` concept includes) are added back in.
 
+- **A real filed Q4 fact and `FY-(Q1+Q2+Q3)` subtraction can genuinely diverge —
+  `_derive_q4` now cross-checks them instead of silently no-op'ing on the 4-candidate case.**
+  An earlier diagnostic sweep's framing — "the pipeline discards a filed Q4 fact and computes a
+  worse subtraction instead" — was **wrong**, and it's worth being explicit about why. When a
+  large-cap's pre-~2021 10-K tags a real, discrete Q4 fact via the (now-discontinued) Item 302
+  "selected quarterly financial data" footnote, `get_concept(period_length="quarterly")` already
+  returns it as an ordinary row — `is_derived=False`, correct tag, correct filed date — via the
+  independent quarterly-fact union in `get_statement`'s duration-concept loop, completely
+  bypassing `_derive_q4`. `_derive_q4`'s refusal on those fiscal years (exactly 4 tiling
+  candidates instead of 3) was a harmless no-op, not data loss: nothing was ever missing or
+  discarded. What this fix actually adds is two things: (a) `_derive_q4` now explicitly
+  recognizes and validates the 4-real-candidate case (`statements._four_quarters_tile_fiscal_year`)
+  instead of silently passing over it, and (b) a genuinely new signal on top — cross-checking the
+  real filed Q4 against what `FY-(Q1+Q2+Q3)` subtraction would give for the same fiscal year
+  (`{concept}_q4_subtraction_value`/`{concept}_q4_diverges_from_subtraction`, tolerance
+  `statements._Q4_RECONCILIATION_TOLERANCE`, 0.5% of the FY total). That cross-check surfaced a
+  real, confirmed phenomenon: the two numbers sometimes disagree by a material amount. Root-caused
+  precisely for Walmart: FY2010 filed Q4 revenue is $112.826B but `FY-(Q1+Q2+Q3)`=$115.779B (diff
+  -$2.95B, ~0.7% of FY revenue); FY2011 diff -$2.90B; FY2017 diff +$4.56B (most other WMT fiscal
+  years agree exactly). The three real quarters and the Q4 footnote figure are filed together,
+  same vintage, same tag (e.g. all four filed 2011-03-30 as `SalesRevenueNet` for FY2010) — but
+  the *annual* FY total's own `filed`/`tag` come from a *later* filing (FY2010's annual total is
+  `filed=2012-03-27`, tag `Revenues`, two years after the quarters), because
+  `_dedupe_by_period_end` independently keeps the latest-filed appearance of each period_end for
+  the quarterly and annual series separately, and the annual total can pick up a later,
+  differently-tagged restated comparative column that the already-filed quarters never get
+  refreshed with. Confirmed independently on Duke Energy (FY2012 diff +$1.71B, FY2014 +$1.42B)
+  and, unexpectedly, on this project's own MSFT test fixture (FY2016 filed Q4 revenue $20.614B vs.
+  subtraction $26.448B, diff -$5.834B, ~6.4% of FY2016 revenue — traced to MSFT's FY2016 annual
+  total being tagged `RevenueFromContractWithCustomerExcludingAssessedTax` from the FY2018 10-K's
+  ASC-606-restated comparative column, filed 2018-08-03, while the FY2016 quarters remain tagged
+  `SalesRevenueNet` from the FY2017 10-K, filed 2017-08-02). A 21-ticker sweep (WMT, TGT, KR, HD,
+  AAPL, GOOGL, AMZN, ORCL, JPM, BAC, BRK-B, CAT, BA, GE, JNJ, PFE, UNH, XOM, CVX, O, DUK) found
+  this new path fires almost as often as the existing subtraction-derivation path for `revenue`
+  alone (137 fiscal-year/concept instances reconciled vs. 155 derived by subtraction), and roughly
+  1 in 5 of the reconciled ones (28 of 137) diverge past the 0.5%-of-FY-total threshold —
+  `q4_diverges_from_subtraction` is a common signal, not a rare edge case. It does not mean either
+  number is wrong, only that they were sourced from filings of different vintages.
+
 - **`fiscal_year`/`fiscal_period` reflect the filing's own attribution, not
   necessarily the period's "true" fiscal year.** When the same period is
   reported again as a comparative column in a later filing, EDGAR's `fy`/

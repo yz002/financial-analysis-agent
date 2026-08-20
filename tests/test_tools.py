@@ -23,7 +23,9 @@ def _make_statement(n_periods, missing=(), start="2020-03-31", filed_tag="SomeTa
     A synthetic statement DataFrame with the same column shape
     statements.get_statement produces: period_end, period_start, and per
     concept in tools.ALL_CONCEPTS: "{concept}", "{concept}_tag",
-    "{concept}_filed", and (duration concepts only) "{concept}_is_derived".
+    "{concept}_filed", and (duration concepts only) "{concept}_is_derived",
+    "{concept}_q4_subtraction_value" (default NaN -- not applicable),
+    "{concept}_q4_diverges_from_subtraction" (default False).
     `missing` concepts get an all-NaN/None column, exactly like a concept
     with zero usable data for a ticker (e.g. Ford's gross_profit).
     """
@@ -45,6 +47,8 @@ def _make_statement(n_periods, missing=(), start="2020-03-31", filed_tag="SomeTa
             ]
         if concept in tools.DURATION_CONCEPTS:
             data[f"{concept}_is_derived"] = [False] * n_periods
+            data[f"{concept}_q4_subtraction_value"] = [float("nan")] * n_periods
+            data[f"{concept}_q4_diverges_from_subtraction"] = [False] * n_periods
 
     return pd.DataFrame(data)
 
@@ -82,6 +86,25 @@ def test_get_financial_statement_shape_and_provenance(monkeypatch):
         entry = period[concept]
         assert entry["tag"] == "SomeTag"
         assert "is_derived" not in entry
+
+
+def test_get_financial_statement_q4_reconciliation_fields(monkeypatch):
+    stmt = _make_statement(4)
+    diverging_idx = stmt.index[-1]
+    stmt.loc[diverging_idx, "revenue_q4_subtraction_value"] = 999.0
+    stmt.loc[diverging_idx, "revenue_q4_diverges_from_subtraction"] = True
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_financial_statement("msft", periods=4))
+
+    diverging_period = result["periods"][-1]
+    assert diverging_period["revenue"]["q4_subtraction_value"] == 999.0
+    assert diverging_period["revenue"]["q4_diverges_from_subtraction"] is True
+
+    non_diverging_period = result["periods"][0]
+    assert "q4_subtraction_value" not in non_diverging_period["revenue"]
+    assert "q4_diverges_from_subtraction" not in non_diverging_period["revenue"]
+
+    assert any("q4_subtraction_value" in n for n in result["notes"])
 
 
 def test_fords_missing_gross_profit_in_concepts_unavailable(monkeypatch):

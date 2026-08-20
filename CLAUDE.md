@@ -34,7 +34,9 @@ with sources attached. Not an investment advisor — it reports and analyzes; th
 Tests: `pytest` from the repo root (`tests/`, config in `pytest.ini`). Runs offline once
 `data/cache/` is warm for MSFT, NVDA, and Ford — the three companies `tests/conftest.py`'s
 fixtures are built around (Ford deliberately, since it has no `gross_profit` data at all and
-exercises the graceful-degradation paths). `data/cache/` is gitignored, though, so a fresh
+exercises the graceful-degradation paths) — plus WMT, called directly rather than via a fixture,
+for `test_statements.py`'s Q4-filed-vs-subtraction reconciliation regression tests.
+`data/cache/` is gitignored, though, so a fresh
 clone's *first* `pytest` run makes live requests to SEC EDGAR to populate it (needs network
 access and a valid `SEC_USER_AGENT`) — only subsequent runs are actually offline. Run a single
 file/test with `pytest tests/test_ratios.py` or `pytest tests/test_ratios.py::test_name`. No
@@ -124,9 +126,19 @@ The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`
   via a companion `{concept}_is_derived` boolean column, and derivation is refused (leaving that
   concept/year absent rather than emitting a wrong number) unless the real Q1/Q2/Q3 periods
   actually tile the fiscal year within a small tolerance; see the module docstring for exactly
-  what's checked and why the check is about period *tiling*, not the arithmetic. Also handles a
-  real EDGAR data quirk found while building this: two duration rows can share the same
-  `period_end` with a one-day-different `period_start` (`_dedupe_by_period_end`; see NOTES.md).
+  what's checked and why the check is about period *tiling*, not the arithmetic. When a real,
+  separately filed Q4 fact exists instead (4 real quarterly candidates tiling the fiscal year —
+  common for large-caps whose pre-~2021 10-Ks tagged a discrete Q4 via the now-discontinued Item
+  302 footnote), that fact is used as-is (`is_derived` stays `False`, nothing is synthesized) and
+  `_derive_q4` instead cross-checks it against what `FY−(Q1+Q2+Q3)` subtraction would have given,
+  recording `{concept}_q4_subtraction_value`/`{concept}_q4_diverges_from_subtraction` — the two
+  can genuinely disagree (confirmed on Walmart, Duke Energy, and this project's own MSFT fixture,
+  by up to ~6-8% of the FY total) because the FY total's own `filed`/`tag` can come from a later,
+  differently-tagged restated comparative filing than the quarters, which are filed together and
+  never get that refresh; see NOTES.md. `is_derived`'s own meaning is unchanged by this — it's a
+  new, additional signal, not a redefinition. Also handles a real EDGAR data quirk found while
+  building this: two duration rows can share the same `period_end` with a one-day-different
+  `period_start` (`_dedupe_by_period_end`; see NOTES.md).
 - **`ratios.py`** — margins, growth (QoQ/YoY), free cash flow, leverage, and returns, each a
   function taking the whole statement DataFrame and returning a DataFrame aligned by `period_end`
   with a `value` column plus the named input columns behind it. `value` columns are `dtype=object`
@@ -163,7 +175,11 @@ The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`
   (`get_financial_statement`, `get_ratios`, `get_market_data`, `detect_anomalies`,
   `forecast_metric`, `get_price_history`). Every tool returns a JSON string, never a raw
   DataFrame, and every value carries provenance (source tag, filed date, `is_derived`) so the
-  model can cite it. Absence is
+  model can cite it. `get_financial_statement` also conditionally carries `q4_subtraction_value`/
+  `q4_diverges_from_subtraction` on a duration concept's entry when that period is a real filed
+  Q4 fact being cross-checked against `FY−(Q1+Q2+Q3)` subtraction (see `statements.py` below) —
+  present only when applicable, with an explanatory note appended when any period diverges.
+  Absence is
   always legible — a concept a company doesn't report (e.g. Ford's `gross_profit`) comes back
   `null` with a plain-English note, never an empty frame or a silent omission. Errors carry a
   typed `error_type` (`data_unavailable` — a fact to relay, e.g. nothing reported or an
