@@ -162,15 +162,54 @@
   production data source. A real deployment would use a licensed market
   data vendor instead.
 
-- **The no-arithmetic constraint on the agent layer is enforced only by the system prompt,
-  with no verification.** `src/agent/agent.py`'s system prompt tells the model never to
-  compute, estimate, or recall a figure from its own knowledge — every number must come from
-  a tool result — but nothing in the current code checks that this actually held for a given
-  answer. A model that ignores the instruction (does arithmetic in its head, or restates a
-  number with a transcription error) would currently go undetected. Phase 4 (guardrails) needs
-  a check that walks the trace `run_agent` returns and verifies every numeric figure in
-  `final_answer` traces back to a value that actually appears in one of that run's
-  `tool_calls[].tool_result` payloads, flagging (or blocking) anything that doesn't.
+- **The no-arithmetic constraint is now structurally checked (`src/agent/guardrails.py`'s
+  `check_figures`, wired into `run_agent`'s returned `figure_check`), but it flags rather than
+  blocks, and a live verification pass against 8 real `run_agent` calls (the README's target
+  questions, `claude-opus-5`) surfaced both real extraction bugs and a genuine limitation worth
+  knowing about before leaning on this check.** First pass: 99 of 453 extracted figures (22%)
+  came back untraced, but nearly all were extraction bugs, not model violations — Claude's own
+  prose doesn't stick to ASCII: negative numbers use a true minus sign (`−`, U+2212, not `-`),
+  and dates use a non-breaking hyphen (`‑`, U+2011, not `-`), so an ASCII-only sign/date regex
+  missed both and leaked every digit in every date as a spurious "figure." Also found: fiscal-
+  quarter labels glue the year on with an apostrophe (`FQ4'24`) rather than a space, quoting a
+  tool JSON field name in prose (`` `q4_subtraction_value` ``) leaked its embedded "4" because
+  the extraction regex had no word-boundary requirement before a digit, markdown numbered
+  headings (`**4. Liquidity keeps eroding.**`) read as a figure "4", and natural-language dates
+  ("fiscal year ended June 30, 2025") leaked the day-of-month. All six fixed (Unicode-aware
+  sign/dash character classes, a word-boundary before the mantissa, an `FQ'YY` quarter pattern,
+  list-ordinal and natural-language-date exclusions), with regression tests reproducing the
+  exact live-run text. Re-running the patched checker against the same saved traces (no new API
+  calls needed) dropped untraced figures to 8 of 330 (2.4%), breaking down as: one confirmed
+  genuine violation (the model differenced two `get_ratios` margin values itself — "Nvidia
+  operates roughly 21 points higher on gross margin and ~48 points higher on operating margin,"
+  neither number computed by any tool, exactly what the system prompt's "no summing or
+  differencing figures" line forbids); one real but minor precision slip (NVDA gross margin
+  stated as "74.99%" when the underlying value, 0.749967, rounds to 75.00% at that same
+  precision — looks like truncation rather than rounding); two borderline cases (Costco's
+  "fiscal Q4 is a 16-17 week quarter" is true general accounting knowledge, not a company
+  statistic pulled from a tool — untraced by the letter of the rule, not a fabrication); and
+  four false positives by design (a forecast's "R²=0.05" and "95%" confidence interval are both
+  genuinely present in `forecast_metric`'s `reason`/`confidence_interval` *string* fields, but
+  `check_figures` deliberately never parses numbers out of free-text JSON fields, only real
+  numeric leaves, to avoid reintroducing the same fuzzy-extraction problem one layer deeper).
+
+  **The more consequential finding: `check_figures` can produce false negatives — a real
+  violation reads as "traced" — via coincidental matching at low precision.** The "21 points"
+  half of the margin-gap violation above (the twin of the "48 points" one that *did* get
+  flagged) was missed entirely: "21" rounds to a match against `valuation.price_to_sales`
+  (20.677921, from an unrelated `get_market_data` call) purely by chance. Undecorated small
+  integers normalize to `ndigits=0` — round-to-the-nearest-whole-number — which is coarse
+  enough that an unrelated field in a 330-figure candidate pool has a real chance of landing on
+  the same integer. `_find_match`'s first-match (not best-match, not type-aware) semantics mean
+  once *any* tool value rounds to the stated figure, it's reported as traced, with no check that
+  the matched field is even the right kind of thing (a valuation ratio standing in for a margin
+  delta). This isn't a bug to patch reactively — matching at the model's own stated precision is
+  the whole point (see the module docstring), and a real percentage-point figure genuinely can
+  coincide with an unrelated ratio at whole-number precision. It's a structural reason this
+  check flags rather than blocks: a "traced" figure at low precision is weaker evidence than one
+  at high precision, and this class of finding (arithmetic the model did on two real, correctly-
+  cited ratios) is exactly the kind of thing worth a human's second look regardless of what
+  `check_figures` reports.
 
 - **Rolling/shift windows in `trends.py` and `ratios.py` are positional, not calendar-aware.**
   `trends.trailing_stats` (`.rolling(window)`) and `ratios._growth`/`ratios._ttm`
