@@ -55,14 +55,40 @@ projection with assumptions or an explained refusal for the forecast) rather tha
 output. It also reuses the guardrails grounding check (`figure_check`) to report what fraction of
 every answer's stated figures trace back to a real tool result.
 
-Latest run (`claude-opus-5`, 3 repetitions per question, 21 total live runs; see
+Latest run: `claude-opus-5`, 21 runs — 3 repetitions of each of the 7 questions above. **21 of 21
+runs passed** their question's checks. See
 [`evals/results/full_20260821/summary.md`](evals/results/full_20260821/summary.md) for the full
-per-question, per-run breakdown, including every check and every traced/untraced figure):
+per-question, per-run breakdown, including every check and every traced/untraced figure.
 
-- **21/21 runs passed** their question's checks
-- **91% mean grounding rate** (fraction of stated figures traced to a real tool result)
-- **0% iteration-cap hit rate**
-- ~29s mean wall-clock time per run, ~883K tokens total across all 21 runs
+**Grounding, audited rather than just reported.** Of 710 stated figures across all 21 runs, 5
+(0.7%) are real ungrounded content — the model differencing or ratioing two real,
+correctly-cited tool numbers itself (e.g. "~48 points higher on operating margin"), a known
+violation of this project's no-arithmetic rule (see NOTES.md). That's the headline number, not
+the raw untraced count: 44 of the 710 figures (6.2%) didn't trace at the model's stated
+precision, but auditing every one by hand found 39 of those 44 are checker limitations, not
+evidence the underlying numbers are wrong. Pooled grounding rate — traced figures over all
+figures checked, not an average of 21 per-run ratios (a simple mean would underweight
+figure-dense answers like Ford's anomaly report relative to sparse ones, understating where the
+actual gap sits) — is **93.8%**.
+
+| Cause of the 44 remaining untraced figures | Count | Real or artifact |
+|---|---|---|
+| Model computed a delta/ratio itself (e.g. "~48 points higher on operating margin") | 5 | **Real violation** |
+| Markdown table cell with no per-cell unit marker (e.g. "94.930" meaning $94.930B) | 16 | Artifact — model formatting choice |
+| Number sits inside a tool result's free-text field (a forecast's "95%"/"R²=0.05"), not a numeric JSON leaf | 13 | Artifact — by design (`check_figures` never parses free text) |
+| Numeric slash-date ("6/30/2024") not covered by any date exclusion | 4 | Artifact — regex gap |
+| Negative sign conveyed by a word ("operating loss of $134M"), no symbol at all | 3 | Artifact — no character to catch |
+| JSON dict key referenced in prose ("quarter position 1"), not a value | 2 | Artifact — structurally ungroundable |
+| General accounting knowledge (Costco's 16/17-week fourth quarter) | 1 | Artifact — borderline, not fabrication |
+
+This audit also caught two more checker bugs, now fixed: a non-breaking hyphen (U+2011) Claude
+sometimes uses as a negative sign wasn't recognized as one, and the plural "10-Qs" escaped the
+form-label exclusion. Together those explained 40 of the original 84 untraced figures (see
+NOTES.md for the full before/after); the table above reflects the fixed checker's current
+44-untraced state, confirmed by re-scoring these same saved traces — no new API calls needed.
+
+Other aggregate numbers from the same run: **0% iteration-cap hit rate**, ~29s mean wall-clock
+time per run, ~883K tokens total across all 21 runs.
 
 Run it yourself with `python -m evals.run_evals` (see the harness's own docstring for flags) --
 it makes real Anthropic API calls, so start with `--runs 1 --questions <one id>` to smoke-test

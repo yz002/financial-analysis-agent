@@ -244,6 +244,21 @@ def test_excludes_sec_form_label_written_with_non_breaking_hyphen():
     assert report["figures_checked"] == 0
 
 
+def test_excludes_sec_form_label_plural():
+    # Confirmed by the Phase 6 eval harness auditing real run_agent traces: the plural form
+    # ("10-Qs") escaped the exclusion regex's trailing \b -- there's no word/non-word boundary
+    # between "Q" and "s", so the whole match failed outright and "10" leaked through as an
+    # untraced-looking bare integer. Real phrasing from a saved AAPL trace.
+    report = guardrails.check_figures(
+        _result(
+            "RevenueFromContractWithCustomerExcludingAssessedTax values in the 10-Qs filed on "
+            "the dates shown.",
+            [],
+        )
+    )
+    assert report["figures_checked"] == 0
+
+
 def test_bare_suffix_without_dollar_not_treated_as_scaled_figure():
     report = guardrails.check_figures(_result("3M was mentioned as a peer.", []))
     assert report["figures_checked"] == 0
@@ -258,6 +273,41 @@ def test_excludes_negative_number_written_with_unicode_minus_sign():
     fig = report["figures"][0]
     assert fig["normalized_value"] == -0.0083
     assert fig["traced"] is True
+
+
+def test_negative_number_written_with_non_breaking_hyphen_traces():
+    # Confirmed by the Phase 6 eval harness auditing 84 untraced figures across 21 real runs:
+    # Claude sometimes writes its negative sign as a non-breaking hyphen (U+2011), not just the
+    # true minus sign (U+2212) the Phase 4 pass found -- 37 of those 84 (44%, the single largest
+    # cause) turned out to be exactly this: genuinely grounded figures the checker had misread as
+    # positive. Real phrasing from a saved Ford trace.
+    call = _tool_call(
+        "detect_anomalies",
+        {
+            "ticker": "F",
+            "metric": "cash",
+            "mode": "level",
+            "periods": [
+                {
+                    "period_end": "2025-12-31",
+                    "value": 17649000000.0,
+                    "trailing_mean": 25000000000.0,
+                    "trailing_std": 3200000000.0,
+                    "deviation_std": -2.26,
+                    "is_anomaly": True,
+                }
+            ],
+        },
+    )
+    text = (
+        "**1. Cash — flagged anomaly.** $17,649M, which is **‑2.26 trailing standard "
+        "deviations** below its trailing baseline."
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    matches = [f for f in report["figures"] if abs(f["normalized_value"] - (-2.26)) < 1e-9]
+    assert len(matches) == 1
+    assert matches[0]["traced"] is True
 
 
 def test_excludes_iso_date_written_with_non_breaking_hyphen():

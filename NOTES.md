@@ -301,3 +301,73 @@
   quarter/year classification rather than calendar-month assumptions) genuinely generalizes
   beyond the large-cap companies it happened to be built and tested against, rather than
   incidentally depending on properties specific to that test set.
+
+- **The model-differencing violation the Phase 4 pass found is not a one-off — it recurred 5
+  times across the Phase 6 harness's 21-run eval pass, and the Phase 4 system-prompt tightening
+  did not eliminate it.** The Phase 4 finding above (`"Nvidia operates roughly 21 points higher
+  on gross margin and ~48 points higher on operating margin"`, neither number computed by any
+  tool) reads like a single incident from a single trace. Phase 6's harness makes this
+  measurable rather than anecdotal: across 21 real `run_agent` runs (`claude-opus-5`, 3
+  repetitions of each of README's 7 target questions), auditing every one of the run's 84
+  untraced figures by hand found 5 (6% of the untraced, 0.7% of all 710 figures stated) are this
+  exact pattern recurring — the model stating a percentage-point gap or a multiplier between two
+  real, correctly-cited tool values (`"~20+ points higher on gross margin and ~48 points higher
+  on operating margin"`, `"~4-point gross margin expansion"`, `"~2.6 points"`, `"~7x larger
+  base"`), computed by the model itself rather than any tool. All 5 occurrences are in the
+  `amd_nvda_comparison` and `aapl_operating_margin_trend` questions specifically — both ask for a
+  trend or a comparison, the exact shape of question where relaying two tool-cited numbers side
+  by side invites silently differencing them, unlike a single-figure lookup. Worth stating
+  plainly because it would be easy to conclude otherwise: a single clean `amd_nvda_comparison`
+  run inspected by hand the day before this audit showed no such violation, which could read as
+  "fixed." The full 21-run pass shows it's still a live, recurring failure mode: 3 of the 6
+  relevant runs (`aapl_operating_margin_trend`'s runs 1 and 2, and `amd_nvda_comparison`'s run 3)
+  contain at least one such violation — a 50% per-run rate on the two question types that invite
+  it, not something the system prompt's existing "no summing or differencing figures" line has
+  eliminated. `guardrails.check_figures` still only flags this (via an untraced figure), never
+  blocks it — this finding is a measurement of how often that flag fires for the correct reason,
+  not a new mitigation.
+
+- **The Phase 6 eval harness's untraced-figure audit found and fixed two more `check_figures`
+  extraction gaps, on top of the six the Phase 4 pass found.** Auditing all 84 untraced figures
+  from the 21-run eval pass above by hand (not just counting them) found that 40 of the 84 (48%)
+  were checker bugs, not ungrounded content — two new, confirmed gaps:
+  - **A non-breaking hyphen (U+2011) used as a negative sign, not just U+2212.** The Phase 4 pass
+    established that Claude renders dates/quarter labels/form labels with U+2011 and negative
+    numbers with the true minus sign U+2212 — two cleanly separate uses, which is why
+    `_SIGN_CHARS` deliberately excluded U+2011 (see its module-docstring comment prior to this
+    fix). That separation turned out to be incomplete: 37 of the 84 untraced figures (44%, by far
+    the single largest cause) were genuinely grounded figures — `deviation_std` values from
+    `detect_anomalies`, negative `operating_income`/`net_income`/`free_cash_flow` figures from
+    `get_ratios` — that Claude wrote with a U+2011 sign (`"‑2.26 trailing standard deviations"`,
+    `"‑$11,557M"`), which the checker read as positive and so failed to match against the real
+    (negative) tool value. Fixed by adding U+2011 to `_SIGN_CHARS`; safe despite U+2011 also
+    marking word/date hyphenation because `_NUMBER_RE`'s sign group only matches immediately
+    adjacent to a number, never a hyphen elsewhere in a compound word. Concentrated entirely in
+    the `ford_10q_anomalies` answers (which state far more negative figures than any other
+    question, given what they're about) — all 37 are from Ford's three runs (12, 13, and 12 per
+    run), none from any other question.
+  - **The plural form label ("10-Qs") escaped `_FORM_LABEL_RE`'s trailing `\b`.** The Phase 4 fix
+    already handled `10-Q`/`8-K` written with a non-breaking hyphen, but not the plural: `\b`
+    requires a non-word/word transition immediately after the label, and there is none between
+    "Q" and "s" in "10-Qs" — so the whole match failed and the leading "10" leaked through as an
+    untraced-looking bare integer. 3 of the 84 untraced figures (one from each
+    `aapl_operating_margin_trend` run, which all cite "the 10-Qs filed on the dates shown"). Fixed
+    by allowing an optional trailing "s" before the final `\b` on both the 10-K/10-Q and 8-K
+    alternatives.
+
+  Both are regression-tested in `tests/test_guardrails.py` using the actual strings from the
+  saved traces, not synthetic examples. Re-scoring the same 21 saved traces with the fixed
+  checker (no new API calls) confirms the effect directly: untraced figures drop from 84 to 44
+  (of 710-713 candidates — the count itself shifts slightly because the newly-excluded "10-Qs"
+  spans are no longer counted as candidates at all), and pooled grounding rises from 88.2% to
+  93.8%. The remaining 44 untraced figures break down as: 16 markdown-table cells with no
+  per-cell unit marker (a model formatting choice, not a quick regex fix); 13 where the number
+  sits inside a tool result's free-text field like a forecast's "reason" string rather than a
+  real JSON numeric leaf (already documented as by-design in the Phase 4 entry above); 5 the
+  recurring model-differencing violation described in the entry above; 4 a numeric slash-date
+  ("6/30/2024") not covered by any existing date exclusion; 3 where the negative sign is conveyed
+  by a word ("operating loss of $134M," no minus sign at all) rather than any character the
+  checker could catch; 2 a JSON dict key ("quarter position 1" from a forecast's seasonal
+  factors) referenced in prose rather than a value; and 1 general accounting knowledge (Costco's
+  16/17-week fourth quarter) — the same borderline case the Phase 4 entry above already
+  documented for a different company.

@@ -19,14 +19,19 @@ import re
 _SCALE_WORDS = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "trillion": 1e12}
 _SCALE_SUFFIXES = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
-# Claude's own prose doesn't stick to ASCII: it renders dates with a non-breaking hyphen
-# (U+2011) and negative numbers with a true minus sign (U+2212), not ASCII "-" -- confirmed by
-# inspecting live run_agent output during the Phase 4 verification pass. DASH_CHARS covers the
-# date-separator variants seen (plus the common look-alikes); SIGN_CHARS is deliberately just
-# the two real minus characters, not every dash, so a hyphenated word never gets misread as a
-# negative sign.
+# Claude's own prose doesn't stick to ASCII for dates or negative numbers, and the two uses
+# don't cleanly separate by character: U+2212 (true minus) is exclusively a sign, but U+2011
+# (non-breaking hyphen) turns out to be used for *both* -- as a date/quarter/form-label separator
+# ("10-Q", "FQ4'24", "2026-01-30", the original Phase 4 finding) and, confirmed by the Phase 6
+# eval harness auditing 84 untraced figures across 21 real runs, as a negative sign too
+# ("-2.26 trailing standard deviations"). 37 of those 84 (44%, by far the largest single cause)
+# were genuinely grounded figures the checker had misread as positive because U+2011 wasn't in
+# SIGN_CHARS -- see NOTES.md. Including it here is still safe despite U+2011 also marking word/
+# date hyphenation, because _NUMBER_RE's sign group only matches immediately adjacent to a number
+# (optionally through "$") -- a hyphen elsewhere in a compound word, nowhere near a digit, was
+# never at risk and still isn't.
 _DASH_CHARS = "\\-\u2010\u2011\u2012\u2013\u2014"
-_SIGN_CHARS = "\\-\u2212"
+_SIGN_CHARS = "\\-\u2212\u2011"
 
 # One combined pattern for every prose format the agent writes ($90.0 billion, $90,007 million,
 # 57,006,000,000, 45.1%, 0.451, $1.2B), so overlapping interpretations across formats never need
@@ -72,8 +77,12 @@ _PERIOD_COUNT_RE = re.compile(
 # prose renders "10-Q"/"8-K" with a non-breaking hyphen (U+2011) rather than ASCII "-" (see the
 # module-docstring comment on _DASH_CHARS above), and an ASCII-only pattern here silently fails
 # to exclude the form label -- letting its leading digits ("10", "8") leak through as untraced,
-# ungrounded-looking figures even though they're not financial figures at all.
-_FORM_LABEL_RE = re.compile(rf"\b(?:10[{_DASH_CHARS}][KQ](?:/A)?|8[{_DASH_CHARS}]K)\b", re.IGNORECASE)
+# ungrounded-looking figures even though they're not financial figures at all. The optional
+# trailing "s" (before the final \b) covers the plural ("10-Qs filed on the dates shown") --
+# confirmed missing by the Phase 6 eval harness: \b requires a non-word character immediately
+# after the form label, but "Qs" has no such break between "Q" and "s", so the match failed
+# outright and "10" leaked through as an untraced-looking bare integer instead.
+_FORM_LABEL_RE = re.compile(rf"\b(?:10[{_DASH_CHARS}][KQ](?:/A)?s?|8[{_DASH_CHARS}]Ks?)\b", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(rf"\b\d{{4}}[{_DASH_CHARS}]\d{{2}}[{_DASH_CHARS}]\d{{2}}\b")
 _MONTH_NAMES = (
     "January|February|March|April|May|June|July|August|September|October|November|December"
