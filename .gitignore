@@ -223,3 +223,4 @@ data/raw/
 *.parquet
 *.db
 .DS_Store
+evals/results/
