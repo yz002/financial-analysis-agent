@@ -72,8 +72,9 @@ Guardrails       — source attribution, consistency checks, uncertainty flags
 Answer + charts + sources                                              (src/app/ — Streamlit)
 ```
 
-The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`) are built;
-`app/` is still an empty package awaiting Phase 5 (see README.md roadmap).
+The data, analysis, agent, and app layers (`src/data/`, `src/analysis/`, `src/agent/`,
+`src/app/`) are built; see README.md's roadmap for what's left (Phase 6 evaluation harness,
+Phase 7 documentation and demo).
 
 ### Data layer (`src/data/`)
 
@@ -204,6 +205,31 @@ The data, analysis, and agent layers (`src/data/`, `src/analysis/`, `src/agent/`
   model how to react to each `error_type` from `tools.py` (relay `data_unavailable`, report
   `source_error` as a failed lookup rather than working around it, fix the call on
   `invalid_input`).
+
+### App layer (`src/app/`)
+
+- **`main.py`** — the Streamlit UI (`streamlit run src/app/main.py` from the repo root), the
+  only consumer of `run_agent`'s full return dict. Pure display/orchestration: it renders
+  `final_answer`, `figure_check`, `tool_calls`, and `hit_iteration_cap` exactly as returned,
+  computing or reformatting nothing itself — the no-model-arithmetic rule extends here as
+  "no UI-layer arithmetic either." The figure-check panel is the most prominent result section
+  (a `st.success`/`st.warning` banner plus per-figure trace status), ahead of the free-text
+  answer's supporting detail, because grounding is this project's differentiator. Charts are
+  built by `build_charts` from `get_financial_statement`/`get_ratios` tool results already
+  present in the run's `tool_calls` — never a fresh tool/API call from the UI — and capped at
+  4, ranked by relevance rather than dumping every tracked concept (a single statement call
+  alone carries 12): a concept or ratio named in the question or answer text ranks first, in
+  order of first mention; unranked slots fall back to `revenue` plus whatever ratio names were
+  actually requested via a `get_ratios` call's `ratio_names` argument, since the model already
+  signaled what it cared about when it made that call. `run_agent` has no progress-callback
+  hook, so a run (30+ seconds, several sequential Claude API calls) is shown with a static
+  `st.spinner` rather than live per-tool-call progress — a deliberate simplicity tradeoff, not
+  an oversight; a background-thread-plus-polling upgrade for live tool-name progress was
+  considered and skipped as over-building for a single-user tool. `anthropic.AuthenticationError`
+  (e.g. missing `ANTHROPIC_API_KEY`) and other `anthropic.APIError` subclasses are caught around
+  the `run_agent` call and shown as plain-English `st.error` banners, since `run_agent` itself
+  doesn't catch them. No auth, no session persistence across runs beyond the current browser
+  tab's `st.session_state`, no multi-user handling — single person, single question, by design.
 
 ## Known limitations (see NOTES.md for full detail)
 

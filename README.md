@@ -89,14 +89,26 @@ Answer + charts + sources
   - [x] Statements, ratios, growth, and anomaly detection (deterministic Python, source-attributed)
   - [x] Forecasting (trend/growth/seasonal, deterministic, assumptions surfaced for the agent to relay)
 - [x] Phase 3 — Agent layer (tool calling, reasoning loop)
-- [ ] Phase 4 — Guardrails (source grounding, consistency checks)
-- [ ] Phase 5 — Streamlit interface
+- [x] Phase 4 — Guardrails (source grounding, consistency checks)
+- [x] Phase 5 — Streamlit interface
 - [ ] Phase 6 — Evaluation harness
 - [ ] Phase 7 — Documentation and demo
 
 ## Stack
 
 Python · SEC EDGAR API · pandas · Streamlit · Anthropic API
+
+## Setup and running
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env   # set ANTHROPIC_API_KEY and SEC_USER_AGENT
+streamlit run src/app/main.py
+```
+
+Needs network access on first use (SEC EDGAR and the Anthropic API); EDGAR responses are
+cached to `data/cache/` after that. A single query typically takes 30+ seconds — the agent
+may make several tool calls before answering.
 
 ## Notes on how this was built
 
