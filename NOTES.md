@@ -261,3 +261,43 @@
   `get_statement`/`get_financial_statement`/`get_ratios` (schema, system-prompt guidance, and
   tests) — see the project's general stance against speculative interfaces for phases/features
   not yet motivated by an actual need.
+
+- **JPMorgan Chase (JPM) had zero quarterly revenue candidates for eleven straight years
+  (2015–2025) because its tag isn't a bank-specific fallback that was ever added to
+  `CONCEPTS["revenue"]["tags"]`.** Found by the same 21-ticker sweep that surfaced the
+  Q4-reconciliation findings above. JPM tagged revenue as `Revenues` through fiscal 2013, then
+  switched to `RevenuesNetOfInterestExpense` — a bank-specific tag (net interest income plus
+  noninterest revenue, the standard top-line presentation for a financial institution) — starting
+  with the quarter ended 2014-03-31, and has used it for every quarter since, including every
+  quarter filed 2015 through the present. That tag wasn't in `CONCEPTS["revenue"]["tags"]`, so
+  `get_concept('JPM', 'revenue', period_length='quarterly')` returned zero rows for that entire
+  span — not degraded data, a complete blackout. Fixed by appending `RevenuesNetOfInterestExpense`
+  as the lowest-priority entry in `concepts.py`'s revenue tag list (after
+  `RevenueFromContractWithCustomerExcludingAssessedTax`, `Revenues`, `SalesRevenueNet`,
+  `SalesRevenueGoodsNet`) — lowest-priority since it's a narrow, bank-specific tag that shouldn't
+  preempt the general-purpose tags for any company that also reports one of those. Verified: JPM's
+  quarterly revenue now returns 55 rows spanning 2008 through the present (`Revenues` for
+  2008–2013, `RevenuesNetOfInterestExpense` for 2014 onward, confirming the switchover date
+  exactly), and MSFT/NVDA/Ford/Coca-Cola's quarterly revenue coverage and `tags_used` are
+  unchanged — none of the four ever resolves revenue via the new tag, as expected since each
+  already has a higher-priority tag with complete coverage. Full test suite (166 tests) still
+  passes. Other financial institutions in the original sweep (BAC) may have the same gap; not
+  re-checked here since JPM was the specific ticker reported.
+
+- **Generalization check: the pipeline was validated against Lindsay Corporation (LNN), a
+  ~$600M small-cap with an August fiscal year-end — well outside anything the codebase or test
+  suite was built around.** Every fixture this project's tests and prior NOTES.md findings are
+  based on (MSFT, NVDA, Ford, Coca-Cola, Walmart, and the tickers in the 21-ticker sweep above)
+  is a large-cap with a calendar or near-calendar fiscal year. LNN is neither: it's a small-cap
+  irrigation-equipment manufacturer with a fiscal year ending in August, meaning every quarter
+  and every Q4-derivation window falls on dates nothing in `concepts.py`, `statements.py`, or
+  `src/app/` was written or tested against. A manual pass through the full pipeline — ticker
+  resolution (`cik_lookup.get_cik`), XBRL tag matching (`concepts.get_concept`), Q4 derivation
+  across the non-calendar fiscal year (`statements._derive_q4`'s tiling check), ratio computation
+  (`ratios.py`), and chart rendering at LNN's much smaller $M scale (`src/app/main.py`'s
+  `build_charts`, which every other manually-verified company so far has exercised at $B scale) —
+  found 45 of 46 figures traced correctly, with no code changes needed. This is evidence the
+  pipeline's design (generic tag-priority lists, `period_end`-keyed joins, day-span-based
+  quarter/year classification rather than calendar-month assumptions) genuinely generalizes
+  beyond the large-cap companies it happened to be built and tested against, rather than
+  incidentally depending on properties specific to that test set.

@@ -83,6 +83,7 @@ CONCEPTS = {
             "Revenues",
             "SalesRevenueNet",
             "SalesRevenueGoodsNet",
+            "RevenuesNetOfInterestExpense",
         ],
         "kind": "duration",
     },
