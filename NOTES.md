@@ -241,3 +241,23 @@
   `period_end` explicitly instead of trusting position would make that class of bug structurally
   impossible; worth doing before any new ratio function is added that doesn't go through
   `_ratio_frame` unchanged.
+
+- **`MAX_PERIODS` (40) makes anything older than the most recent ~40 periods structurally
+  unreachable — there's no way to page backward to an older window.** Confirmed by a live run:
+  a question about data from before roughly 2016 can't be answered, for any ticker, no matter
+  how the question is phrased. The mechanism is exact, not approximate: `statements.get_statement`'s
+  `periods` argument always keeps "only the most recent `periods` rows" (see its docstring) —
+  there's no offset, no start/end date, no page number, just a count back from the newest row.
+  `agent/tools.py`'s `get_financial_statement`/`get_ratios` inherit this as-is (`_cap_periods`
+  clamps any requested `periods`, including `null`/"full history", to `MAX_PERIODS`), and neither
+  tool's schema gives the agent any parameter that could shift the window rather than just widen
+  or narrow it. So even though `get_concept`/EDGAR itself has the older data, no sequence of tool
+  calls the agent can make will ever surface it — asking again, rephrasing, or requesting more
+  periods all land on the same most-recent-40 window. At quarterly cadence that's ~10 years back
+  from the most recent filed quarter (annual cadence reaches ~40 years back, effectively a
+  company's whole EDGAR history for all but the oldest filers, so this mainly bites quarterly
+  questions). Left undone deliberately for now rather than adding an offset/date-range parameter:
+  no evidence yet that pre-2016 quarterly questions are a real use case worth new surface area on
+  `get_statement`/`get_financial_statement`/`get_ratios` (schema, system-prompt guidance, and
+  tests) — see the project's general stance against speculative interfaces for phases/features
+  not yet motivated by an actual need.

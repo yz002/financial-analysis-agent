@@ -143,6 +143,43 @@ def test_dollar_suffix_form_traces():
     assert fig["match"]["json_path"] == "quote.market_cap"
 
 
+def test_trillion_dollar_suffix_form_traces():
+    # Confirmed by a live run_agent trace: "T" (trillion) wasn't in the suffix scale map, so
+    # "$5.241T" normalized to 5.241 instead of 5.241e12 and failed to trace against
+    # get_market_data's real market_cap/enterprise_value figures. Now that market cap is in the
+    # tool set, trillion-scale figures (mega-cap tickers) come up routinely, not as an edge case.
+    call = _tool_call(
+        "get_market_data",
+        {
+            "ticker": "AAPL",
+            "source": "yfinance",
+            "as_of": "2026-08-20",
+            "quote": {"price": 216.39, "market_cap": 5241000000000.0, "shares_outstanding": 2.4e10},
+            "valuation": {"enterprise_value": 5225000000000.0},
+        },
+    )
+    report = guardrails.check_figures(
+        _result("Market cap is $5.241T and enterprise value is $5.225T.", [call])
+    )
+
+    assert report["figures_checked"] == 2
+    assert report["all_traced"] is True
+    assert report["figures"][0]["format"] == "dollar_suffix"
+    assert report["figures"][0]["normalized_value"] == 5241000000000.0
+    assert report["figures"][0]["match"]["json_path"] == "quote.market_cap"
+    assert report["figures"][1]["match"]["json_path"] == "valuation.enterprise_value"
+
+
+def test_trillion_word_form_traces():
+    call = _statement_call({"value": 5241000000000.0, "tag": "Revenues", "filed": "2025-08-01"})
+    report = guardrails.check_figures(_result("Revenue was $5.241 trillion.", [call]))
+
+    fig = report["figures"][0]
+    assert fig["format"] == "dollar_scale_word"
+    assert fig["traced"] is True
+    assert fig["normalized_value"] == 5241000000000.0
+
+
 def test_fabricated_figure_does_not_trace():
     call = _statement_call({"value": 90007000000.0, "tag": "Revenues", "filed": "2025-08-01"})
     report = guardrails.check_figures(_result("Revenue was $77.7 billion.", [call]))
@@ -180,9 +217,29 @@ def test_excludes_period_count_phrases():
     assert report["figures_checked"] == 0
 
 
+def test_excludes_hyphenated_week_count_phrase():
+    # Confirmed by a live run_agent trace comparing retailers on non-calendar fiscal years:
+    # Costco's 52/53-week retail calendar (see NOTES.md) was described with a hyphenated count
+    # ("12-week quarters", "16-week Q4"). The count-word exclusion only recognized a whitespace
+    # separator and didn't recognize "week" at all, so both "12" and "16" leaked.
+    text = "**Costco (fiscal year ends late Aug/early Sept; 12-week quarters plus a 16-week Q4)**"
+    report = guardrails.check_figures(_result(text, []))
+    assert report["figures_checked"] == 0
+
+
 def test_excludes_sec_form_label_adjacent_number():
     report = guardrails.check_figures(
         _result("Ford's most recent 10-Q flagged unusual capex.", [])
+    )
+    assert report["figures_checked"] == 0
+
+
+def test_excludes_sec_form_label_written_with_non_breaking_hyphen():
+    # Confirmed by a live run_agent trace: Claude renders "10-Q"/"8-K" with a non-breaking
+    # hyphen (U+2011), not ASCII "-" -- an ASCII-only exclusion pattern let the leading "10"
+    # leak through as a bare, untraced-looking figure even though it's just the form label.
+    report = guardrails.check_figures(
+        _result("Nothing unusual stood out in Ford's most recent 10‑Q.", [])
     )
     assert report["figures_checked"] == 0
 
@@ -210,6 +267,52 @@ def test_excludes_iso_date_written_with_non_breaking_hyphen():
         _result("The quarter ended 2026‑01‑25 was strong.", [])
     )
     assert report["figures_checked"] == 0
+
+
+def test_excludes_abbreviated_month_day_without_year():
+    # Confirmed by a live run_agent trace: fiscal quarter-end dates were stated with an
+    # abbreviated month and no year at all (the year was established once, earlier in the same
+    # sentence, via "fiscal year ends Jan 31") -- the natural-language-date exclusion required a
+    # trailing year to match at all, so every bare day-of-month ("31", "30", "31", "31") leaked.
+    text = "**Walmart (fiscal year ends Jan 31; quarters end Apr 30 / Jul 31 / Oct 31)**"
+    report = guardrails.check_figures(_result(text, []))
+    assert report["figures_checked"] == 0
+
+
+def test_excludes_dash_joined_abbreviated_month_day():
+    # Confirmed by a live run_agent trace: the same quarter-end dates were later restated
+    # dash-joined ("Jul-31", "Oct-31", "Apr-30") rather than space-joined. Besides missing the
+    # date exclusion (which only recognized whitespace between month and day), the dash was
+    # separately misread by _NUMBER_RE's sign character as a minus sign, extracting "-31"/"-30"
+    # as if they were negative financial figures. The real percent figures on the same line must
+    # still trace correctly once the date fragments are excluded.
+    call = _tool_call(
+        "get_ratios",
+        {
+            "ticker": "WMT",
+            "period_length": "quarterly",
+            "notes": [],
+            "ratios": {
+                "net_margin": [
+                    {"period_end": "2024-07-31", "value": 0.0268, "inputs": {}, "provenance": {}},
+                    {"period_end": "2025-07-31", "value": 0.0400, "inputs": {}, "provenance": {}},
+                    {"period_end": "2024-10-31", "value": 0.0272, "inputs": {}, "provenance": {}},
+                    {"period_end": "2025-10-31", "value": 0.0346, "inputs": {}, "provenance": {}},
+                    {"period_end": "2025-04-30", "value": 0.0274, "inputs": {}, "provenance": {}},
+                    {"period_end": "2026-04-30", "value": 0.0303, "inputs": {}, "provenance": {}},
+                ]
+            },
+        },
+    )
+    text = (
+        "Comparing like quarters: Jul-31 went from 2.68% to 4.00%, Oct-31 from 2.72% to 3.46%, "
+        "and Apr-30 from 2.74% to 3.03%."
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    assert report["figures_checked"] == 6
+    assert report["all_traced"] is True
+    assert all(fig["raw_text"] not in ("-31", "-30") for fig in report["figures"])
 
 
 def test_excludes_fiscal_quarter_label_with_apostrophe_year():

@@ -16,8 +16,8 @@ import json
 import math
 import re
 
-_SCALE_WORDS = {"thousand": 1e3, "million": 1e6, "billion": 1e9}
-_SCALE_SUFFIXES = {"K": 1e3, "M": 1e6, "B": 1e9}
+_SCALE_WORDS = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "trillion": 1e12}
+_SCALE_SUFFIXES = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
 # Claude's own prose doesn't stick to ASCII: it renders dates with a non-breaking hyphen
 # (U+2011) and negative numbers with a true minus sign (U+2212), not ASCII "-" -- confirmed by
@@ -46,8 +46,8 @@ _NUMBER_RE = re.compile(
       | \d+\.\d+                          # plain decimal: 90.0 / 0.451 / 45.1
       | \d+                               # plain integer: 8 / 2025
     )
-    (?P<suffix>[BMK])?                    # attached, no space: 1.2B
-    (?:[ \t]+(?P<word>thousand|million|billion)s?\b)?
+    (?P<suffix>[TBMK])?                   # attached, no space: 1.2B / 5.241T
+    (?:[ \t]+(?P<word>thousand|million|billion|trillion)s?\b)?
     (?P<percent>\s*%)?
     """,
     re.VERBOSE | re.IGNORECASE,
@@ -58,21 +58,41 @@ _FY_YEAR_RE = re.compile(r"\bFY\s?-?\d{2,4}\b", re.IGNORECASE)
 # Fiscal-quarter labels ("FQ4'24") as well as plain ones ("Q3", "Q1 2025"); the year suffix may
 # be glued on with an apostrophe (ASCII or the curly Unicode one) instead of a space.
 _QUARTER_RE = re.compile(r"\bF?Q[1-4](?:['\u2019]?\s?(?:FY\s?)?\d{2,4})?\b", re.IGNORECASE)
-_COUNT_WORDS = r"quarters?|months?|years?|periods?|companies|days?"
+_COUNT_WORDS = r"quarters?|months?|years?|periods?|companies|days?|weeks?"
+# The separator between the count and its word is whitespace ("8 quarters") or a dash
+# ("12-week quarters", "16-week Q4") -- confirmed by a live run_agent trace describing Costco's
+# 52/53-week retail fiscal calendar (see NOTES.md); a whitespace-only separator missed the
+# hyphenated form entirely.
 _PERIOD_COUNT_RE = re.compile(
-    rf"(?<!\$)\b\d{{1,3}}\s+(?:{_COUNT_WORDS})\b"
-    rf"|(?<!\$)\b(?:{_COUNT_WORDS})\s+\d{{1,3}}\b",
+    rf"(?<!\$)\b\d{{1,3}}[\s{_DASH_CHARS}]+(?:{_COUNT_WORDS})\b"
+    rf"|(?<!\$)\b(?:{_COUNT_WORDS})[\s{_DASH_CHARS}]+\d{{1,3}}\b",
     re.IGNORECASE,
 )
-_FORM_LABEL_RE = re.compile(r"\b(?:10-[KQ](?:/A)?|8-K)\b", re.IGNORECASE)
+# Uses _DASH_CHARS, not a literal ASCII "-", for the same reason _ISO_DATE_RE does: Claude's
+# prose renders "10-Q"/"8-K" with a non-breaking hyphen (U+2011) rather than ASCII "-" (see the
+# module-docstring comment on _DASH_CHARS above), and an ASCII-only pattern here silently fails
+# to exclude the form label -- letting its leading digits ("10", "8") leak through as untraced,
+# ungrounded-looking figures even though they're not financial figures at all.
+_FORM_LABEL_RE = re.compile(rf"\b(?:10[{_DASH_CHARS}][KQ](?:/A)?|8[{_DASH_CHARS}]K)\b", re.IGNORECASE)
 _ISO_DATE_RE = re.compile(rf"\b\d{{4}}[{_DASH_CHARS}]\d{{2}}[{_DASH_CHARS}]\d{{2}}\b")
 _MONTH_NAMES = (
     "January|February|March|April|May|June|July|August|September|October|November|December"
 )
-# Natural-language dates ("June 30, 2025", "June 30th 2025") -- the day-of-month and year are
-# both plain numbers that would otherwise leak as spurious candidates.
+# Longer alternatives first (Sept before Sep) so the shorter one never wins a partial match that
+# then fails to consume a following "t" -- Python's re backtracks through alternation regardless,
+# but ordering makes the intent explicit rather than relying on that.
+_MONTH_ABBREV = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec"
+# Natural-language dates. The year is optional and the month/day separator may be a dash instead
+# of whitespace -- confirmed by a live run_agent trace comparing retailers with non-calendar
+# fiscal years: quarter-end dates were stated with the year established once elsewhere in the
+# sentence ("Walmart: fiscal year ends Jan 31; quarters end Apr 30 / Jul 31 / Oct 31") and, later
+# in the same answer, re-stated dash-joined with an abbreviated month ("Jul-31", "Apr-30") -- the
+# latter form also has a second failure mode: _NUMBER_RE's sign character matches that dash,
+# misreading "Jul-31" as the negative number "-31" unless the whole token is excluded first.
 _NL_DATE_RE = re.compile(
-    rf"\b(?:{_MONTH_NAMES})\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}\b", re.IGNORECASE
+    rf"\b(?:{_MONTH_NAMES}|{_MONTH_ABBREV})[{_DASH_CHARS}\s]\d{{1,2}}(?:st|nd|rd|th)?"
+    rf"(?:,?\s+\d{{4}})?\b",
+    re.IGNORECASE,
 )
 # A markdown numbered list/heading marker ("**4. Liquidity keeps eroding.**", "### 3. Trend") --
 # the leading ordinal isn't a financial figure, though any real figure later on the same line
