@@ -1,0 +1,762 @@
+{
+  "generated_at": "2026-08-21T17:44:00.695983+00:00",
+  "total_runs": 21,
+  "overall_pass_rate": 1,
+  "mean_grounding_rate": 0.9060676630262278,
+  "iteration_cap_hit_rate": 0.0,
+  "mean_wall_clock_seconds": 28.690890280954633,
+  "total_input_tokens": 846884,
+  "total_output_tokens": 36609,
+  "tool_call_distribution": {
+    "get_financial_statement": 11,
+    "get_ratios": 18,
+    "detect_anomalies": 26,
+    "get_market_data": 6,
+    "forecast_metric": 12
+  },
+  "questions": [
+    {
+      "id": "nvda_revenue_margin",
+      "text": "What was Nvidia's revenue and gross margin last quarter?",
+      "category": "lookup",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 1.0,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "nvda_data_pulled",
+              "passed": true,
+              "detail": "found a successful get_financial_statement call for NVDA"
+            },
+            {
+              "name": "revenue_figure",
+              "passed": true,
+              "detail": "found 81,615,000,000.00 within 0.5% of expected 81,615,000,000.00"
+            },
+            {
+              "name": "gross_margin_figure",
+              "passed": true,
+              "detail": "found 74.93% within 0.15pp of expected 74.93%"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 11,
+            "figures_traced": 11,
+            "all_traced": true
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 15.529979800005094,
+          "input_tokens": 15827,
+          "output_tokens": 767,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "nvda_data_pulled",
+              "passed": true,
+              "detail": "found a successful get_financial_statement call for NVDA"
+            },
+            {
+              "name": "revenue_figure",
+              "passed": true,
+              "detail": "found 81,615,000,000.00 within 0.5% of expected 81,615,000,000.00"
+            },
+            {
+              "name": "gross_margin_figure",
+              "passed": true,
+              "detail": "found 74.93% within 0.15pp of expected 74.93%"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 13,
+            "figures_traced": 13,
+            "all_traced": true
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 14.19147140000132,
+          "input_tokens": 17231,
+          "output_tokens": 763,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "nvda_data_pulled",
+              "passed": true,
+              "detail": "found a successful get_financial_statement call for NVDA"
+            },
+            {
+              "name": "revenue_figure",
+              "passed": true,
+              "detail": "found 81,615,000,000.00 within 0.5% of expected 81,615,000,000.00"
+            },
+            {
+              "name": "gross_margin_figure",
+              "passed": true,
+              "detail": "found 74.93% within 0.15pp of expected 74.93%"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 16,
+            "figures_traced": 16,
+            "all_traced": true
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 19.98894590001146,
+          "input_tokens": 17228,
+          "output_tokens": 883,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "msft_fy2025_fcf",
+      "text": "How much free cash flow did Microsoft generate in FY2025?",
+      "category": "lookup",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 0.9047619047619048,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "msft_ratios_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for MSFT"
+            },
+            {
+              "name": "fcf_figure",
+              "passed": true,
+              "detail": "found 71,611,000,000.00 within 0.5% of expected 71,611,000,000.00"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 9,
+            "figures_traced": 9,
+            "all_traced": true
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 12.337372900001355,
+          "input_tokens": 9611,
+          "output_tokens": 475,
+          "tool_names_called": [
+            "get_ratios"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "msft_ratios_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for MSFT"
+            },
+            {
+              "name": "fcf_figure",
+              "passed": true,
+              "detail": "found 71,611,000,000.00 within 0.5% of expected 71,611,000,000.00"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 15,
+            "figures_traced": 15,
+            "all_traced": true
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 9.345899899999495,
+          "input_tokens": 9611,
+          "output_tokens": 563,
+          "tool_names_called": [
+            "get_ratios"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "msft_ratios_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for MSFT"
+            },
+            {
+              "name": "fcf_figure",
+              "passed": true,
+              "detail": "found 71,611,000,000.00 within 0.5% of expected 71,611,000,000.00"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 14,
+            "figures_traced": 10,
+            "all_traced": false
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 9.502890999996453,
+          "input_tokens": 9611,
+          "output_tokens": 526,
+          "tool_names_called": [
+            "get_ratios"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "aapl_operating_margin_trend",
+      "text": "How has Apple's operating margin trended over the last 8 quarters?",
+      "category": "trend",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 0.8533470732052293,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "aapl_margin_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AAPL"
+            },
+            {
+              "name": "direction_matches",
+              "passed": true,
+              "detail": "expected=up, up_word_count=5, down_word_count=1, flat_word_count=0"
+            },
+            {
+              "name": "mentions_8_quarters",
+              "passed": true,
+              "detail": "looked for a '8 quarters/periods' style mention"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 52,
+            "figures_traced": 50,
+            "all_traced": false
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 26.913251899997704,
+          "input_tokens": 19387,
+          "output_tokens": 1815,
+          "tool_names_called": [
+            "get_ratios",
+            "get_financial_statement"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "aapl_margin_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AAPL"
+            },
+            {
+              "name": "direction_matches",
+              "passed": true,
+              "detail": "expected=up, up_word_count=3, down_word_count=0, flat_word_count=0"
+            },
+            {
+              "name": "mentions_8_quarters",
+              "passed": true,
+              "detail": "looked for a '8 quarters/periods' style mention"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 47,
+            "figures_traced": 29,
+            "all_traced": false
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 20.1257961000083,
+          "input_tokens": 19387,
+          "output_tokens": 1373,
+          "tool_names_called": [
+            "get_ratios",
+            "get_financial_statement"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "aapl_margin_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AAPL"
+            },
+            {
+              "name": "direction_matches",
+              "passed": true,
+              "detail": "expected=up, up_word_count=4, down_word_count=0, flat_word_count=0"
+            },
+            {
+              "name": "mentions_8_quarters",
+              "passed": true,
+              "detail": "looked for a '8 quarters/periods' style mention"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 54,
+            "figures_traced": 53,
+            "all_traced": false
+          },
+          "iterations_used": 2,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 19.262289999998757,
+          "input_tokens": 13531,
+          "output_tokens": 1399,
+          "tool_names_called": [
+            "get_ratios"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "revenue_growth_direction",
+      "text": "Is revenue growth accelerating or decelerating for a given company?",
+      "category": "trend",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 1.0,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "handles_ambiguous_company_question",
+              "passed": true,
+              "detail": "asked which company/ticker to analyze"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 0,
+            "figures_traced": 0,
+            "all_traced": true
+          },
+          "iterations_used": 1,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 8.304613399988739,
+          "input_tokens": 4253,
+          "output_tokens": 224,
+          "tool_names_called": []
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "handles_ambiguous_company_question",
+              "passed": true,
+              "detail": "asked which company/ticker to analyze"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 0,
+            "figures_traced": 0,
+            "all_traced": true
+          },
+          "iterations_used": 1,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 7.211295300003258,
+          "input_tokens": 4253,
+          "output_tokens": 260,
+          "tool_names_called": []
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "handles_ambiguous_company_question",
+              "passed": true,
+              "detail": "asked which company/ticker to analyze"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 0,
+            "figures_traced": 0,
+            "all_traced": true
+          },
+          "iterations_used": 1,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 3.5533016999979736,
+          "input_tokens": 4253,
+          "output_tokens": 167,
+          "tool_names_called": []
+        }
+      ]
+    },
+    {
+      "id": "ford_10q_anomalies",
+      "text": "Flag anything unusual in Ford's most recent 10-Q.",
+      "category": "anomaly",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 0.750690004541802,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "ford_gross_profit_unavailable",
+              "passed": true,
+              "detail": "mentions_required_terms=True, states_unavailable=True; trace_confirms_unavailable=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 47,
+            "figures_traced": 35,
+            "all_traced": false
+          },
+          "iterations_used": 4,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 64.6915580000059,
+          "input_tokens": 170527,
+          "output_tokens": 4038,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "ford_gross_profit_unavailable",
+              "passed": true,
+              "detail": "mentions_required_terms=True, states_unavailable=True; trace_confirms_unavailable=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 49,
+            "figures_traced": 35,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 61.63824030000251,
+          "input_tokens": 102410,
+          "output_tokens": 3842,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "ford_gross_profit_unavailable",
+              "passed": true,
+              "detail": "mentions_required_terms=True, states_unavailable=True; trace_confirms_unavailable=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 58,
+            "figures_traced": 46,
+            "all_traced": false
+          },
+          "iterations_used": 4,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 68.66950709999946,
+          "input_tokens": 165481,
+          "output_tokens": 4503,
+          "tool_names_called": [
+            "get_financial_statement",
+            "get_ratios",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies",
+            "detect_anomalies"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "amd_nvda_comparison",
+      "text": "Compare AMD and Nvidia's margin trends \u2014 who's better positioned?",
+      "category": "comparison",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 0.9771284271284271,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "amd_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AMD"
+            },
+            {
+              "name": "nvda_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for NVDA"
+            },
+            {
+              "name": "mentions_all_entities",
+              "passed": true,
+              "detail": "all entities mentioned"
+            },
+            {
+              "name": "comparative_conclusion",
+              "passed": true,
+              "detail": "found a comparative-verdict phrase"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 79,
+            "figures_traced": 79,
+            "all_traced": true
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 37.65339940000558,
+          "input_tokens": 48674,
+          "output_tokens": 2492,
+          "tool_names_called": [
+            "get_ratios",
+            "get_ratios",
+            "get_market_data",
+            "get_market_data"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "amd_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AMD"
+            },
+            {
+              "name": "nvda_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for NVDA"
+            },
+            {
+              "name": "mentions_all_entities",
+              "passed": true,
+              "detail": "all entities mentioned"
+            },
+            {
+              "name": "comparative_conclusion",
+              "passed": true,
+              "detail": "found a comparative-verdict phrase"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 60,
+            "figures_traced": 59,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 44.18069170000672,
+          "input_tokens": 63399,
+          "output_tokens": 2827,
+          "tool_names_called": [
+            "get_ratios",
+            "get_ratios",
+            "detect_anomalies",
+            "detect_anomalies",
+            "get_market_data",
+            "get_market_data"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "amd_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for AMD"
+            },
+            {
+              "name": "nvda_margins_pulled",
+              "passed": true,
+              "detail": "found a successful get_ratios call for NVDA"
+            },
+            {
+              "name": "mentions_all_entities",
+              "passed": true,
+              "detail": "all entities mentioned"
+            },
+            {
+              "name": "comparative_conclusion",
+              "passed": true,
+              "detail": "found a comparative-verdict phrase"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 77,
+            "figures_traced": 73,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 52.971791600008146,
+          "input_tokens": 57710,
+          "output_tokens": 2914,
+          "tool_names_called": [
+            "get_ratios",
+            "get_ratios",
+            "get_market_data",
+            "get_market_data",
+            "detect_anomalies",
+            "detect_anomalies"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "costco_revenue_forecast",
+      "text": "Project Costco's revenue for the next two quarters and explain the assumptions.",
+      "category": "forecast",
+      "runs": 3,
+      "pass_rate": 1,
+      "mean_grounding_rate": 0.8565462315462316,
+      "per_run": [
+        {
+          "run_index": 1,
+          "passed": true,
+          "checks": [
+            {
+              "name": "forecast_assumptions_or_refusal",
+              "passed": true,
+              "detail": "forecast_available=true; projection_stated=True; mentions_assumptions=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 39,
+            "figures_traced": 33,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 33.030953100009356,
+          "input_tokens": 31448,
+          "output_tokens": 2144,
+          "tool_names_called": [
+            "get_financial_statement",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric"
+          ]
+        },
+        {
+          "run_index": 2,
+          "passed": true,
+          "checks": [
+            {
+              "name": "forecast_assumptions_or_refusal",
+              "passed": true,
+              "detail": "forecast_available=true; projection_stated=True; mentions_assumptions=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 33,
+            "figures_traced": 28,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 35.054102299996885,
+          "input_tokens": 31515,
+          "output_tokens": 2132,
+          "tool_names_called": [
+            "get_financial_statement",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric"
+          ]
+        },
+        {
+          "run_index": 3,
+          "passed": true,
+          "checks": [
+            {
+              "name": "forecast_assumptions_or_refusal",
+              "passed": true,
+              "detail": "forecast_available=true; projection_stated=True; mentions_assumptions=True"
+            }
+          ],
+          "grounding": {
+            "figures_checked": 40,
+            "figures_traced": 35,
+            "all_traced": false
+          },
+          "iterations_used": 3,
+          "hit_iteration_cap": false,
+          "wall_clock_seconds": 38.35134310000285,
+          "input_tokens": 31537,
+          "output_tokens": 2502,
+          "tool_names_called": [
+            "get_financial_statement",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric",
+            "forecast_metric"
+          ]
+        }
+      ]
+    }
+  ]
+}

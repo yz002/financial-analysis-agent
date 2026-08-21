@@ -1,0 +1,46 @@
+{
+  "question_id": "revenue_growth_direction",
+  "question_text": "Is revenue growth accelerating or decelerating for a given company?",
+  "wall_clock_seconds": 3.5533016999979736,
+  "input_tokens": 4253,
+  "output_tokens": 167,
+  "iterations_used": 1,
+  "hit_iteration_cap": false,
+  "tool_names_called": [],
+  "ground_truth": {
+    "ticker": null,
+    "direction": null
+  },
+  "score": {
+    "question_id": "revenue_growth_direction",
+    "passed": true,
+    "checks": [
+      {
+        "name": "handles_ambiguous_company_question",
+        "passed": true,
+        "detail": "asked which company/ticker to analyze"
+      }
+    ],
+    "grounding": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "all_traced": true
+    }
+  },
+  "run_agent_result": {
+    "question": "Is revenue growth accelerating or decelerating for a given company?",
+    "tool_calls": [],
+    "final_answer": "I can answer that \u2014 I just need to know which company you're asking about.\n\nGive me a ticker (e.g. AAPL, NVDA, COST) and I'll pull:\n\n- the quarterly revenue history from their SEC filings,\n- year-over-year and quarter-over-quarter growth rates for each period, so we can see whether the *rate* of growth is rising or falling,\n- and, if useful, an anomaly check on the growth series to flag any quarter that breaks from the company's own trend.\n\nWhich ticker would you like?",
+    "hit_iteration_cap": false,
+    "iterations_used": 1,
+    "stop_reason": "end_turn",
+    "figure_check": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "figures_untraced": 0,
+      "all_traced": true,
+      "figures": []
+    }
+  },
+  "run_index": 3
+}

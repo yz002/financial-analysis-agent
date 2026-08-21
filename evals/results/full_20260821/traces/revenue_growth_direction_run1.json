@@ -1,0 +1,46 @@
+{
+  "question_id": "revenue_growth_direction",
+  "question_text": "Is revenue growth accelerating or decelerating for a given company?",
+  "wall_clock_seconds": 8.304613399988739,
+  "input_tokens": 4253,
+  "output_tokens": 224,
+  "iterations_used": 1,
+  "hit_iteration_cap": false,
+  "tool_names_called": [],
+  "ground_truth": {
+    "ticker": null,
+    "direction": null
+  },
+  "score": {
+    "question_id": "revenue_growth_direction",
+    "passed": true,
+    "checks": [
+      {
+        "name": "handles_ambiguous_company_question",
+        "passed": true,
+        "detail": "asked which company/ticker to analyze"
+      }
+    ],
+    "grounding": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "all_traced": true
+    }
+  },
+  "run_agent_result": {
+    "question": "Is revenue growth accelerating or decelerating for a given company?",
+    "tool_calls": [],
+    "final_answer": "I can answer that \u2014 I just need to know which company you'd like me to look at.\n\nIf it helps, here's what I'll pull once you name a ticker:\n\n- **Quarterly revenue history** from SEC filings (with each figure's source tag and filing period, and flags for any derived Q4 values)\n- **Revenue growth QoQ and YoY** \u2014 YoY is usually the better read on acceleration/deceleration since it strips out seasonality\n- **Anomaly detection on revenue growth** \u2014 to flag whether any recent quarter is a genuine break from the company's own trend rather than normal variation\n\nJust give me a ticker (e.g. \"MSFT\", \"NVDA\", \"F\") and I'll run it.",
+    "hit_iteration_cap": false,
+    "iterations_used": 1,
+    "stop_reason": "end_turn",
+    "figure_check": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "figures_untraced": 0,
+      "all_traced": true,
+      "figures": []
+    }
+  },
+  "run_index": 1
+}

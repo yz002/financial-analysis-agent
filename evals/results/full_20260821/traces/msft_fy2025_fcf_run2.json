@@ -1,0 +1,309 @@
+{
+  "question_id": "msft_fy2025_fcf",
+  "question_text": "How much free cash flow did Microsoft generate in FY2025?",
+  "wall_clock_seconds": 9.345899899999495,
+  "input_tokens": 9611,
+  "output_tokens": 563,
+  "iterations_used": 2,
+  "hit_iteration_cap": false,
+  "tool_names_called": [
+    "get_ratios"
+  ],
+  "ground_truth": {
+    "period_end": "2025-06-30T00:00:00",
+    "free_cash_flow": 71611000000.0
+  },
+  "score": {
+    "question_id": "msft_fy2025_fcf",
+    "passed": true,
+    "checks": [
+      {
+        "name": "msft_ratios_pulled",
+        "passed": true,
+        "detail": "found a successful get_ratios call for MSFT"
+      },
+      {
+        "name": "fcf_figure",
+        "passed": true,
+        "detail": "found 71,611,000,000.00 within 0.5% of expected 71,611,000,000.00"
+      }
+    ],
+    "grounding": {
+      "figures_checked": 15,
+      "figures_traced": 15,
+      "all_traced": true
+    }
+  },
+  "run_agent_result": {
+    "question": "How much free cash flow did Microsoft generate in FY2025?",
+    "tool_calls": [
+      {
+        "iteration": 1,
+        "tool_name": "get_ratios",
+        "tool_input": {
+          "ticker": "MSFT",
+          "period_length": "annual",
+          "ratio_names": [
+            "free_cash_flow"
+          ],
+          "periods": 4
+        },
+        "tool_result": "{\n  \"ticker\": \"MSFT\",\n  \"period_length\": \"annual\",\n  \"notes\": [],\n  \"ratios\": {\n    \"free_cash_flow\": [\n      {\n        \"period_end\": \"2023-06-30\",\n        \"value\": 59475000000.0,\n        \"inputs\": {\n          \"operating_cash_flow\": 87582000000.0,\n          \"capex\": 28107000000.0\n        },\n        \"provenance\": {\n          \"operating_cash_flow\": {\n            \"tag\": \"NetCashProvidedByUsedInOperatingActivities\",\n            \"filed\": \"2025-07-30\",\n            \"is_derived\": false\n          },\n          \"capex\": {\n            \"tag\": \"PaymentsToAcquirePropertyPlantAndEquipment\",\n            \"filed\": \"2025-07-30\",\n            \"is_derived\": false\n          }\n        }\n      },\n      {\n        \"period_end\": \"2024-06-30\",\n        \"value\": 74071000000.0,\n        \"inputs\": {\n          \"operating_cash_flow\": 118548000000.0,\n          \"capex\": 44477000000.0\n        },\n        \"provenance\": {\n          \"operating_cash_flow\": {\n            \"tag\": \"NetCashProvidedByUsedInOperatingActivities\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          },\n          \"capex\": {\n            \"tag\": \"PaymentsToAcquirePropertyPlantAndEquipment\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          }\n        }\n      },\n      {\n        \"period_end\": \"2025-06-30\",\n        \"value\": 71611000000.0,\n        \"inputs\": {\n          \"operating_cash_flow\": 136162000000.0,\n          \"capex\": 64551000000.0\n        },\n        \"provenance\": {\n          \"operating_cash_flow\": {\n            \"tag\": \"NetCashProvidedByUsedInOperatingActivities\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          },\n          \"capex\": {\n            \"tag\": \"PaymentsToAcquirePropertyPlantAndEquipment\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          }\n        }\n      },\n      {\n        \"period_end\": \"2026-06-30\",\n        \"value\": 66987000000.0,\n        \"inputs\": {\n          \"operating_cash_flow\": 182935000000.0,\n          \"capex\": 115948000000.0\n        },\n        \"provenance\": {\n          \"operating_cash_flow\": {\n            \"tag\": \"NetCashProvidedByUsedInOperatingActivities\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          },\n          \"capex\": {\n            \"tag\": \"PaymentsToAcquirePropertyPlantAndEquipment\",\n            \"filed\": \"2026-07-29\",\n            \"is_derived\": false\n          }\n        }\n      }\n    ]\n  }\n}",
+        "is_error": false
+      }
+    ],
+    "final_answer": "**Microsoft FY2025 (fiscal year ended June 30, 2025) free cash flow: $71.611 billion.**\n\nThe components, both directly filed (not derived), per the filing dated 2026-07-29:\n\n| Item | FY2025 |\n|---|---|\n| Operating cash flow (`NetCashProvidedByUsedInOperatingActivities`) | $136.162B |\n| Capital expenditures (`PaymentsToAcquirePropertyPlantAndEquipment`) | $64.551B |\n| **Free cash flow** | **$71.611B** |\n\nContext from the surrounding fiscal years in the same tool result:\n\n- FY2023: $59.475B (OCF $87.582B, capex $28.107B)\n- FY2024: $74.071B (OCF $118.548B, capex $44.477B)\n- FY2025: $71.611B\n- FY2026: $66.987B (OCF $182.935B, capex $115.948B)\n\nWorth noting: FCF declined from FY2024 to FY2025 even as operating cash flow grew sharply \u2014 capex rose faster than cash generation, and that pattern continues into FY2026, where capex of $115.948B nearly matched the prior year's entire operating cash flow.",
+    "hit_iteration_cap": false,
+    "iterations_used": 2,
+    "stop_reason": "end_turn",
+    "figure_check": {
+      "figures_checked": 15,
+      "figures_traced": 15,
+      "figures_untraced": 0,
+      "all_traced": true,
+      "figures": [
+        {
+          "raw_text": "$71.611 billion",
+          "start": 69,
+          "end": 84,
+          "normalized_value": 71611000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_scale_word",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[2].value",
+            "matched_value": 71611000000.0
+          }
+        },
+        {
+          "raw_text": "$136.162B",
+          "start": 273,
+          "end": 282,
+          "normalized_value": 136162000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[2].inputs.operating_cash_flow",
+            "matched_value": 136162000000.0
+          }
+        },
+        {
+          "raw_text": "$64.551B",
+          "start": 357,
+          "end": 365,
+          "normalized_value": 64551000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[2].inputs.capex",
+            "matched_value": 64551000000.0
+          }
+        },
+        {
+          "raw_text": "$71.611B",
+          "start": 393,
+          "end": 401,
+          "normalized_value": 71611000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[2].value",
+            "matched_value": 71611000000.0
+          }
+        },
+        {
+          "raw_text": "$59.475B",
+          "start": 485,
+          "end": 493,
+          "normalized_value": 59475000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[0].value",
+            "matched_value": 59475000000.0
+          }
+        },
+        {
+          "raw_text": "$87.582B",
+          "start": 499,
+          "end": 507,
+          "normalized_value": 87582000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[0].inputs.operating_cash_flow",
+            "matched_value": 87582000000.0
+          }
+        },
+        {
+          "raw_text": "$28.107B",
+          "start": 515,
+          "end": 523,
+          "normalized_value": 28107000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[0].inputs.capex",
+            "matched_value": 28107000000.0
+          }
+        },
+        {
+          "raw_text": "$74.071B",
+          "start": 535,
+          "end": 543,
+          "normalized_value": 74071000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[1].value",
+            "matched_value": 74071000000.0
+          }
+        },
+        {
+          "raw_text": "$118.548B",
+          "start": 549,
+          "end": 558,
+          "normalized_value": 118548000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[1].inputs.operating_cash_flow",
+            "matched_value": 118548000000.0
+          }
+        },
+        {
+          "raw_text": "$44.477B",
+          "start": 566,
+          "end": 574,
+          "normalized_value": 44477000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[1].inputs.capex",
+            "matched_value": 44477000000.0
+          }
+        },
+        {
+          "raw_text": "$71.611B",
+          "start": 586,
+          "end": 594,
+          "normalized_value": 71611000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[2].value",
+            "matched_value": 71611000000.0
+          }
+        },
+        {
+          "raw_text": "$66.987B",
+          "start": 605,
+          "end": 613,
+          "normalized_value": 66986999999.99999,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[3].value",
+            "matched_value": 66987000000.0
+          }
+        },
+        {
+          "raw_text": "$182.935B",
+          "start": 619,
+          "end": 628,
+          "normalized_value": 182935000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[3].inputs.operating_cash_flow",
+            "matched_value": 182935000000.0
+          }
+        },
+        {
+          "raw_text": "$115.948B",
+          "start": 636,
+          "end": 645,
+          "normalized_value": 115948000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[3].inputs.capex",
+            "matched_value": 115948000000.0
+          }
+        },
+        {
+          "raw_text": "$115.948B",
+          "start": 835,
+          "end": 844,
+          "normalized_value": 115948000000.0,
+          "precision_ndigits": -6,
+          "format": "dollar_suffix",
+          "traced": true,
+          "match": {
+            "tool_call_index": 0,
+            "tool_name": "get_ratios",
+            "iteration": 1,
+            "json_path": "ratios.free_cash_flow[3].inputs.capex",
+            "matched_value": 115948000000.0
+          }
+        }
+      ]
+    }
+  },
+  "run_index": 2
+}

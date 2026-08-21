@@ -1,0 +1,46 @@
+{
+  "question_id": "revenue_growth_direction",
+  "question_text": "Is revenue growth accelerating or decelerating for a given company?",
+  "wall_clock_seconds": 7.211295300003258,
+  "input_tokens": 4253,
+  "output_tokens": 260,
+  "iterations_used": 1,
+  "hit_iteration_cap": false,
+  "tool_names_called": [],
+  "ground_truth": {
+    "ticker": null,
+    "direction": null
+  },
+  "score": {
+    "question_id": "revenue_growth_direction",
+    "passed": true,
+    "checks": [
+      {
+        "name": "handles_ambiguous_company_question",
+        "passed": true,
+        "detail": "asked which company/ticker to analyze"
+      }
+    ],
+    "grounding": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "all_traced": true
+    }
+  },
+  "run_agent_result": {
+    "question": "Is revenue growth accelerating or decelerating for a given company?",
+    "tool_calls": [],
+    "final_answer": "I can definitely check that \u2014 which company would you like me to look at?\n\nTo answer the question well, I'd typically pull:\n- **Quarterly revenue history** (the filed figures, with their source tags and periods)\n- **Revenue growth YoY and QoQ** \u2014 YoY is usually the cleaner read on acceleration vs. deceleration since it strips out seasonality\n- **Anomaly detection on revenue growth**, to flag whether any recent quarter is a genuine break from the company's own trend rather than just noise\n\nJust give me a ticker (e.g. MSFT, NVDA, F) and I'll run those. If you'd also like a forward view, I can run the forecast tool \u2014 I'll flag clearly that anything it returns is a model projection, not a filed figure, and relay the fitted assumptions with it.",
+    "hit_iteration_cap": false,
+    "iterations_used": 1,
+    "stop_reason": "end_turn",
+    "figure_check": {
+      "figures_checked": 0,
+      "figures_traced": 0,
+      "figures_untraced": 0,
+      "all_traced": true,
+      "figures": []
+    }
+  },
+  "run_index": 2
+}

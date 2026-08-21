@@ -46,6 +46,28 @@ These are the questions the agent needs to answer correctly. They double as the 
 **Forecast**
 - Project Costco's revenue for the next two quarters and explain the assumptions.
 
+## Evaluation results
+
+Phase 6 built a harness (`evals/`) that scores the agent against the seven questions above,
+with checkable per-question criteria (the right figure within tolerance for a lookup, the right
+direction for a trend, correctly reporting Ford's gross profit as unavailable, a stated
+projection with assumptions or an explained refusal for the forecast) rather than eyeballing the
+output. It also reuses the guardrails grounding check (`figure_check`) to report what fraction of
+every answer's stated figures trace back to a real tool result.
+
+Latest run (`claude-opus-5`, 3 repetitions per question, 21 total live runs; see
+[`evals/results/full_20260821/summary.md`](evals/results/full_20260821/summary.md) for the full
+per-question, per-run breakdown, including every check and every traced/untraced figure):
+
+- **21/21 runs passed** their question's checks
+- **91% mean grounding rate** (fraction of stated figures traced to a real tool result)
+- **0% iteration-cap hit rate**
+- ~29s mean wall-clock time per run, ~883K tokens total across all 21 runs
+
+Run it yourself with `python -m evals.run_evals` (see the harness's own docstring for flags) --
+it makes real Anthropic API calls, so start with `--runs 1 --questions <one id>` to smoke-test
+before a fuller pass.
+
 ## Test companies
 
 - **Microsoft** — clean, predictable financials. Baseline case.
@@ -91,7 +113,7 @@ Answer + charts + sources
 - [x] Phase 3 — Agent layer (tool calling, reasoning loop)
 - [x] Phase 4 — Guardrails (source grounding, consistency checks)
 - [x] Phase 5 — Streamlit interface
-- [ ] Phase 6 — Evaluation harness
+- [x] Phase 6 — Evaluation harness
 - [ ] Phase 7 — Documentation and demo
 
 ## Stack
