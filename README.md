@@ -19,10 +19,10 @@ real SEC filings, with its source attached. The LLM never does arithmetic.
 **21 of 21 eval runs passed** — 3 repetitions of each of 7 target questions (lookups, trends,
 anomaly detection, comparison, forecast), run against `claude-opus-5`. Pooled grounding rate —
 the share of every figure stated across all runs that traces back to a real tool result — is
-**93.8%**. Auditing the figures that didn't trace found that most are checker limitations
+**94.3%**. Auditing the figures that didn't trace found that most are checker limitations
 (formatting choices the grounding check doesn't parse, like an unmarked table cell), not
 evidence of bad numbers: genuinely ungrounded content — the model computing a delta or ratio
-itself instead of pulling it from a tool, a real rule violation — is **~0.7%** of all 710
+itself instead of pulling it from a tool, a real rule violation — is **~0.7%** of all 706
 figures stated.
 
 Full per-question, per-run breakdown, including every check and every traced/untraced figure:

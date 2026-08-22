@@ -127,6 +127,16 @@ _NL_DATE_RE = re.compile(
 # the leading ordinal isn't a financial figure, though any real figure later on the same line
 # still is and is left alone.
 _LIST_ORDINAL_RE = re.compile(r"^[ \t]*#{0,3}[ \t]*\*{0,2}\d{1,2}\.[ \t]", re.MULTILINE)
+# Slash-formatted dates ("6/30/25", "12/31/2025") -- a compact period-label form seen in a live
+# run_agent trace restating each quarter's end date next to its label inside a markdown table
+# ("Q4 2025 (12/31/25)"), documented as an untracked gap by the Phase 6 eval harness's audit (4
+# of the 44 remaining untraced figures at the time) before this pattern existed. Both a 2-digit
+# and 4-digit year are covered because a second live run of the *identical question* used the
+# 4-digit form instead -- the model's date formatting varies run to run as much as its numeric
+# formatting does (see NOTES.md). Without this, each date fragments into up to three separate
+# untraced-looking bare integers (month, day, year); a single quarter-end date stated three times
+# across a table, as in that live run, produced 9 such fragments from 3 real dates.
+_SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2}(?:\d{2})?\b")
 
 _EXCLUSION_PATTERNS = (
     _FY_YEAR_RE,
@@ -135,6 +145,7 @@ _EXCLUSION_PATTERNS = (
     _FORM_LABEL_RE,
     _ISO_DATE_RE,
     _NL_DATE_RE,
+    _SLASH_DATE_RE,
     _LIST_ORDINAL_RE,
 )
 

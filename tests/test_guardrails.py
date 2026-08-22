@@ -413,6 +413,47 @@ def test_excludes_iso_date_written_with_non_breaking_hyphen():
     assert report["figures_checked"] == 0
 
 
+def test_excludes_slash_date_with_two_digit_year():
+    # Confirmed by a live run_agent trace ("What was Ford's gross margin last quarter?"): a
+    # markdown table restated each quarter's end date next to its label in compact M/D/YY form.
+    # Before this exclusion existed, each date fragmented into three separate untraced-looking
+    # bare integers (month, day, year) -- 9 across the 3 rows of this exact table.
+    text = (
+        "| Q2 2025 (6/30/25) | $50,184M |\n"
+        "| Q3 2025 (9/30/25) | $50,534M |\n"
+        "| Q4 2025 (12/31/25) | $45,890M |"
+    )
+    call = _tool_call(
+        "get_financial_statement",
+        {
+            "ticker": "F",
+            "period_length": "quarterly",
+            "periods_returned": 3,
+            "concepts_unavailable": [],
+            "notes": [],
+            "periods": [
+                {"period_end": "2025-06-30", "revenue": {"value": 50184000000.0, "tag": "Revenues", "filed": "2025-08-01"}},
+                {"period_end": "2025-09-30", "revenue": {"value": 50534000000.0, "tag": "Revenues", "filed": "2025-11-01"}},
+                {"period_end": "2025-12-31", "revenue": {"value": 45890000000.0, "tag": "derived", "filed": "2026-02-11"}},
+            ],
+        },
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    # Only the three dollar figures should be extracted -- no bare "6"/"30"/"25"/"9"/"12"/"31".
+    assert report["figures_checked"] == 3
+    assert report["all_traced"] is True
+
+
+def test_excludes_slash_date_with_four_digit_year():
+    # The four-digit-year form ("6/30/2024") documented as an untracked gap by the Phase 6 eval
+    # harness's audit (4 of the 44 remaining untraced figures) before this pattern existed.
+    report = guardrails.check_figures(
+        _result("The quarter ended 6/30/2024 was the strongest of the year.", [])
+    )
+    assert report["figures_checked"] == 0
+
+
 def test_excludes_abbreviated_month_day_without_year():
     # Confirmed by a live run_agent trace: fiscal quarter-end dates were stated with an
     # abbreviated month and no year at all (the year was established once, earlier in the same

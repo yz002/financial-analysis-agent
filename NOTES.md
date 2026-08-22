@@ -406,3 +406,37 @@
   directions are in `tests/test_guardrails.py`, built from the actual strings in the saved traces
   rather than synthetic ones, specifically so a future widening of `_SIGN_CHARS` can't silently
   re-break the range case to fix some other sign character, or vice versa.
+
+- **Added the slash-date exclusion the audit table had already named as an open gap ("6/30/2024"
+  not covered by any date exclusion, 4 of the 44 remaining untraced figures) — `_SLASH_DATE_RE`,
+  covering both a 2-digit and 4-digit year (`\b\d{1,2}/\d{1,2}/\d{2}(?:\d{2})?\b`), added to
+  `_EXCLUSION_PATTERNS` alongside `_ISO_DATE_RE`/`_NL_DATE_RE`.** Motivated by yet another live run
+  of the same Ford gross-margin question, whose markdown table restated each quarter's end date in
+  parentheses next to its label in compact `M/D/YY` form ("Q4 2025 (12/31/25)"); with no slash-date
+  exclusion, each date fragmented into up to three separate untraced-looking bare integers (month,
+  day, year) — 9 across that table's 3 rows, none of them real ungrounded content. Re-scoring the
+  same 21 saved traces confirms the fix does what the audit table predicted: checked candidates
+  drop from 710 to 706 (the 4 predicted instances, now excluded rather than counted as untraced
+  candidates at all — `msft_fy2025_fcf_run3`'s 4 untraced figures, previously unexplained beyond
+  "a numeric slash-date," turn out to be exactly this), untraced drops from 44 to 40, and pooled
+  grounding rises from 93.8% to **94.3%**. Regression tests cover both year lengths using the
+  actual live-run table (2-digit year) and the audit table's own example string (4-digit year).
+
+- **Three live runs of the identical question ("What was Ford's gross margin last quarter?")
+  produced three different raw grounding rates — 17/17 traced, 20/28, and 16/25 — with no change
+  in whether the underlying figures were actually grounded.** All three answers cited the same
+  real filed and derived figures; what changed each time was purely the model's own formatting
+  choice for period labels. One run wrote plain prose with no restated dates at all (17/17
+  traced). Another restated each quarter's end date compactly in a markdown table ("Q4 2025
+  (12/31/25)"), which fragmented into bare untraced-looking integers until the slash-date fix
+  above (16/25 traced without it). A third (the original live report that started this whole
+  investigation thread) got 20/28 traced via some other formatting choice never fully captured,
+  since `run_agent` isn't deterministic and a later re-run reproduces a different answer shape
+  rather than the same one. **This is a property of the measurement, not a bug to eventually
+  eliminate: `check_figures` is sensitive to how the model chooses to write a number, not only to
+  whether that number is real.** A single run's grounding rate is accordingly noisy in a way that
+  has nothing to do with the agent's actual groundedness — which is exactly why the Phase 6 eval
+  harness's headline number is the *pooled* rate across all 21 runs (93.8%, now 94.3% with the
+  slash-date fix) rather than an average of 21 per-run ratios, and why a single low-scoring run
+  (like any one of these three Ford runs) shouldn't be read as evidence of a regression on its
+  own without checking what specifically went untraced first.
