@@ -310,6 +310,100 @@ def test_negative_number_written_with_non_breaking_hyphen_traces():
     assert matches[0]["traced"] is True
 
 
+def test_negative_number_written_with_en_dash_traces():
+    # Confirmed by a live run_agent trace (Streamlit, "What was Ford's gross margin last
+    # quarter?"): Claude sometimes writes its negative sign as an en dash (U+2013), a third
+    # dash-like character distinct from both the true minus sign (U+2212, Phase 4) and the
+    # non-breaking hyphen (U+2011, Phase 6) previously found. Real phrasing from that run,
+    # describing Ford's derived Q4 2025 operating loss.
+    call = _tool_call(
+        "get_financial_statement",
+        {
+            "ticker": "F",
+            "period_length": "quarterly",
+            "periods_returned": 1,
+            "concepts_unavailable": [],
+            "notes": [],
+            "periods": [
+                {
+                    "period_end": "2025-12-31",
+                    "period_start": "2025-10-01",
+                    "operating_income": {
+                        "value": -11557000000.0,
+                        "tag": "derived",
+                        "filed": "2026-02-11",
+                        "is_derived": True,
+                    },
+                }
+            ],
+        },
+    )
+    text = "Q4 2025 showed a large loss, with operating income of –$11.557B (–25.18% margin)."
+    report = guardrails.check_figures(_result(text, [call]))
+
+    dollar_matches = [f for f in report["figures"] if abs(f["normalized_value"] - (-11.557e9)) < 1]
+    assert len(dollar_matches) == 1
+    assert dollar_matches[0]["traced"] is True
+
+
+def test_en_dash_range_does_not_flip_sign_of_second_number():
+    # Confirmed by re-scoring the Phase 6 eval harness's 21 saved traces after the U+2013 fix
+    # above: making _SIGN_CHARS a full superset of _DASH_CHARS was too broad, because the same
+    # en dash also joins a *range* ("$42.4B to $99.9B"), not just a negative sign, and the second
+    # number in a range sits directly against the tail of the first with no space -- unlike a
+    # real negative sign, which is preceded by whitespace or punctuation. Real phrasing from a
+    # saved costco_revenue_forecast trace; real forecast_metric confidence-interval bounds.
+    call = _tool_call(
+        "forecast_metric",
+        {
+            "ticker": "COST",
+            "column": "revenue",
+            "projections": [
+                {
+                    "period_end": "2026-05-31",
+                    "value": 71138010905.56412,
+                    "lower": 42397269497.72855,
+                    "upper": 99878752313.3997,
+                }
+            ],
+        },
+    )
+    text = "and the resulting 95% band is enormous ($42.4B–$99.9B)."
+    report = guardrails.check_figures(_result(text, [call]))
+
+    upper_matches = [f for f in report["figures"] if abs(f["normalized_value"] - 99.9e9) < 0.1e9]
+    assert len(upper_matches) == 1
+    assert upper_matches[0]["normalized_value"] > 0
+    assert upper_matches[0]["traced"] is True
+
+
+def test_en_dash_range_of_ratios_does_not_flip_sign_of_second_number():
+    # Same regression as above, confirmed independently on a saved ford_10q_anomalies trace: a
+    # dash-joined range of ratios ("0.842 to 0.846"), not a negative sign. Real phrasing and real
+    # debt_to_assets values from that trace.
+    call = _tool_call(
+        "get_ratios",
+        {
+            "ticker": "F",
+            "period_length": "quarterly",
+            "notes": [],
+            "ratios": {
+                "debt_to_assets": [
+                    {"period_end": "2024-06-30", "value": 0.8423817546802803, "inputs": {}, "provenance": {}},
+                    {"period_end": "2024-09-30", "value": 0.8455340066260926, "inputs": {}, "provenance": {}},
+                ]
+            },
+        },
+    )
+    text = "Debt-to-assets **0.867** (vs. 0.842–0.846 in every quarter from Q2 2024 through Q3 2025)."
+    report = guardrails.check_figures(_result(text, [call]))
+
+    second_matches = [f for f in report["figures"] if abs(f["normalized_value"] - 0.846) < 1e-9]
+    assert len(second_matches) == 1
+    assert second_matches[0]["normalized_value"] > 0
+    assert second_matches[0]["traced"] is True
+
+
 def test_excludes_iso_date_written_with_non_breaking_hyphen():
     # Confirmed by a live run_agent trace: dates are rendered with a non-breaking hyphen
     # (U+2011), not ASCII "-" -- the exclusion must still catch the whole date.

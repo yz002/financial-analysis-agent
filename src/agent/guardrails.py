@@ -19,19 +19,23 @@ import re
 _SCALE_WORDS = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "trillion": 1e12}
 _SCALE_SUFFIXES = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
-# Claude's own prose doesn't stick to ASCII for dates or negative numbers, and the two uses
-# don't cleanly separate by character: U+2212 (true minus) is exclusively a sign, but U+2011
-# (non-breaking hyphen) turns out to be used for *both* -- as a date/quarter/form-label separator
-# ("10-Q", "FQ4'24", "2026-01-30", the original Phase 4 finding) and, confirmed by the Phase 6
-# eval harness auditing 84 untraced figures across 21 real runs, as a negative sign too
-# ("-2.26 trailing standard deviations"). 37 of those 84 (44%, by far the largest single cause)
-# were genuinely grounded figures the checker had misread as positive because U+2011 wasn't in
-# SIGN_CHARS -- see NOTES.md. Including it here is still safe despite U+2011 also marking word/
-# date hyphenation, because _NUMBER_RE's sign group only matches immediately adjacent to a number
-# (optionally through "$") -- a hyphen elsewhere in a compound word, nowhere near a digit, was
-# never at risk and still isn't.
+# Claude's own prose doesn't stick to ASCII for dates, labels, or negative numbers, and these
+# uses don't cleanly separate by character. Every dash-like character _DASH_CHARS excludes as a
+# date/quarter/form-label separator ("10-Q", "FQ4'24", "2026-01-30") has also turned up glued
+# directly onto a negative figure instead, found one code point at a time as each showed up in a
+# real run: U+2011 non-breaking hyphen ("-2.26 trailing standard deviations", the Phase 6 eval
+# harness's 84-untraced-figure audit) and U+2013 en dash ("-$11.557B", a live Streamlit run on
+# Ford's derived Q4 2025 operating loss) were each added to SIGN_CHARS only after being caught
+# live -- see NOTES.md. Rather than keep enumerating individual dash characters as new ones show
+# up, _SIGN_CHARS is defined as a superset of _DASH_CHARS (plus U+2212, true minus -- see below):
+# any character capable of standing in for a hyphen in Claude's prose is now also treated as
+# capable of standing in for a minus sign, so a newly observed dash only has to be added in one
+# place. U+2212 stays out of _DASH_CHARS in the other direction: it's a math symbol (Unicode
+# category Sm), not a dash (category Pd), and nothing in this codebase has ever seen Claude use
+# it to join a date or a form label, so adding it to the exclusion patterns built on _DASH_CHARS
+# would just be unused surface area, not a real gap closed.
 _DASH_CHARS = "\\-\u2010\u2011\u2012\u2013\u2014"
-_SIGN_CHARS = "\\-\u2212\u2011"
+_SIGN_CHARS = _DASH_CHARS + "\u2212"
 
 # One combined pattern for every prose format the agent writes ($90.0 billion, $90,007 million,
 # 57,006,000,000, 45.1%, 0.451, $1.2B), so overlapping interpretations across formats never need
@@ -41,9 +45,25 @@ _SIGN_CHARS = "\\-\u2212\u2011"
 # `q4_subtraction_value` when the model quotes it in prose) is never matched -- \b only holds
 # between a non-word and a word character, and "$"/"-"/whitespace are all non-word, but a
 # letter immediately before a digit is not.
+#
+# The sign group also carries a left-context check the other groups don't need: a dash-like
+# character means "minus" only when nothing number-like precedes it. Making _SIGN_CHARS a full
+# superset of _DASH_CHARS (above) was a real fix for the U+2013 case but, on its own, was too
+# broad in a specific way -- re-scoring the Phase 6 eval harness's 21 saved traces against it
+# surfaced 8 regressions where an en dash was a *range* separator, not a sign, sitting directly
+# against the tail of the first number with no space ("$42.4B" then "-$99.9B" mean "$42.4B to
+# $99.9B", not a negative $99.9B; likewise "0.842" then "-0.846" as consecutive quarters' debt-to-
+# assets ratios). A genuine negative sign in Claude's prose is preceded by whitespace or
+# punctuation ("was -$11.557B", "(-2.26 trailing..."); a range's second dash is preceded by the
+# end of the first number itself -- a digit, "%", or a scale letter/word. `(?<![\w%])` right
+# before the sign character class encodes exactly that distinction: it's wrapped with the sign
+# group in its own optional unit (rather than placed once at the top of the whole pattern) so it
+# constrains only the sign attempt, never the unsigned no-dollar-no-sign case that most matches
+# take -- \b already handles that case's own left-context requirement independently, two
+# positions later in the pattern. See NOTES.md for the before/after re-score.
 _NUMBER_RE = re.compile(
     rf"""
-    (?P<sign>[{_SIGN_CHARS}])?
+    (?:(?<![\w%])(?P<sign>[{_SIGN_CHARS}]))?
     (?P<dollar>\$)?
     \b
     (?P<mantissa>

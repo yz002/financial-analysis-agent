@@ -371,3 +371,38 @@
   factors) referenced in prose rather than a value; and 1 general accounting knowledge (Costco's
   16/17-week fourth quarter) — the same borderline case the Phase 4 entry above already
   documented for a different company.
+
+- **A third negative-sign character (U+2013, en dash) turned up in ordinary live use of the
+  Streamlit app, and the first fix for it was itself wrong — not incomplete like the U+2011/
+  U+2212 fixes before it, but wrong in a specific, structural way worth recording separately.**
+  Running "What was Ford's gross margin last quarter?" live surfaced 4 untraced figures the
+  checker should have caught: Ford's derived Q4 2025 operating loss, written as "operating income
+  of –$11.557B (–25.18% margin)" — a real, correctly-cited `get_financial_statement` value
+  (`tag: "derived"`, `is_derived: True`), missed only because the model's minus sign was U+2013,
+  and `_SIGN_CHARS` (at that point `\-`, U+2212, U+2011 — added one at a time as each was caught
+  live, per the entries above) didn't include it. The first fix redefined `_SIGN_CHARS` as a full
+  superset of `_DASH_CHARS` (`_SIGN_CHARS = _DASH_CHARS + "−"`) specifically to stop this
+  one-at-a-time pattern: any character usable as a date/label-joining dash would now also be
+  usable as a sign, so a fourth dash character wouldn't need its own future fix.
+  **That fix was wrong, not just risky in theory** — re-scoring the Phase 6 eval harness's 21
+  saved traces against it (no new API calls, same traces used throughout this file) surfaced 8
+  regressions, dropping pooled grounding from 93.8% to 92.7% (44 untraced became 52). All 8 were
+  the same shape: an en dash joining a *range*, not marking a sign, with its second number now
+  misread as negative — "$42.4B–$99.9B" (a forecast's 95% confidence band, `costco_revenue_
+  forecast`, 3 occurrences across 2 runs) and "0.842–0.846" (consecutive quarters' debt-to-assets
+  ratio, `ford_10q_anomalies`, 3 runs). The distinguishing signal was always available and cheap
+  to check: a genuine negative sign is preceded by whitespace or punctuation ("was –$11.557B",
+  "(–2.26 trailing..."), while a range's second dash sits directly against the tail of the first
+  number — a digit, "%", or a scale letter/word ("B" in "42.4B–", "2" in "0.842–") — with no space
+  between them. Fixed by wrapping the sign group with a left-context lookbehind,
+  `(?:(?<![\w%])(?P<sign>[...]))?`, rather than reverting the `_DASH_CHARS` superset: the
+  superset itself was the right instinct (stop adding dash characters one at a time), the missing
+  piece was that "is this character a dash" and "does this character mean minus *here*" are
+  different questions, and only the second one needed answering per-occurrence. Re-scoring again
+  confirms this closes the regression exactly: pooled grounding returns to 93.8% (44/710
+  untraced, identical figure-for-figure to the pre-U+2013-fix baseline — zero regressions, zero
+  incidental improvements on this saved set), while the live Ford gross-margin trace that
+  motivated the whole fix still resolves fully (10/10 traced). Regression tests for both
+  directions are in `tests/test_guardrails.py`, built from the actual strings in the saved traces
+  rather than synthetic ones, specifically so a future widening of `_SIGN_CHARS` can't silently
+  re-break the range case to fix some other sign character, or vice versa.
