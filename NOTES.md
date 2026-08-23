@@ -162,6 +162,23 @@
   production data source. A real deployment would use a licensed market
   data vendor instead.
 
+- **`anthropic` is pinned to `<1.0.0` in `requirements.txt` because 1.0 breaks
+  `tests/test_app.py`'s error-mocking.** Before this project pinned anything but `yfinance`,
+  a fresh `pip install -r requirements.txt` resolved `anthropic` to whatever was newest — as
+  of writing, that's 1.0.0, which replaced the SDK's `httpx` dependency with a new `httpx2`
+  package (`anthropic.APIConnectionError.__init__` now type-hints `request: httpx2.Request`,
+  not `httpx.Request`). `test_app.py` constructs that error with `httpx.Request(...)` to
+  simulate a connection failure for `src/app/main.py`'s error-mapping tests, and under 1.0
+  `httpx` isn't even transitively installed anymore, so test collection fails outright
+  (`ModuleNotFoundError: No module named 'httpx'`) — caught while building
+  `requirements-lock.txt` and dry-running it against a genuinely clean install, since the
+  project's own long-lived dev `.venv` had `anthropic==0.122.0` installed from before and
+  masked the break. Pinning below 1.0 is a deliberate stopgap, not a decision to skip the
+  migration: moving to 1.0/`httpx2` needs `test_app.py`'s mocking updated and
+  `src/app/main.py`'s `except anthropic.APIConnectionError` verified against the new SDK,
+  which is a real task with its own verification pass, not something to fold into unrelated
+  CI/lockfile setup.
+
 - **The no-arithmetic constraint is now structurally checked (`src/agent/guardrails.py`'s
   `check_figures`, wired into `run_agent`'s returned `figure_check`), but it flags rather than
   blocks, and a live verification pass against 8 real `run_agent` calls (the README's target

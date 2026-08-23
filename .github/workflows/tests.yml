@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: pip install -r requirements-lock.txt
+
+      - name: Seed EDGAR cache from committed fixtures
+        run: |
+          mkdir -p data/cache
+          cp tests/fixtures/edgar_cache/*.json data/cache/
+
+      - name: Run tests
+        env:
+          # Never sent over the network: the fixture cache above covers every
+          # EDGAR request the suite makes, so EdgarClient never gets past its
+          # cache-hit path. Only set because EdgarClient.__init__ requires the
+          # env var to be present at all, cache hits or not.
+          SEC_USER_AGENT: "CI test runner ci@example.com"
+        run: pytest

@@ -1,5 +1,7 @@
 # Financial Analysis Agent
 
+[![Tests](https://github.com/yz002/financial-analysis-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/yz002/financial-analysis-agent/actions/workflows/tests.yml)
+
 An FP&A copilot that answers plain-English questions about company financials by pulling
 data from SEC filings and market sources, running the analysis in Python, and explaining
 the results with sources attached.
@@ -117,6 +119,13 @@ streamlit run src/app/main.py
 Needs network access on first use (SEC EDGAR and the Anthropic API); EDGAR responses are
 cached to `data/cache/` after that. A single query typically takes 30+ seconds — the agent
 may make several tool calls before answering.
+
+`requirements.txt` is a loose spec (only `yfinance` is pinned); `requirements-lock.txt` is
+the exact set of versions this project is developed and tested against, from `pip freeze`
+against a clean install of `requirements.txt`. Prefer the loose spec day-to-day so you pick
+up compatible patches; use the lockfile (`pip install -r requirements-lock.txt`) to reproduce
+a known-working environment exactly, e.g. if a fresh install ever pulls in a breaking major
+version bump.
 
 ## Roadmap
 
