@@ -528,3 +528,40 @@
   above, plus a "down 5%"-shaped test proving the word alone can't fabricate a match and a
   same-shaped test proving a figure that already traces positive is never touched by the fallback
   at all.
+
+- **SEC's ticker-to-CIK mapping can repoint a ticker at a newly registered successor entity
+  after a merger, reorganization, or redomiciliation — with none of the predecessor's XBRL
+  history — and this looks exactly like a data gap unless it's detected explicitly.** Confirmed
+  real case, found investigating a 21-ticker sweep anomaly: XOM came back with only 94 total
+  `us-gaap` tags and revenue data starting only in 2025, implausible for a company Exxon's size
+  with decades of filings. Root cause traced to `data.sec.gov`: Exxon redomiciled from New Jersey
+  to Texas on 2026-07-01, and that reorganization created "ExxonMobil Holdings Corp" (CIK
+  `2115436`) as a new SEC registrant — a **successor registrant under SEC Rule 12g-3(a)**, which
+  lets a corporate reorganization's new legal entity inherit the predecessor's reporting
+  obligations (and, evidently, its ticker) without itself having any filing history. SEC's
+  `company_tickers.json` (what `cik_lookup._load_ticker_map` uses) already points `XOM` at CIK
+  `2115436` — there's no collision or bug in the ticker map, it's correctly reflecting the
+  reorganization — but that CIK's `companyfacts` has only one 10-Q on file (2 real quarterly
+  `Revenues` periods, first period ending 2025-06-30) and zero 10-Ks. The company's real,
+  15+-year financial history is still on EDGAR, filed under a *different* CIK (`34088`,
+  438 `us-gaap` tags, `Revenues` back to 2009) that SEC's ticker map no longer associates with
+  `XOM` (`tickers: []` on that CIK's own `submissions` endpoint) even though it's still actively
+  filing (a 10-Q dated 2026-08-03, current Forms 3/4, 8-Ks). Confirmed this is XOM-specific, not
+  an energy-sector or EDGAR-wide quirk: CVX has a normal, unsplit 622-tag history back to 2007.
+  **This is a general class of problem, not an XOM quirk** — any ticker can be repointed this way
+  after a corporate restructuring, and the failure mode is silent: `get_concept`/`get_statement`
+  return a short-but-real series with no error, indistinguishable from "this company just doesn't
+  have much history" without an explicit check. Deliberately not auto-fixed by falling back to a
+  predecessor CIK: splicing two distinct legal entities' filings into one series without saying
+  so would contradict this project's provenance principle (every number traces to one filing from
+  one registrant), even though a fallback would produce a more "complete-looking" series. Instead,
+  `statements.get_statement` now flags it: when the resolved CIK's full assembled history has
+  fewer periods than a plausible minimum (`statements._MIN_PLAUSIBLE_PERIODS`, 8 quarterly / 3
+  annual), it sets `df.attrs["sparse_history"]` and a `df.attrs["sparse_history_note"]` naming the
+  resolved entity and CIK, stating how much history actually exists, and noting that a predecessor
+  registrant may hold the rest — which `agent/tools.py`'s `get_financial_statement`/`get_ratios`
+  relay into their `notes`, so the agent (and, through it, the user) sees this explanation instead
+  of silently treating a 2-quarter series as XOM's whole financial history. The threshold is a
+  heuristic, not a certainty — a genuinely young company (a recent IPO) can also legitimately have
+  under 8 quarters on file, which is exactly why the note is phrased as "may indicate" and names
+  the specific entity/CIK rather than asserting a successor-registrant situation outright.

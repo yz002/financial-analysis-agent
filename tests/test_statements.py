@@ -138,6 +138,10 @@ def test_get_statement_three_candidate_year_reconciliation_not_applicable(monkey
         return ann_df if period_length == "annual" else qtr_df
 
     monkeypatch.setattr("src.analysis.statements.get_concept", fake_get_concept)
+    monkeypatch.setattr("src.analysis.statements.get_cik", lambda ticker, client=None: "0000000000")
+    monkeypatch.setattr(
+        "src.analysis.statements.get_company_name", lambda ticker, client=None: "Test Corp"
+    )
     stmt = get_statement("TEST", "quarterly", client=object())
 
     row = stmt.loc[stmt["period_end"] == pd.Timestamp("2024-12-31")].iloc[0]
@@ -237,3 +241,102 @@ def test_sorted_by_period_end(msft_quarterly):
 def test_unknown_period_length_raises(client):
     with pytest.raises(ValueError):
         get_statement("MSFT", "monthly", client=client)
+
+
+# --- sparse-history / successor-registrant detection ------------------------
+#
+# See statements.py's `_MIN_PLAUSIBLE_PERIODS` docstring and NOTES.md: SEC's ticker-to-CIK map
+# can repoint a ticker at a newly registered successor entity after a merger, reorganization, or
+# redomiciliation (confirmed real case: ExxonMobil's 2026-07-01 Texas redomiciliation created
+# "ExxonMobil Holdings Corp", CIK 2115436, as XOM's SEC Rule 12g-3(a) successor registrant). That
+# successor inherits the ticker but starts with none of the predecessor's XBRL history, which
+# would otherwise look just like a data gap. This is a general class of problem, not an XOM
+# quirk -- these tests exercise the detection mechanism generically, with one live confirmatory
+# case at the end for the specific ticker that surfaced it.
+
+
+def test_is_sparse_history_below_threshold():
+    from src.analysis.statements import _is_sparse_history
+
+    assert _is_sparse_history("quarterly", 2) is True
+    assert _is_sparse_history("quarterly", 7) is True
+    assert _is_sparse_history("annual", 2) is True
+
+
+def test_is_sparse_history_at_or_above_threshold_not_sparse():
+    from src.analysis.statements import _is_sparse_history
+
+    assert _is_sparse_history("quarterly", 8) is False
+    assert _is_sparse_history("quarterly", 76) is False
+    assert _is_sparse_history("annual", 3) is False
+
+
+def test_sparse_history_note_names_entity_and_cik():
+    from src.analysis.statements import _sparse_history_note
+
+    note = _sparse_history_note("zzzz", "0009999999", "Thin Successor Corp", "quarterly", 2)
+    assert "ZZZZ" in note
+    assert "0009999999" in note
+    assert "Thin Successor Corp" in note
+    assert "2 quarterly period" in note
+    assert "12g-3" in note
+
+
+def test_get_statement_flags_sparse_history_for_thin_synthetic_entity(monkeypatch, client):
+    # A synthetic entity with only 2 real quarterly revenue periods and nothing else -- the same
+    # shape as XOM's new CIK today (see the live test below), but decoupled from real EDGAR data
+    # so this test doesn't silently stop exercising the "thin" case once ExxonMobil Holdings
+    # Corp's own history grows past the threshold.
+    qtr_df = pd.DataFrame([
+        _qtr_row("2025-04-01", "2025-06-30", 81_506_000_000, "Q2", 2026, filed="2026-08-03"),
+        _qtr_row("2026-04-01", "2026-06-30", 116_017_000_000, "Q2", 2026, filed="2026-08-03"),
+    ])
+
+    def fake_try_get_concept(ticker, concept, period_length, client):
+        if concept == "revenue" and period_length == "quarterly":
+            return qtr_df
+        return None
+
+    monkeypatch.setattr("src.analysis.statements._try_get_concept", fake_try_get_concept)
+    monkeypatch.setattr(
+        "src.analysis.statements.get_cik", lambda ticker, client=None: "0002115436"
+    )
+    monkeypatch.setattr(
+        "src.analysis.statements.get_company_name",
+        lambda ticker, client=None: "Thin Successor Corp",
+    )
+
+    stmt = get_statement("ZZZZ", "quarterly", client=client)
+
+    assert stmt.attrs["periods_available"] == 2
+    assert stmt.attrs["sparse_history"] is True
+    assert stmt.attrs["cik"] == "0002115436"
+    assert stmt.attrs["entity_name"] == "Thin Successor Corp"
+    assert "Thin Successor Corp" in stmt.attrs["sparse_history_note"]
+    assert "predecessor" in stmt.attrs["sparse_history_note"]
+
+
+def test_msft_full_history_not_flagged_sparse(msft_quarterly):
+    # Negative case: an established filer with 76 quarters on file must not be flagged.
+    assert msft_quarterly.attrs["sparse_history"] is False
+    assert msft_quarterly.attrs["sparse_history_note"] is None
+    assert msft_quarterly.attrs["periods_available"] >= 8
+    assert msft_quarterly.attrs["cik"] == "0000789019"
+
+
+def test_xom_successor_registrant_sparse_history(client):
+    # Real, confirmed case (see NOTES.md): ExxonMobil redomiciled from New Jersey to Texas on
+    # 2026-07-01, and SEC's ticker map now resolves XOM to "ExxonMobil Holdings Corp"
+    # (CIK 2115436) -- a Rule 12g-3(a) successor registrant with, as of this writing, a single
+    # 10-Q on file (2 real quarterly revenue periods), despite Exxon being a household name with
+    # a decades-long filing history under a different (predecessor) CIK. This assertion will need
+    # loosening once ExxonMobil Holdings Corp accumulates 8+ quarters of its own history
+    # (expected 2027+) -- at that point it correctly stops being "sparse" by this heuristic,
+    # which is the intended behavior, not a regression.
+    stmt = get_statement("XOM", "quarterly", client=client)
+
+    assert stmt.attrs["sparse_history"] is True
+    assert stmt.attrs["cik"] == "0002115436"
+    assert "ExxonMobil" in stmt.attrs["entity_name"]
+    assert "0002115436" in stmt.attrs["sparse_history_note"]
+    assert "12g-3" in stmt.attrs["sparse_history_note"]

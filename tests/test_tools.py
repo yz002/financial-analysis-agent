@@ -151,6 +151,31 @@ def test_get_financial_statement_data_unavailable(monkeypatch):
     assert result["error_type"] == "data_unavailable"
 
 
+def test_get_financial_statement_relays_sparse_history_note(monkeypatch):
+    # get_statement flags an implausibly thin resolved CIK via df.attrs (see statements.py --
+    # e.g. a successor registrant from a merger/reorganization/redomiciliation, confirmed real
+    # case: ExxonMobil's 2026-07-01 redomiciliation). get_financial_statement must relay that
+    # note, not just the row data, so the agent doesn't treat a short series as the company's
+    # whole history.
+    stmt = _make_statement(2)
+    stmt.attrs["sparse_history"] = True
+    stmt.attrs["sparse_history_note"] = "XOM resolves to CIK 0002115436 (ExxonMobil Holdings Corp)..."
+    _install_statement(monkeypatch, stmt)
+
+    result = json.loads(tools.get_financial_statement("XOM", periods=2))
+    assert any("ExxonMobil Holdings Corp" in n for n in result["notes"])
+
+
+def test_get_financial_statement_no_sparse_history_note_when_not_flagged(monkeypatch):
+    stmt = _make_statement(4)
+    stmt.attrs["sparse_history"] = False
+    stmt.attrs["sparse_history_note"] = None
+    _install_statement(monkeypatch, stmt)
+
+    result = json.loads(tools.get_financial_statement("msft", periods=4))
+    assert result["notes"] == []
+
+
 def test_get_financial_statement_source_error(monkeypatch):
     def raise_generic(ticker, period_length="quarterly", periods=None):
         raise RuntimeError("EDGAR is down")
@@ -203,6 +228,16 @@ def test_get_ratios_missing_concept_note_and_null_values(monkeypatch):
 
     assert all(r["value"] is None for r in result["ratios"]["gross_margin"])
     assert any("gross_profit" in n and "gross_margin" in n for n in result["notes"])
+
+
+def test_get_ratios_relays_sparse_history_note(monkeypatch):
+    stmt = _make_statement(2)
+    stmt.attrs["sparse_history"] = True
+    stmt.attrs["sparse_history_note"] = "XOM resolves to CIK 0002115436 (ExxonMobil Holdings Corp)..."
+    _install_statement(monkeypatch, stmt)
+
+    result = json.loads(tools.get_ratios("XOM", ratio_names=["gross_margin"]))
+    assert any("ExxonMobil Holdings Corp" in n for n in result["notes"])
 
 
 def test_get_ratios_cap_note(monkeypatch):

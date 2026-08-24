@@ -85,6 +85,16 @@ def _unavailable_note(concept: str, ticker: str, suffix: str = "") -> str:
     return f"No {concept} data available for {ticker}; this concept is not reported in its filings.{suffix}"
 
 
+def _sparse_history_notes(stmt) -> list[str]:
+    """Relay get_statement's sparse-history signal (df.attrs["sparse_history_note"]) as a tool
+    note, when the resolved CIK's on-file history is implausibly thin -- possibly a successor
+    registrant from a merger/reorganization/redomiciliation rather than a genuinely young filer
+    (see statements.py's module docstring and NOTES.md's confirmed ExxonMobil case). Empty list
+    when not sparse, so callers can unconditionally extend their notes list with this."""
+    note = stmt.attrs.get("sparse_history_note")
+    return [note] if note else []
+
+
 def _error(ticker: str, error_type: str, message: str, **extra) -> str:
     """
     Build a tool-result error payload with a machine-checkable `error_type`
@@ -158,6 +168,15 @@ def get_financial_statement(
     present only when applicable. A divergence reflects a real vintage
     mismatch between the fiscal-year total and the quarters (see the
     "notes" entry when this occurs), not an error in either figure.
+
+    If the resolved ticker's CIK has implausibly little on-file history for
+    an established company (e.g. only a couple of quarters), "notes" names
+    the resolved entity/CIK and flags that this may be a newly registered
+    successor entity from a merger/reorganization/redomiciliation rather
+    than a genuinely young company -- a predecessor CIK may hold the real
+    history under a different registration (see statements.py's
+    sparse-history detection; this tool never looks for or splices in a
+    predecessor's data itself).
     """
     ticker = ticker.upper()
     effective_periods, capped = _cap_periods(periods)
@@ -167,6 +186,7 @@ def get_financial_statement(
 
     unavailable = [c for c in ALL_CONCEPTS if stmt[c].isna().all()]
     notes = [_unavailable_note(c, ticker) for c in unavailable]
+    notes.extend(_sparse_history_notes(stmt))
     if capped:
         notes.append(
             f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
@@ -239,7 +259,10 @@ def get_ratios(
     an input concept isn't reported for this ticker still appears -- its
     values are null and a note in "notes" explains why. `periods`
     (including null, meaning "full history") is capped at MAX_PERIODS
-    periods to bound response size.
+    periods to bound response size. As with get_financial_statement,
+    "notes" flags when the resolved ticker's CIK has implausibly little
+    on-file history -- possibly a successor entity from a merger/
+    reorganization/redomiciliation rather than a genuinely young company.
     """
     ticker = ticker.upper()
     if ratio_names is None:
@@ -256,6 +279,7 @@ def get_ratios(
         return error
 
     notes = []
+    notes.extend(_sparse_history_notes(stmt))
     if capped:
         notes.append(
             f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
@@ -599,7 +623,10 @@ TOOL_DEFINITIONS = [
             "q4_diverges_from_subtraction (true if the two differ meaningfully) -- present only "
             "when applicable; a divergence reflects a real vintage mismatch between the FY "
             "total and the quarters, not an error, and is also called out in notes when it "
-            "occurs."
+            "occurs. If the resolved ticker's CIK has implausibly little on-file history for an "
+            "established company, notes flags this as a possible successor-registrant case "
+            "(e.g. after a merger, reorganization, or redomiciliation) rather than treating a "
+            "short series as the company's whole history."
         ),
         "input_schema": {
             "type": "object",
@@ -631,7 +658,8 @@ TOOL_DEFINITIONS = [
             "current_ratio, roa, roe. Every value includes the raw inputs and their source "
             "tag/filed date/derived flag. A ratio that can't be computed because an input "
             "concept isn't reported comes back null with an explanatory note, never silently "
-            "omitted."
+            "omitted. Also flags implausibly little on-file history for the resolved CIK as a "
+            "possible successor-registrant case, same as get_financial_statement."
         ),
         "input_schema": {
             "type": "object",

@@ -46,6 +46,7 @@ callers (ratios.py) never need `hasattr`/`in df.columns` guards.
 
 import pandas as pd
 
+from ..data.cik_lookup import get_cik, get_company_name
 from ..data.concepts import CONCEPTS, ConceptNotFoundError, get_concept
 from ..data.edgar_client import EdgarClient
 
@@ -85,6 +86,20 @@ _Q4_RECONCILIATION_TOLERANCE = 0.005
 
 _ONE_DAY = pd.Timedelta(days=1)
 
+# Minimum period count below which a resolved CIK's on-file history is implausibly thin for what
+# a caller would normally expect of an established company -- the signal this project uses to
+# flag a likely SEC Rule 12g-3(a) "successor registrant" situation: a merger, reorganization, or
+# redomiciliation creates a *new* CIK that a ticker's SEC mapping repoints to, which inherits the
+# ticker but starts with none of the predecessor entity's XBRL filing history. Confirmed real
+# case: ExxonMobil redomiciled from New Jersey to Texas on 2026-07-01, and SEC's ticker map now
+# resolves XOM to "ExxonMobil Holdings Corp" (CIK 2115436), a registrant with only one 10-Q on
+# file, while 15+ years of Exxon's real history sits under a predecessor CIK the ticker map no
+# longer points at. This is a *class* of problem, not an XOM quirk -- any ticker can be repointed
+# this way after a corporate restructuring. See NOTES.md. Annual mode uses a lower bound than
+# quarterly (3 vs. 8) since annual filings are inherently sparser -- a genuinely long-filing
+# company still clears 3 annual periods easily, while a fresh successor registrant won't.
+_MIN_PLAUSIBLE_PERIODS = {"quarterly": 8, "annual": 3}
+
 
 def get_statement(
     ticker: str,
@@ -119,6 +134,20 @@ def get_statement(
     periods: if given, return only the most recent `periods` rows (applied
     after assembling full history, since Q4 derivation for a recent quarter
     can depend on an FY row older than the truncation window).
+
+    df.attrs carries entity/history-depth metadata not tied to any one row:
+    "entity_name" and "cik" (the resolved registrant, from SEC's ticker
+    map), "periods_available" (count of distinct period_end values across
+    the *full* assembled history, before the `periods` truncation above),
+    "sparse_history" (bool -- True if periods_available is implausibly low
+    for period_length, see `_MIN_PLAUSIBLE_PERIODS`), and
+    "sparse_history_note" (a plain-English explanation naming the resolved
+    entity/CIK, or None when not sparse) -- see `_is_sparse_history`/
+    `_sparse_history_note` and NOTES.md's confirmed ExxonMobil case for what
+    this is meant to catch: SEC's ticker map repointing to a newly
+    registered successor entity after a merger/reorganization/
+    redomiciliation, which inherits the ticker but not the predecessor's
+    filing history.
 
     Raises ValueError for an unknown period_length. Raises
     ConceptNotFoundError only if literally no concept has any usable data
@@ -209,9 +238,54 @@ def get_statement(
         )
 
     statement = statement.sort_values("period_end").reset_index(drop=True)
+
+    periods_available = len(period_ends)
+    entity_name = get_company_name(ticker, client=client) or ticker.upper()
+    cik = get_cik(ticker, client=client)
+    sparse = _is_sparse_history(period_length, periods_available)
+    statement.attrs["entity_name"] = entity_name
+    statement.attrs["cik"] = cik
+    statement.attrs["periods_available"] = periods_available
+    statement.attrs["sparse_history"] = sparse
+    statement.attrs["sparse_history_note"] = (
+        _sparse_history_note(ticker, cik, entity_name, period_length, periods_available)
+        if sparse
+        else None
+    )
+
     if periods is not None:
         statement = statement.tail(periods).reset_index(drop=True)
     return statement
+
+
+def _is_sparse_history(period_length: str, periods_available: int) -> bool:
+    """True if `periods_available` falls below the plausible-minimum for `period_length` -- see
+    `_MIN_PLAUSIBLE_PERIODS` above for what this is meant to catch and why."""
+    return periods_available < _MIN_PLAUSIBLE_PERIODS[period_length]
+
+
+def _sparse_history_note(
+    ticker: str, cik: str, entity_name: str, period_length: str, periods_available: int
+) -> str:
+    """Plain-English explanation of a sparse-history finding, naming the actually-resolved entity
+    and CIK so a caller (ultimately the agent, then the user) can tell this apart from the ticker
+    genuinely being an unrecognized/bad company -- see `_MIN_PLAUSIBLE_PERIODS` above and
+    NOTES.md's confirmed ExxonMobil case. Deliberately does not attempt to locate or splice in a
+    predecessor CIK's data: silently combining two distinct legal entities' filings into one
+    series would violate this project's provenance principle (every number traces to one filing
+    from one registrant) even if the combined series looked more complete."""
+    return (
+        f"{ticker.upper()} resolves to CIK {cik} ({entity_name}), which has only "
+        f"{periods_available} {period_length} period(s) of history in SEC EDGAR -- implausibly "
+        "little for an established company. This commonly happens when SEC's ticker-to-CIK "
+        "mapping points at a newly registered successor entity (e.g. a merger, reorganization, "
+        "or redomiciliation creating a new registrant under SEC Rule 12g-3(a)) rather than the "
+        "company's original, longer-filing registrant. A predecessor CIK may hold the company's "
+        "earlier financial history under a different registration -- this tool does not look for "
+        "or splice in a predecessor's data, since combining two distinct legal entities' filings "
+        "into one series without saying so would contradict this project's source-provenance "
+        "principle."
+    )
 
 
 def _try_get_concept(
