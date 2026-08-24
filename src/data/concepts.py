@@ -76,6 +76,18 @@ _ALLOWED_FORMS = {"10-K", "10-Q", "10-K/A", "10-Q/A"}
 _QUARTERLY_DAYS_MIN, _QUARTERLY_DAYS_MAX = 80, 100
 _ANNUAL_DAYS_MIN, _ANNUAL_DAYS_MAX = 350, 380
 
+# Some 52/53-week retail fiscal calendars give one quarter of the year a genuinely longer span
+# than the others (~111-125 days, i.e. 16-18 weeks) to absorb the leftover week(s) — confirmed on
+# Costco (the extra week lands in Q4) and Kroger (the extra week lands in Q1). A fact this long is
+# only classified "quarterly" if it's the *opening* period of a reporting cycle: see
+# _reclassify_long_opening_quarters below for why day-span alone isn't a safe way to widen
+# _QUARTERLY_DAYS_MAX itself (it would also swallow genuine 4-6 month YTD cumulative facts).
+_LONG_OPENING_QUARTER_DAYS_MAX = 125
+# Two "same start" or "contiguous" periods aren't always exactly back-to-back in EDGAR's own
+# dates — see NOTES.md's one-day (and, confirmed across TGT/KR/HD/MSFT/KO, up to two-day)
+# period_start drift between filings of different vintages for what's conceptually one period.
+_PERIOD_DATE_TOLERANCE_DAYS = 2
+
 CONCEPTS = {
     "revenue": {
         "tags": [
@@ -244,6 +256,60 @@ def _classify_period_length(start: str, end: str) -> str:
     return "other"
 
 
+def _reclassify_long_opening_quarters(deduped: list[dict], lengths: list[str]) -> list[str]:
+    """
+    Upgrade an "other"-classified fact to "quarterly" when it's a genuinely long
+    (up to `_LONG_OPENING_QUARTER_DAYS_MAX` days) *opening* period of a reporting cycle — the
+    52/53-week-calendar case documented on `_LONG_OPENING_QUARTER_DAYS_MAX` above.
+
+    Widening `_QUARTERLY_DAYS_MAX` itself was considered and rejected: that bound is deliberately
+    tight so a 6-/9-month year-to-date cumulative fact (routinely 180+ days) never gets mistaken
+    for a real quarter. Contiguity ("does nothing else end right where this fact starts") was
+    tried and rejected too: it doesn't actually distinguish an opening quarter from a closing one,
+    because a fiscal calendar has no gaps — the *previous* fiscal year's annual fact ends exactly
+    one day before *every* year's Q1 starts, so Q1 is always "contiguous" with something. The
+    signal that does work is comparing against the annual fact for the same fiscal year: Q1 is the
+    one period whose period_start coincides with the annual fact's own period_start (both begin
+    the fiscal year), while a long *closing* quarter (Costco's Q4) shares the annual fact's
+    period_end instead, starting well after the year began. So a candidate is only promoted when:
+
+    - its period_start matches (within `_PERIOD_DATE_TOLERANCE_DAYS`) an annual-classified fact's
+      period_start for this concept — i.e. it opens the fiscal year, not closes it; and
+    - it's the shortest fact sharing that period_start — a YTD-through-Q2 fact also starts at the
+      fiscal-year start (so also matches an annual fact's start) but is always longer than the
+      real Q1 fact it shares that start with, so picking only the shortest member of each
+      start-sharing group keeps a long YTD fact from qualifying just because it starts alongside a
+      genuine long opening quarter.
+
+    This deliberately leaves a long *closing* quarter (Costco's ~111-125-day Q4) classified
+    "other" here — its real filed value is still surfaced quarterly via statements.py's
+    discrete-Q4-fact path, which already handles exactly this case (see NOTES.md), and this
+    function's job is only the opening-quarter gap that nothing else in the pipeline covers.
+    """
+    starts = [pd.Timestamp(e["start"]) for e in deduped]
+    days = [(pd.Timestamp(e["end"]) - s).days for e, s in zip(deduped, starts)]
+    tol = pd.Timedelta(days=_PERIOD_DATE_TOLERANCE_DAYS)
+    annual_starts = [starts[j] for j, length in enumerate(lengths) if length == "annual"]
+
+    result = list(lengths)
+    for i, length in enumerate(lengths):
+        if length != "other":
+            continue
+        d = days[i]
+        if not (_QUARTERLY_DAYS_MAX < d <= _LONG_OPENING_QUARTER_DAYS_MAX):
+            continue
+        s = starts[i]
+        opens_fiscal_year = any(abs(a - s) <= tol for a in annual_starts)
+        if not opens_fiscal_year:
+            continue
+        is_shortest_of_start_family = not any(
+            j != i and abs(starts[j] - s) <= tol and days[j] < d for j in range(len(deduped))
+        )
+        if is_shortest_of_start_family:
+            result[i] = "quarterly"
+    return result
+
+
 def _build_dataframe(deduped: list[dict], kind: str) -> pd.DataFrame:
     df = pd.DataFrame(
         {
@@ -258,7 +324,6 @@ def _build_dataframe(deduped: list[dict], kind: str) -> pd.DataFrame:
     )
     if kind == "duration":
         df.insert(1, "period_start", pd.to_datetime([e["start"] for e in deduped]))
-        df["period_length"] = [
-            _classify_period_length(e["start"], e["end"]) for e in deduped
-        ]
+        lengths = [_classify_period_length(e["start"], e["end"]) for e in deduped]
+        df["period_length"] = _reclassify_long_opening_quarters(deduped, lengths)
     return df.sort_values("period_end").reset_index(drop=True)

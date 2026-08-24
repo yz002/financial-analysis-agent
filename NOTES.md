@@ -389,6 +389,49 @@
   16/17-week fourth quarter) — the same borderline case the Phase 4 entry above already
   documented for a different company.
 
+- **Kroger's fiscal Q1 genuinely spans ~16 weeks (111 days), which `concepts._classify_period_length`'s
+  tight `_QUARTERLY_DAYS_MIN`/`_QUARTERLY_DAYS_MAX` (80-100 days) bucketed as "other" for every one of
+  Kroger's ~18 fiscal years — Kroger never had a single Q1 usable via `period_length="quarterly"`.**
+  This is the mirror image of the Costco Q4 finding above — a 52/53-week retail calendar giving one
+  quarter of the year a genuinely longer span than the rest — but landing on the *opening* quarter
+  instead of the closing one, and at the extraction layer (`concepts.py`) rather than the derivation
+  layer (`statements.py`), since unlike Costco's Q4, Kroger's Q1 isn't missing — EDGAR reports it
+  directly, it was just misclassified. Simply widening `_QUARTERLY_DAYS_MAX` to cover ~111-125 days was
+  considered and rejected: that bound is deliberately tight to keep a 6-/9-month year-to-date cumulative
+  fact from being mistaken for a real quarter, and a blind widen has no way to tell "Kroger's real Q1"
+  apart from "a company's genuine multi-month YTD fact that happens to land in the same day-span range" —
+  a real, if currently unobserved, risk (checked empirically: across a 26-ticker sweep — the 21-ticker
+  sweep above plus MSFT/NVDA/Ford/Coca-Cola/Costco — every single duration fact of *any* concept with a
+  101-140 day span was either one of Kroger's Q1s or one of Costco's Q4s; nothing else came close, but
+  that's a property of the current cached data, not a structural guarantee). Fixed with a new
+  `concepts._reclassify_long_opening_quarters`, run after the base tight-window classification, that
+  promotes an "other"-classified fact to "quarterly" (up to `_LONG_OPENING_QUARTER_DAYS_MAX`, 125 days,
+  reusing Costco's own wide bound for symmetry) only when it passes two structural checks instead of
+  trusting day-span alone: (a) its `period_start` coincides with an *annual*-classified fact's own
+  `period_start` for the same concept — i.e. it opens the fiscal year, rather than closing it, which is
+  what actually distinguishes Kroger's long Q1 from Costco's long Q4 (a plain "is this fact contiguous
+  with something else's end" check was tried first and rejected: it doesn't discriminate at all, because
+  a fiscal calendar has no gaps — the *prior* year's annual fact always ends one day before *every*
+  year's Q1 starts, so every Q1 is "contiguous" with something regardless of span); and (b) it's the
+  *shortest* duration fact sharing that exact `period_start` — because a 6-month YTD-through-Q2 fact
+  also starts at the fiscal-year start (so it also passes check (a)), and only picking the shortest
+  member of each start-sharing family is what keeps a long YTD fact from qualifying just because it
+  happens to share a start with a genuine long opening quarter. This deliberately leaves Costco's own
+  long Q4 classified "other" at this layer — unchanged behavior, confirmed by a before/after diff of
+  `period_length` value counts across MSFT, NVDA, Ford, Coca-Cola, Walmart, and Costco (byte-for-byte
+  identical) — because Costco's real filed Q4 value is already surfaced quarterly through a different,
+  already-correct mechanism (`statements.py`'s discrete-Q4-fact path), and reclassifying it here would
+  be redundant with, not an improvement on, that existing path. One known, accepted gap: the *current*,
+  not-yet-closed fiscal year's long Q1 stays "other" until that year's 10-K is filed and cached, since
+  there's no annual fact yet to confirm it against — refusing rather than guessing, the same stance
+  `statements._derive_q4` already takes when it can't confirm a tiling. Verified against Kroger's own
+  press release: the extracted quarter ended 2024-05-25 is $45.269B, matching the $45.3B total company
+  sales Kroger reported for that quarter. `get_statement("KR", "quarterly")` now returns Kroger's real
+  filed Q1 for every fiscal year that has one (16 of 17 historical Q1s; the 17th being the known gap
+  above), including years where Kroger's own 10-K tags it via the discrete Item 302 quarterly-data
+  footnote (`fiscal_period="FY"`, not "Q1" — another instance of the project's standing "don't trust
+  fiscal_period alone" caution) rather than a 10-Q's own `fiscal_period="Q1"`.
+
 - **A third negative-sign character (U+2013, en dash) turned up in ordinary live use of the
   Streamlit app, and the first fix for it was itself wrong — not incomplete like the U+2011/
   U+2212 fixes before it, but wrong in a specific, structural way worth recording separately.**
