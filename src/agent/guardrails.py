@@ -138,6 +138,27 @@ _LIST_ORDINAL_RE = re.compile(r"^[ \t]*#{0,3}[ \t]*\*{0,2}\d{1,2}\.[ \t]", re.MU
 # across a table, as in that live run, produced 9 such fragments from 3 real dates.
 _SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2}(?:\d{2})?\b")
 
+# The sign-by-word gap: Claude sometimes states a negative figure as an unsigned magnitude and
+# carries the sign in the surrounding prose instead of a literal sign character -- "the (derived)
+# ~$11B Q4 2025 charge" against a tool value of -$11,054,000,000, or "operating loss of $134M"
+# against -134,000,000. Neither has anything for `_NUMBER_RE`'s `sign` group to match, so the
+# unsigned candidate looks fabricated even though it's a real, correctly cited figure. This word
+# list is intentionally short and financial-statement-specific, not a general sentiment lexicon --
+# see `_negation_match` below for why a word landing nearby is only ever a secondary signal, never
+# sufficient on its own, to accept the flip.
+_NEGATION_WORD_RE = re.compile(
+    r"\b(?:loss(?:es)?|charge[sd]?|deficits?|negative|shortfalls?|wrote\s+off|written\s+off"
+    r"|write-off|down|fell|below)\b",
+    re.IGNORECASE,
+)
+# How far (in characters) a negation word is allowed to sit from the candidate's own span before
+# it counts as "surrounding" it, rather than describing some other number in the same paragraph --
+# "still depressed by the (derived) ~$11B Q4 2025 charge" (9 chars after) and "operating loss of
+# $134M" (4 chars before) are the closest observed cases; "2.38 trailing standard deviations below
+# its own baseline" (30 chars after) is the farthest. 40 covers all three with room to spare
+# without reaching into an unrelated neighboring sentence.
+_NEGATION_WORD_WINDOW = 40
+
 _EXCLUSION_PATTERNS = (
     _FY_YEAR_RE,
     _QUARTER_RE,
@@ -278,6 +299,29 @@ def _find_match(value: float, ndigits: int, tool_values: list[dict]) -> dict | N
     return None
 
 
+def _negation_match(
+    text: str, m: re.Match, value: float, ndigits: int, tool_values: list[dict]
+) -> dict | None:
+    """A fallback for a positive candidate that failed to trace as stated: retry against its
+    negation, but only when both hold -- a negation word (see `_NEGATION_WORD_RE`) sits within
+    `_NEGATION_WORD_WINDOW` characters of the candidate, *and* a tool value actually matches the
+    negated magnitude at the candidate's own precision. Either check alone is too weak. The word
+    alone isn't: "revenue was down 5%" has "down" sitting right against "5%", but if 5% is a
+    genuinely positive growth rate (deceleration, not decline) there's no -5% tool value for it to
+    match, so nothing here ever flips it -- the primary, unsigned check already traces it and this
+    function is never even reached. The tool value alone isn't either: this codebase's numbers are
+    small and can coincide by magnitude alone (e.g. two different ratios both landing near 0.05),
+    so requiring an unrelated nearby word too keeps an accidental magnitude collision from being
+    read as a sign flip. Only called for a candidate with no literal sign character already
+    (`m.group("sign")` falsy) and a positive stated value -- a figure already written with an
+    explicit sign, or as a genuine negative, has nothing to flip."""
+    if not _NEGATION_WORD_RE.search(
+        text[max(0, m.start() - _NEGATION_WORD_WINDOW) : m.end() + _NEGATION_WORD_WINDOW]
+    ):
+        return None
+    return _find_match(-value, ndigits, tool_values)
+
+
 def check_figures(result: dict) -> dict:
     """Verify every numeric figure in result["final_answer"] traces back to a value present in
     result["tool_calls"][*]["tool_result"]. Flags, never modifies the answer. Returns a report:
@@ -291,6 +335,12 @@ def check_figures(result: dict) -> dict:
     for m in _extract_candidates(final_answer):
         normalized_value, ndigits = _normalize(m)
         match = _find_match(normalized_value, ndigits, tool_values)
+        sign_inferred = False
+        if match is None and not m.group("sign") and normalized_value > 0:
+            match = _negation_match(final_answer, m, normalized_value, ndigits, tool_values)
+            if match is not None:
+                normalized_value = -normalized_value
+                sign_inferred = True
         figures.append(
             {
                 "raw_text": m.group(0),
@@ -300,6 +350,7 @@ def check_figures(result: dict) -> dict:
                 "precision_ndigits": ndigits,
                 "format": _format_label(m),
                 "traced": match is not None,
+                "sign_inferred": sign_inferred,
                 "match": (
                     {
                         "tool_call_index": match["tool_call_index"],

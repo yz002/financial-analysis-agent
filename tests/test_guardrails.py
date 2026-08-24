@@ -404,6 +404,121 @@ def test_en_dash_range_of_ratios_does_not_flip_sign_of_second_number():
     assert second_matches[0]["traced"] is True
 
 
+def test_charge_word_flips_sign_of_unsigned_dollar_figure():
+    # Confirmed by re-scoring the Phase 6 eval harness's 21 saved traces: Claude sometimes states
+    # a negative figure as an unsigned magnitude and carries the sign in the surrounding prose
+    # instead of a literal sign character. Real phrasing from a saved ford_10q_anomalies trace;
+    # real (derived) net_income value for that period.
+    call = _statement_call(
+        {"value": -11054000000.0, "tag": "derived", "filed": "2026-02-11", "is_derived": True},
+    )
+    text = (
+        "a sharp cash drawdown — all against a balance sheet still depressed by the "
+        "(derived) ~$11B Q4 2025 charge."
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "$11B")
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is True
+    assert fig["normalized_value"] == -11e9
+
+
+def test_loss_word_flips_sign_of_unsigned_dollar_figure():
+    # Real phrasing from a saved amd_nvda_comparison trace; real operating_income input behind
+    # that quarter's operating_margin ratio.
+    call = _tool_call(
+        "get_ratios",
+        {
+            "ticker": "AMD",
+            "period_length": "quarterly",
+            "notes": [],
+            "ratios": {
+                "operating_margin": [
+                    {
+                        "period_end": "2025-06-28",
+                        "value": -0.0087,
+                        "inputs": {"operating_income": -134000000.0, "revenue": 5400000000.0},
+                        "provenance": {},
+                    }
+                ]
+            },
+        },
+    )
+    text = (
+        "operating margin went *negative* (−1.74%, operating loss of $134M). The following "
+        "quarter rebounded."
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "$134M")
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is True
+    assert fig["normalized_value"] == -134e6
+
+
+def test_below_word_flips_sign_of_unsigned_std_dev_figure():
+    # Real phrasing from a saved amd_nvda_comparison trace; real deviation_std for that flagged
+    # period. The negation word ("below") sits ~30 characters after the figure, near the edge of
+    # _NEGATION_WORD_WINDOW -- this is the farthest of the three live cases the window was sized
+    # to cover.
+    call = _tool_call(
+        "detect_anomalies",
+        {
+            "ticker": "AMD",
+            "metric": "gross_profit",
+            "mode": "growth",
+            "periods": [
+                {
+                    "period_end": "2025-06-28",
+                    "value": -0.181,
+                    "trailing_mean": 0.05,
+                    "trailing_std": 0.1,
+                    "deviation_std": -2.384913482591282,
+                    "is_anomaly": True,
+                }
+            ],
+        },
+    )
+    text = (
+        "is a genuine statistical break: gross profit fell −18.1% QoQ, 2.38 trailing "
+        "standard deviations below its own baseline (flagged)."
+    )
+    report = guardrails.check_figures(_result(text, [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "2.38")
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is True
+    assert abs(fig["normalized_value"] - (-2.38)) < 1e-9
+
+
+def test_nearby_negation_word_alone_does_not_fabricate_a_match():
+    # The main false-positive risk this fix has to avoid: a negation word sitting right next to a
+    # number that's genuinely positive as stated. Without a real negative tool value at the same
+    # magnitude to match against, the word alone must never manufacture a trace.
+    report = guardrails.check_figures(_result("The stock was down 5% today.", []))
+
+    fig = report["figures"][0]
+    assert fig["raw_text"] == "5%"
+    assert fig["traced"] is False
+    assert fig["sign_inferred"] is False
+    assert fig["match"] is None
+
+
+def test_down_word_does_not_flip_a_figure_that_already_traces_positive():
+    # "revenue was down 5%" is ambiguous in isolation -- deceleration to a still-positive 5%
+    # growth rate, not a 5% decline -- but when the filed figure really is +0.05, the primary
+    # unsigned check already traces it and the negation fallback must never run at all.
+    call = _ratios_call(0.05)
+    text = "Revenue growth was down to 5% this quarter, from 12% previously."
+    report = guardrails.check_figures(_result(text, [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "5%")
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is False
+    assert fig["normalized_value"] == 0.05
+
+
 def test_excludes_iso_date_written_with_non_breaking_hyphen():
     # Confirmed by a live run_agent trace: dates are rendered with a non-breaking hyphen
     # (U+2011), not ASCII "-" -- the exclusion must still catch the whole date.

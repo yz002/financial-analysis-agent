@@ -500,3 +500,31 @@
   slash-date fix) rather than an average of 21 per-run ratios, and why a single low-scoring run
   (like any one of these three Ford runs) shouldn't be read as evidence of a regression on its
   own without checking what specifically went untraced first.
+
+- **Closed the "sign conveyed by a word" gap: a negative figure stated as an unsigned magnitude
+  with the sign carried by surrounding prose instead of a literal sign character** -- "the
+  (derived) ~$11B Q4 2025 charge" against a real tool value of -$11,054,000,000, "operating loss
+  of $134M" against -134,000,000, and "2.38 trailing standard deviations below its own baseline"
+  against a `deviation_std` of -2.38. None of these have anything for `_NUMBER_RE`'s `sign` group
+  to match, so three genuinely grounded, correctly cited figures across the 21 saved traces read as
+  fabricated. Fixed with a narrow fallback (`_negation_match`) that only runs when the primary,
+  unsigned check has already failed: retry the candidate's negation, but only accept it when *both*
+  a small financial-statement-specific negation word (`_NEGATION_WORD_RE` -- "loss", "charge",
+  "deficit", "negative", "shortfall", "wrote off"/"written off", "down", "fell", "below") sits
+  within `_NEGATION_WORD_WINDOW` (40 characters, sized to the farthest of the three live cases
+  above) of the candidate, *and* a real tool value matches the negated magnitude at the candidate's
+  own stated precision. Either check alone was too weak to ship: the word alone is exactly the
+  false-positive case the fix set out to avoid -- "revenue was down 5%" has "down" sitting right
+  against "5%", but if 5% is a genuinely positive growth rate (deceleration, not decline) there's
+  no matching -5% tool value, so the fallback never fires and the primary unsigned check traces it
+  normally; the tool value alone isn't sufficient either, since this codebase's numbers are small
+  enough that two unrelated figures can coincide by magnitude, so requiring a nearby word too keeps
+  an accidental collision from being misread as a sign flip. Every figure the fallback accepts sets
+  a new `sign_inferred: True` field in the report row (`False` otherwise) so the flip stays legible
+  to a caller rather than silently changing `normalized_value`'s meaning. Re-scoring the same 21
+  saved traces confirms exactly the 3 predicted figures flip from untraced to traced -- no other
+  figure's trace status changes in either direction -- and pooled grounding rises from 94.3% to
+  **94.8%** (669/706). Regression tests in `tests/test_guardrails.py` use the actual three strings
+  above, plus a "down 5%"-shaped test proving the word alone can't fabricate a match and a
+  same-shaped test proving a figure that already traces positive is never touched by the fallback
+  at all.
