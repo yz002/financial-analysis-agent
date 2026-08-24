@@ -681,6 +681,86 @@ def test_walks_q4_subtraction_value_as_independent_candidate():
     assert fig["match"]["json_path"] == "periods[0].revenue.q4_subtraction_value"
 
 
+def test_bare_integer_coincidental_match_reports_weak_not_traced():
+    # The Phase 4 false negative documented in NOTES.md and guardrails.py's module docstring: a
+    # real no-arithmetic violation ("Nvidia operates roughly 21 points higher on gross margin" --
+    # the model differenced two get_ratios margin values itself) read as traced because "21"
+    # happens to round to an unrelated get_market_data valuation.price_to_sales of 20.677921. The
+    # fix must stop reporting this as a full trace while still surfacing the near-miss for a
+    # human to look at.
+    call = _tool_call(
+        "get_market_data",
+        {
+            "ticker": "NVDA",
+            "source": "yfinance",
+            "as_of": "2025-08-01",
+            "quote": {"price": 180.0},
+            "valuation": {"price_to_sales": 20.677921},
+        },
+    )
+    text = "Nvidia operates roughly 21 points higher on gross margin than AMD."
+    report = guardrails.check_figures(_result(text, [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "21")
+    assert fig["format"] == "plain_integer"
+    assert fig["traced"] is False
+    assert fig["weak_match"] is True
+    assert fig["match"]["json_path"] == "valuation.price_to_sales"
+    assert report["all_traced"] is False
+
+
+def test_dollar_integer_coincidental_match_also_reports_weak():
+    call = _tool_call("get_market_data", {"ticker": "MSFT", "quote": {"price": 5.0}})
+    report = guardrails.check_figures(_result("The delta was about $5 per share.", [call]))
+
+    fig = next(f for f in report["figures"] if f["raw_text"] == "$5")
+    assert fig["format"] == "dollar_integer"
+    assert fig["traced"] is False
+    assert fig["weak_match"] is True
+
+
+def test_scaled_and_percent_whole_numbers_are_not_treated_as_weak():
+    # A whole number is only coincidence-prone when it's *bare* -- no scale suffix/word, no
+    # comma grouping, no percent sign all push the value (or its precision) somewhere far less
+    # densely populated by unrelated tool figures. None of these should be downgraded.
+    call = _tool_call(
+        "get_financial_statement",
+        {
+            "ticker": "MSFT",
+            "periods": [
+                {
+                    "period_end": "2025-06-30",
+                    "revenue": {"value": 90000000000.0, "tag": "Revenues", "filed": "2025-08-01"},
+                }
+            ],
+        },
+    )
+    ratios_call = _ratios_call(0.45)
+    text = "Revenue was $90 billion, or 90,000,000,000 in raw terms, on a 45% margin."
+    report = guardrails.check_figures(_result(text, [call, ratios_call]))
+
+    assert report["all_traced"] is True
+    for fig in report["figures"]:
+        assert fig["weak_match"] is False
+
+
+def test_find_match_prefers_closest_candidate_over_first_encountered():
+    # Two tool values both round to $90.0B at the stated precision; the model's actual figure is
+    # much closer to the second one. Best-match, not first-match, should be cited -- this doesn't
+    # fix the bare-integer coincidence case on its own (see the module docstring), but is still a
+    # real improvement to which provenance gets reported when more than one candidate qualifies.
+    far_call = _statement_call({"value": 90040000000.0, "tag": "Revenues", "filed": "2024-08-01"})
+    near_call = _tool_call(
+        "get_market_data",
+        {"ticker": "MSFT", "valuation": {"enterprise_value": 90010000000.0}},
+    )
+    report = guardrails.check_figures(_result("Revenue was $90.0 billion.", [far_call, near_call]))
+
+    fig = report["figures"][0]
+    assert fig["traced"] is True
+    assert fig["match"]["json_path"] == "valuation.enterprise_value"
+
+
 def test_skips_null_ratio_values_without_crash_or_spurious_match():
     report = guardrails.check_figures(
         _result("No margin figure is stated here.", [_ratios_call(None)])

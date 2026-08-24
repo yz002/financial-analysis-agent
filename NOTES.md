@@ -565,3 +565,44 @@
   heuristic, not a certainty — a genuinely young company (a recent IPO) can also legitimately have
   under 8 quarters on file, which is exactly why the note is phrased as "may indicate" and names
   the specific entity/CIK rather than asserting a successor-registrant situation outright.
+
+- **Closed the coincidental-match false negative documented above (the "21 points" / `price_to_
+  sales` collision): a genuine no-arithmetic violation could read as fully "traced" when its stated
+  figure happened to be an undecorated small integer.** The Phase 4 live pass had already surfaced
+  the underlying case — "Nvidia operates roughly 21 points higher on gross margin and ~48 points
+  higher on operating margin," a real violation since neither number was computed by any tool, but
+  only the "48" half got flagged; "21" traced because it rounds to `valuation.price_to_sales`
+  (20.677921, an unrelated `get_market_data` field) purely by chance. Two fixes, one insufficient
+  alone as predicted at the time: (1) `_find_match` now picks the *closest* qualifying candidate
+  by absolute distance to the exact stated value, not merely the first one encountered in
+  traversal order — a real improvement to which provenance gets cited whenever more than one tool
+  value rounds to the same target, but confirmed not to touch this specific case on its own, since
+  20.68 is still the only (and therefore closest) candidate that rounds to 21. (2) A new
+  `_WEAK_PRECISION_FORMATS` check: a match whose only supporting evidence is a bare or
+  dollar-prefixed whole number (`_format_label` returns `"plain_integer"`/`"dollar_integer"` only
+  when there's no percent sign, scale suffix/word, or comma grouping — the one shape that adds no
+  precision beyond "nearest integer" and whose small value range is genuinely dense with unrelated
+  small numbers across a real run's tool pool) now reports `weak_match: True` and `traced: False`
+  instead of being folded silently into "traced." A semantic-plausibility alternative — tagging
+  which JSON fields can plausibly ground which *kind* of claim, so a margin-point delta could never
+  match a valuation ratio — was considered and rejected: this codebase's tool results have no
+  stable field taxonomy to hang that classification on, and a wrong classification would just trade
+  one class of false negative for a new class of false exclusion. Re-scoring the same 21 saved
+  traces (no new API calls) confirms the fix does exactly what was expected — tightening, not
+  loosening: figures newly reported as weak rather than fully traced drop pooled strict grounding
+  from 94.8% to **93.9%** (663/706, down from 669/706), while the genuinely-untraced count (no
+  candidate matches at all) is unchanged at 37/706 — every one of the 6 newly-downgraded figures
+  was previously counted as a full trace and is now a weak one instead, never the reverse. All 6
+  are legitimate small-integer coincidences worth a second look, not extraction bugs: 4 are real
+  tool-field values that happen to share a bare integer with unrelated prose ("20" in a Costco
+  forecast's methodology aside matching `historical_periods_used: 20.0`, "12" matching
+  `periods_returned: 12.0`, "11" matching `assumptions.growth_rates_used: 11.0`), and one is a
+  genuine coincidence of the same shape as the motivating case — Ford's anomaly answer mentioning
+  "growth mode, lag 4" (an anomaly-detection parameter, not a filed figure) landed on an unrelated
+  `periods[50].deviation_std` of 4.047 purely because both round to 4. The original "21 points"
+  string itself predates this saved-trace corpus (it's from the earlier, non-persisted Phase 4 ad
+  hoc pass, not one of the Phase 6 harness's 21 runs), so it doesn't appear in the pooled numbers
+  above; a regression test in `tests/test_guardrails.py` reproduces it directly from the values
+  recorded in this file, alongside a `$5`-shaped dollar-integer case, a control case proving scaled/
+  percent/comma-grouped whole numbers are never downgraded, and a case proving best-match picks the
+  numerically closest of two qualifying candidates rather than the first one in traversal order.

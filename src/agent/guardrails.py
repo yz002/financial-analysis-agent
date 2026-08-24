@@ -10,6 +10,21 @@ Matching is precision-aware, not a flat tolerance: a figure is checked at the pr
 literally stated at ("$90.0 billion" only needs a tool value that rounds to 90.0B; "$90.007
 billion" needs one that rounds to 90.007B). A flat percentage tolerance would let a fabricated
 figure near a real one pass silently, which defeats the point of the check.
+
+Precision-aware matching has its own failure mode, though: an undecorated small integer ("21")
+normalizes to whole-number precision (ndigits=0), which is coarse enough that some unrelated
+tool value can round to the same integer purely by chance. A real Phase 4 violation slipped
+through this way -- the model wrote "Nvidia operates roughly 21 points higher on gross margin"
+(a genuine no-arithmetic violation, differencing two get_ratios margin values itself) and
+`check_figures` reported it as traced, because 21 happens to be the rounded value of an
+unrelated get_market_data `valuation.price_to_sales` of 20.677921 (see NOTES.md). `_find_match`
+now picks the *closest* candidate rather than merely the first one encountered, but that alone
+doesn't close this gap -- 20.68 rounds to 21 exactly, so it's still the only candidate at that
+precision, closest or not. Instead, a match whose only supporting precision is a bare or
+dollar-prefixed whole number (no percent sign, scale suffix/word, or comma grouping -- see
+`_WEAK_PRECISION_FORMATS`) is reported with `weak_match: True` and `traced: False` rather than
+folded silently into "traced": the check's job stays flag-don't-block, but a coincidence-prone
+trace is no longer indistinguishable from an exact one.
 """
 
 import json
@@ -289,14 +304,22 @@ def _collect_tool_values(tool_calls: list[dict]) -> list[dict]:
 
 
 def _find_match(value: float, ndigits: int, tool_values: list[dict]) -> dict | None:
-    """First tool value (in tool_calls/JSON-traversal order) that rounds to the same value at
-    the candidate's own stated precision. `abs_tol` guards only float-representation noise
-    around the two round() calls -- it is not a behavioral tolerance."""
+    """The *closest* tool value -- by absolute distance to the candidate's own exact stated
+    value, not merely the first one encountered in tool_calls/JSON-traversal order -- among
+    every entry that rounds to the candidate's value at the candidate's own stated precision.
+    `abs_tol` guards only float-representation noise around the two round() calls; picking the
+    closest of several qualifying candidates is a separate, deliberate step, not a tolerance
+    widening. This alone doesn't prevent a coincidental match at coarse (whole-number) precision
+    -- see the module docstring and `_WEAK_PRECISION_FORMATS` in `check_figures` for that."""
     target = round(value, ndigits)
+    best, best_diff = None, None
     for entry in tool_values:
-        if math.isclose(round(entry["value"], ndigits), target, abs_tol=1e-6):
-            return entry
-    return None
+        if not math.isclose(round(entry["value"], ndigits), target, abs_tol=1e-6):
+            continue
+        diff = abs(entry["value"] - value)
+        if best is None or diff < best_diff:
+            best, best_diff = entry, diff
+    return best
 
 
 def _negation_match(
@@ -322,11 +345,28 @@ def _negation_match(
     return _find_match(-value, ndigits, tool_values)
 
 
+# A bare or dollar-prefixed whole number ("21", "$5" -- `_format_label` returns "plain_integer"/
+# "dollar_integer" only when there's no percent sign, scale suffix/word, or comma grouping) is
+# the lowest-discriminating-power shape `_NUMBER_RE` produces: it states nothing beyond "nearest
+# integer." Every other format narrows the collision space one of two ways -- a percent or
+# decimal fraction adds precision digits past the integer (`ndigits > 0`), while a scale suffix/
+# word or comma grouping pushes the *value itself* into a range (millions+) sparse enough that
+# an unrelated tool value landing in the same rounding bucket by chance is implausible. Explicitly
+# not attempted here: classifying which JSON field can plausibly ground which *kind* of claim
+# (e.g. "a margin shouldn't trace to a valuation ratio") -- considered, but rejected as its own
+# new source of false exclusions in a codebase whose tool results have no stable field taxonomy
+# to hang that on. See the module docstring and NOTES.md for the live case this closes.
+_WEAK_PRECISION_FORMATS = frozenset({"plain_integer", "dollar_integer"})
+
+
 def check_figures(result: dict) -> dict:
     """Verify every numeric figure in result["final_answer"] traces back to a value present in
     result["tool_calls"][*]["tool_result"]. Flags, never modifies the answer. Returns a report:
     figures_checked/traced/untraced counts, all_traced, and a per-figure breakdown with the
-    matched tool call and JSON path when traced."""
+    matched tool call and JSON path when traced. A figure whose only matching evidence is a
+    coincidence-prone whole-number match (see `_WEAK_PRECISION_FORMATS`) reports `traced: False`
+    and `weak_match: True` -- its near-miss `match` is still included for transparency, but it
+    doesn't count toward `figures_traced`/`all_traced`."""
     final_answer = result.get("final_answer") or ""
     tool_calls = result.get("tool_calls") or []
     tool_values = _collect_tool_values(tool_calls)
@@ -334,6 +374,7 @@ def check_figures(result: dict) -> dict:
     figures = []
     for m in _extract_candidates(final_answer):
         normalized_value, ndigits = _normalize(m)
+        fmt = _format_label(m)
         match = _find_match(normalized_value, ndigits, tool_values)
         sign_inferred = False
         if match is None and not m.group("sign") and normalized_value > 0:
@@ -341,6 +382,7 @@ def check_figures(result: dict) -> dict:
             if match is not None:
                 normalized_value = -normalized_value
                 sign_inferred = True
+        weak_match = match is not None and fmt in _WEAK_PRECISION_FORMATS
         figures.append(
             {
                 "raw_text": m.group(0),
@@ -348,9 +390,10 @@ def check_figures(result: dict) -> dict:
                 "end": m.end(),
                 "normalized_value": normalized_value,
                 "precision_ndigits": ndigits,
-                "format": _format_label(m),
-                "traced": match is not None,
+                "format": fmt,
+                "traced": match is not None and not weak_match,
                 "sign_inferred": sign_inferred,
+                "weak_match": weak_match,
                 "match": (
                     {
                         "tool_call_index": match["tool_call_index"],

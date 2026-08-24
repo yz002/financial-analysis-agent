@@ -202,11 +202,14 @@ def render_figure_check(result: dict) -> None:
 
     for fig in fc["figures"]:
         with st.container(border=True):
-            icon = "✅" if fig["traced"] else "⚠️"
+            icon = "✅" if fig["traced"] else ("🟡" if fig.get("weak_match") else "⚠️")
             st.markdown(f"{icon} **{_escape_markdown_dollars(fig['raw_text'])}**")
-            if fig["traced"]:
+            if fig["match"] is not None:
                 m = fig["match"]
-                st.caption(f"via `{m['tool_name']}` → `{m['json_path']}` = {m['matched_value']}")
+                caption = f"via `{m['tool_name']}` → `{m['json_path']}` = {m['matched_value']}"
+                if fig.get("weak_match"):
+                    caption += " -- whole-number match only, could be coincidental"
+                st.caption(caption)
             else:
                 st.caption("Not traced to any tool result.")
 
