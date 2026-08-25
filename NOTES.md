@@ -127,7 +127,10 @@
   context rather than the source-attribution context where `None`
   matters. `src/analysis/trends.py` avoids this entirely by pulling raw
   numeric statement columns directly rather than going through
-  `ratios.py`.
+  `ratios.py`. The growth functions (`revenue_growth_qoq`/`_yoy`,
+  `earnings_growth_qoq`/`_yoy`) additionally carry a `{column}_growth_reason`
+  companion column recording *why* a `None` value is `None` — see the
+  positional-shift/rolling entry below.
 
 - **Cash flow items are commonly filed as fiscal-year-to-date cumulative figures rather than
   discrete quarters; `statements.py` now recovers a discrete quarter from that YTD data via
@@ -265,23 +268,70 @@
   cited ratios) is exactly the kind of thing worth a human's second look regardless of what
   `check_figures` reports.
 
-- **Rolling/shift windows in `trends.py` and `ratios.py` are positional, not calendar-aware.**
-  `trends.trailing_stats` (`.rolling(window)`) and `ratios._growth`/`ratios._ttm`
-  (`.shift(lag)` / `.rolling(4)`) all operate on row position within whatever series or
-  statement they're given — "8 trailing periods" means 8 rows back, not 8 calendar quarters.
-  This is safe only when every `period_end` in the requested cadence is actually present as a
-  row. It breaks in at least one confirmed, non-hypothetical way: a fiscal-calendar transition
-  produces a stub period that `concepts._classify_period_length` buckets as `"other"` (not
-  `"quarterly"`/`"annual"`), which `get_concept`'s `period_length` filter then drops entirely —
-  so that period_end never appears as a row in `get_statement`'s output, and a rolling/shift
-  window that spans it silently treats two non-adjacent periods as adjacent. `trends.py` makes
-  this worse by calling `.dropna()` before windowing (in `growth_anomalies` and any caller doing
-  `stmt.set_index("period_end")[metric].dropna()`), which additionally collapses any column with
-  real reporting gaps — `operating_cash_flow`/`capex` are the concrete case already documented
-  above (majority-`None` for companies that file cash flow as YTD-only). Fixing this properly
-  means either asserting the window's `period_end` span matches its row count (and refusing like
-  `statements._derive_q4` does on a tiling check) or switching to a calendar-aware rolling join
-  keyed on `period_end` deltas rather than row position — not yet done anywhere in the codebase.
+- **Rolling/shift windows in `trends.py` and `ratios.py` were positional, not calendar-aware —
+  fixed via a new `src/analysis/periods.py` module.** `trends.trailing_stats`
+  (`.rolling(window)`) and `ratios._growth`/`ratios._ttm` (`.shift(lag)` / `.rolling(4)`) used to
+  operate on row position within whatever series or statement they were given — "8 trailing
+  periods" meant 8 rows back, not 8 calendar quarters — which was safe only when every
+  `period_end` in the requested cadence was actually present as a row. This broke in at least one
+  confirmed, non-hypothetical way: a fiscal-calendar transition producing a stub period that
+  `concepts._classify_period_length` buckets as `"other"` (not `"quarterly"`/`"annual"`), which
+  `get_concept`'s `period_length` filter then dropped entirely — so that period_end never appeared
+  as a row in `get_statement`'s output, and a rolling/shift window spanning it silently treated
+  two non-adjacent periods as adjacent. `trends.py` made this worse by calling `.dropna()` before
+  windowing, additionally collapsing any column with real reporting gaps.
+
+  The fix: `periods.find_prior_period(period_ends, i, quarters_back)` looks up "N quarters back"
+  by the calendar date it should land on (`period_ends.iloc[i] - pd.DateOffset(months=3 *
+  quarters_back)`) instead of by row position, within a fixed tolerance —
+  `_QUARTER_STEP_TOLERANCE_DAYS = 40` for `quarters_back=1`, `_YEAR_STEP_TOLERANCE_DAYS = 21` for
+  `quarters_back=4` (the only two offsets used anywhere in this codebase — `_growth`'s QoQ/YoY,
+  and the agent tool schema's documented `lag` of 1 or 4). These tolerances are sized off this
+  codebase's own day-span constants (`concepts._QUARTERLY_DAYS_MIN/MAX`=80/100,
+  `_LONG_OPENING_QUARTER_DAYS_MAX`=125, `statements._Q4_SPAN_DAYS_MIN/MAX`=80/125) with slack for
+  a real filed quarter's worst-case drift from the ~91-day nominal target, while staying under
+  half the ~91-day spacing between adjacent quarters so an adjacent real quarter can never be
+  mistaken for the target one — deliberately new, not-unified-with-`concepts.py`/`statements.py`
+  constants, matching this codebase's existing precedent that different tolerance problems get
+  their own numbers. When no row matches within tolerance, `find_prior_period` refuses —
+  `(None, "insufficient_history")` if the target predates the earliest row, `(None,
+  "gap_no_prior_period")` if a quarter is genuinely missing — never falling back to the nearest
+  available row, the same refuse-rather-than-guess discipline `statements._derive_q4` already
+  uses on its own tiling check. `ratios._growth` surfaces this as a new
+  `{column}_growth_reason` companion column (`"insufficient_history"` / `"gap_no_prior_period"` /
+  `"missing_value"` / `"division_by_zero"` / `None` on success); `trends.trailing_stats` surfaces
+  it as a `trailing_gap: bool` column (`True` only when a real gap, not just insufficient leading
+  history, broke a point's trailing window). `ratios._ttm` (needs 3 *contiguous* prior quarters,
+  not one offset) and `trends.trailing_stats` (needs `window` contiguous prior quarters) don't fit
+  a single calendar-offset lookup — instead they chain `quarters_back=1` hops one at a time via
+  `periods.chained_trailing_window`, aborting the whole sum/mean if any hop hits a gap, reusing
+  only the one tolerance that's actually empirically justified rather than inventing an untested
+  tolerance for a 2-, 3-, or N-quarter offset. `growth_anomalies` no longer `.dropna()`s its
+  growth series before windowing — a gap/insufficient-history row is now left in place as NaN
+  (found via the same calendar lookup) so its position still corresponds to a real calendar
+  quarter, rather than being dropped and letting a later row's window silently span it.
+
+  Live-checked against every ticker with cached fixture data (MSFT, NVDA, Ford, WMT, KR) as of
+  this change: none currently has an actual `period_end` gap exceeding tolerance in its quarterly
+  statement — the two previously-cited historical gap mechanisms (Kroger's ~111-day long Q1;
+  WMT's `operating_cash_flow`/`capex` sparsity) were already independently fixed upstream
+  (`concepts._reclassify_long_opening_quarters`; `statements._derive_ytd_quarters`) before this
+  change landed. So this fix has no live regression case among the tickers this project's test
+  suite already tracks — coverage here is synthetic (`tests/test_periods.py`,
+  `tests/test_ratios.py`, `tests/test_trends.py`), which is a legitimate, documented outcome
+  rather than a shortcut: the bug is real (it's exactly what a positional `shift`/`rolling` does
+  on any DataFrame with a missing row, regardless of ticker), it's just that no company currently
+  in this project's cache happens to still be tripping it.
+
+  That check ran against the full local `data/cache/` (multi-MB, untrimmed companyfacts
+  payloads), not what CI actually exercises. `.github/workflows/tests.yml` instead copies
+  `tests/fixtures/edgar_cache/` — a deliberately trimmed set (`scripts/build_edgar_fixtures.py`,
+  ~400-900KB per ticker, cut to only `concepts.CONCEPTS`' tags) covering just MSFT/NVDA/F/WMT —
+  into `data/cache/` before running tests. Two consequences: CI's four tickers see a narrower
+  slice of history than the full local cache this check used, and **KR isn't in the fixture set
+  at all**, so CI never exercises KR's data (including its long-Q1 case) in any test. "Tests pass
+  in CI" is therefore not itself evidence that KR has no live gap — that claim rests only on this
+  session's direct check against the full local cache, not on anything CI runs.
 
 - **`agent/tools.py`'s `get_ratios` provenance attachment is positional, not joined on
   `period_end`.** It does `zip(stmt.itertuples(), ratio_df.itertuples())` to pair each ratio

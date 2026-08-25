@@ -25,6 +25,8 @@ numeric statement columns directly rather than going through this module.
 
 import pandas as pd
 
+from .periods import chained_trailing_window, prior_period_series
+
 
 def _safe_divide(numerator: float | None, denominator: float | None) -> float | None:
     """None if either input is missing/NaN or denominator is zero; else a plain float."""
@@ -67,15 +69,41 @@ def net_margin(stmt: pd.DataFrame) -> pd.DataFrame:
 
 def _growth(stmt: pd.DataFrame, column: str, lag: int) -> pd.DataFrame:
     """
-    (column[i] - column[i-lag]) / column[i-lag]. The first `lag` rows have
-    no prior period to compare against, so their value is None.
+    (column[i] - column[prior]) / column[prior], where `prior` is the row
+    whose period_end falls ~lag quarters before row i's, found via
+    periods.find_prior_period (calendar-based, not `shift(lag)` -- a
+    missing quarter is refused, not silently misaligned; see NOTES.md).
+    Value is None, with the reason recorded in the `{column}_growth_reason`
+    companion column, when: there isn't `lag` quarters of history yet
+    ("insufficient_history"), the calendar lookup can't find a matching
+    prior quarter ("gap_no_prior_period"), or a matching quarter exists but
+    `column`'s value itself is missing that period ("missing_value").
     """
-    current, prior = stmt[column], stmt[column].shift(lag)
-    values = [
-        _safe_divide(c - p, p) if pd.notna(c) and pd.notna(p) else None
-        for c, p in zip(current, prior)
-    ]
-    return _ratio_frame(stmt, values, {column: current, f"{column}_prior": prior})
+    lookup = prior_period_series(stmt["period_end"], quarters_back=lag)
+    current = stmt[column]
+    prior = pd.Series(
+        [current.iloc[idx] if pd.notna(idx) else None for idx in lookup["prior_index"]],
+        index=stmt.index,
+    )
+    reasons = []
+    values = []
+    for c, p, lookup_reason in zip(current, prior, lookup["reason"]):
+        if lookup_reason is not None:
+            values.append(None)
+            reasons.append(lookup_reason)
+        elif pd.notna(c) and pd.notna(p):
+            v = _safe_divide(c - p, p)
+            values.append(v)
+            reasons.append(None if v is not None else "division_by_zero")
+        else:
+            values.append(None)
+            reasons.append("missing_value")
+    reasons = pd.Series(reasons, index=stmt.index, dtype=object)
+    return _ratio_frame(
+        stmt,
+        values,
+        {column: current, f"{column}_prior": prior, f"{column}_growth_reason": reasons},
+    )
 
 
 def revenue_growth_qoq(stmt: pd.DataFrame) -> pd.DataFrame:
@@ -126,23 +154,33 @@ def current_ratio(stmt: pd.DataFrame) -> pd.DataFrame:
     return _ratio(stmt, "current_assets", "current_liabilities")
 
 
-def _ttm(series: pd.Series) -> pd.Series:
+def _ttm(period_ends: pd.Series, series: pd.Series) -> pd.Series:
     """
-    Trailing-twelve-month sum: the current row plus the 3 immediately
-    preceding it. NaN until 4 real rows are available (min_periods=4, no
-    partial-window sum) -- consistent with _growth's "not enough history
-    yet -> None" convention rather than understating an incomplete window.
-    Like _growth's shift(lag), this is positional over stmt's rows, not
-    calendar-aware -- see NOTES.md for when a reporting gap can make that
-    misalign with real calendar quarters.
+    Trailing-twelve-month sum: the current row plus the 3 quarters
+    immediately preceding it *by calendar date*, found by chaining three
+    quarters_back=1 periods.find_prior_period hops back from each row
+    (periods.chained_trailing_window) rather than a positional
+    `rolling(4)` -- a gap anywhere in the trailing window (a missing
+    quarter) means there's no real 4-quarter window to sum, so that row's
+    result is NaN, same as not having 4 rows of history yet at all
+    (consistent with _growth's "not enough history yet -> None"
+    convention rather than understating an incomplete window).
     """
-    return series.rolling(4, min_periods=4).sum()
+    values = []
+    for i in range(len(series)):
+        window, _reason = chained_trailing_window(period_ends, i, hops=3)
+        if window is None:
+            values.append(float("nan"))
+        else:
+            window_values = series.iloc[window + [i]]
+            values.append(float("nan") if window_values.isna().any() else window_values.sum())
+    return pd.Series(values, index=series.index)
 
 
 def _return_ratio(stmt: pd.DataFrame, denominator_col: str, period_length: str) -> pd.DataFrame:
     """Shared by roa/roe -- see their docstrings for the numerator/denominator handling."""
     if period_length == "quarterly":
-        numerator, numerator_col = _ttm(stmt["net_income"]), "net_income_ttm"
+        numerator, numerator_col = _ttm(stmt["period_end"], stmt["net_income"]), "net_income_ttm"
     elif period_length == "annual":
         numerator, numerator_col = stmt["net_income"], "net_income"
     else:

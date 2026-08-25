@@ -352,10 +352,14 @@ def get_ratios(
             ratio_df = func(stmt)
         rows = []
         for srow, rrow in zip(stmt.itertuples(), ratio_df.itertuples()):
+            def _input_value(col):
+                raw = getattr(rrow, col)
+                if col.endswith("_reason"):
+                    return raw if pd.notna(raw) else None
+                return _num(raw)
+
             inputs = {
-                col: _num(getattr(rrow, col))
-                for col in ratio_df.columns
-                if col not in ("period_end", "value")
+                col: _input_value(col) for col in ratio_df.columns if col not in ("period_end", "value")
             }
             provenance = {}
             for c in concept_cols:
@@ -454,6 +458,8 @@ def detect_anomalies(
         return _error(ticker, "invalid_input", f"Unknown metric {metric!r}; valid metrics: {sorted(ALL_CONCEPTS)}")
     if mode not in ("level", "growth"):
         return _error(ticker, "invalid_input", 'mode must be "level" or "growth"')
+    if mode == "growth" and lag not in (1, 4):
+        return _error(ticker, "invalid_input", "lag must be 1 (QoQ) or 4 (YoY) when mode='growth'")
 
     stmt, error = _get_statement_or_error(ticker, period_length, None)
     if error is not None:
@@ -482,6 +488,7 @@ def detect_anomalies(
             "trailing_std": _num(row["trailing_std"]),
             "deviation_std": _num(row["deviation_std"]),
             "is_anomaly": bool(row["is_anomaly"]),
+            "trailing_gap": bool(row["trailing_gap"]),
         }
         for period_end, row in result_df.iterrows()
     ]
@@ -497,7 +504,10 @@ def detect_anomalies(
             "value/trailing_mean/trailing_std are computed from filed concept data, not "
             "themselves a single filed fact. is_anomaly flags points more than `threshold` "
             "trailing standard deviations from their own trailing baseline (which excludes "
-            "the point itself, so no look-ahead)."
+            "the point itself, so no look-ahead). trailing_mean/trailing_std/is_anomaly are "
+            "null/false when a period's trailing window isn't fully available -- "
+            "trailing_gap distinguishes a real missing quarter from just not enough history "
+            "yet at the start of the series."
         ),
         "periods": periods_out,
     }

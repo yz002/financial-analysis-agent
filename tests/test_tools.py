@@ -390,6 +390,7 @@ def test_detect_anomalies_growth_mode_success_shape(monkeypatch):
         "trailing_std",
         "deviation_std",
         "is_anomaly",
+        "trailing_gap",
     }
 
 

@@ -140,20 +140,34 @@ Phase 7 documentation and demo).
   new, additional signal, not a redefinition. Also handles a real EDGAR data quirk found while
   building this: two duration rows can share the same `period_end` with a one-day-different
   `period_start` (`_dedupe_by_period_end`; see NOTES.md).
+- **`periods.py`** — `find_prior_period(period_ends, i, quarters_back)`: looks up "N quarters
+  back" (only `quarters_back=1`/QoQ and `4`/YoY are supported — the only two offsets used
+  anywhere in this codebase) by the calendar date it should land on, within a fixed tolerance
+  accounting for real fiscal-quarter length variation (a 52/53-week retail calendar, a
+  reclassified long opening quarter), refusing — `(None, reason)`, never the nearest available
+  row — when no row actually falls in that window. Replaces the positional `shift(n)`/`rolling(n)`
+  this codebase used to rely on in `ratios.py`/`trends.py`, which silently misaligned across a
+  missing quarter; see NOTES.md. `chained_trailing_window` builds a several-quarter contiguous
+  window (for `ratios._ttm`/`trends.trailing_stats`) by walking single-quarter hops rather than
+  guessing at an untested multi-quarter tolerance.
 - **`ratios.py`** — margins, growth (QoQ/YoY), free cash flow, leverage, and returns, each a
   function taking the whole statement DataFrame and returning a DataFrame aligned by `period_end`
   with a `value` column plus the named input columns behind it. `value` columns are `dtype=object`
   holding literal `None` (never a silently-propagated `NaN`, never an exception) for anything
-  uncomputable — division by zero, a missing input, or not enough history for a growth lag. This
+  uncomputable — division by zero, a missing input, or not enough history for a growth lag; the
+  growth functions also carry a `{column}_growth_reason` column naming which. This
   means they don't behave like normal numeric pandas columns; see NOTES.md before doing vectorized
-  math on one.
+  math on one. Growth/TTM lookups (`_growth`, `_ttm`) use `periods.py`'s calendar-based lookup, not
+  a positional row offset.
 - **`trends.py`** — `trailing_stats`/`detect_anomalies` are a generic, domain-agnostic rolling
-  z-score primitive (baseline excludes the point itself, to avoid look-ahead bias). The important
-  piece is `growth_anomalies`: running the primitive on raw levels over-flags a company like NVDA,
-  whose real, sustained triple-digit growth is itself statistically extreme — `growth_anomalies`
-  runs it on period-over-period growth rates instead, so a *consistent* growth rate isn't flagged
-  and only a break from it is. Read the module docstring before adding a new caller — it's
-  explicit about which of two different questions each function answers.
+  z-score primitive (baseline excludes the point itself, to avoid look-ahead bias, via `periods.py`'s
+  calendar-based lookup rather than a positional `shift`/`rolling`; a real gap sets the returned
+  `trailing_gap` flag). The important piece is `growth_anomalies`: running the primitive on raw
+  levels over-flags a company like NVDA, whose real, sustained triple-digit growth is itself
+  statistically extreme — `growth_anomalies` runs it on period-over-period growth rates instead,
+  so a *consistent* growth rate isn't flagged and only a break from it is. Read the module
+  docstring before adding a new caller — it's explicit about which of two different questions each
+  function answers.
 - **`forecast.py`** — `forecast_metric(stmt, column, periods_ahead, method, lookback)`: the only
   place in the codebase that produces a number the company hasn't filed yet, which is why the
   agent calls it as a tool rather than ever projecting a value itself. Three methods: `"trend"`
@@ -165,8 +179,8 @@ Phase 7 documentation and demo).
   slope/growth rate, historical periods used, R²/growth-rate std, seasonal factors) in
   `df.attrs["assumptions"]`, not just the docstring, so a caller has something concrete to relay.
   Refuses (`df.attrs["refused"] = True` plus a `reason`) rather than guess when there's not enough
-  history, a gap in `period_end` (see NOTES.md's positional-window caveat — this module guards
-  against it explicitly instead of inheriting the bug), or a fit too poor to trust; raises
+  history, a gap in `period_end` (its own regularity check, independent of `periods.py`'s
+  calendar-offset lookup — see NOTES.md), or a fit too poor to trust; raises
   `ValueError` only for structurally malformed input (unknown method/column, non-positive
   `periods_ahead`/`lookback`).
 
@@ -250,9 +264,6 @@ Phase 7 documentation and demo).
 - The agent layer's no-arithmetic constraint (`src/agent/agent.py`'s system prompt) is enforced
   by instruction only, with no automated check that a given answer's figures actually trace back
   to a tool result.
-- `trends.py`'s rolling windows and `ratios.py`'s `shift`/`_ttm` windows are positional (row-based),
-  not calendar-aware — a dropped or gapped period (e.g. a fiscal-calendar stub period) can make
-  an "N-period" window silently span more calendar time than intended.
 - `agent/tools.py`'s `get_ratios` attaches provenance to ratio rows positionally (`zip`), not
   joined on `period_end` — correct today only because every `ratios.py` function preserves row
   order and count.

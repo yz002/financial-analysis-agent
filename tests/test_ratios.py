@@ -4,6 +4,25 @@ import pytest
 from src.analysis import ratios
 
 
+def _stmt_with_gap(values, column="revenue", start="2020-03-31", step_days=91, gap_at=None, extra_days=91):
+    """
+    A minimal statement-shaped DataFrame: period_end plus one value column.
+    Steps are `step_days` apart, except right before index `gap_at`
+    (default: the midpoint), where the step is widened by `extra_days` --
+    mirrors test_forecast.py's _stmt_with_gap.
+    """
+    if gap_at is None:
+        gap_at = len(values) // 2
+    period_ends = []
+    current = pd.Timestamp(start)
+    for i in range(len(values)):
+        if i == gap_at:
+            current = current + pd.Timedelta(days=extra_days)
+        period_ends.append(current)
+        current = current + pd.Timedelta(days=step_days)
+    return pd.DataFrame({"period_end": period_ends, column: values})
+
+
 def test_ford_gross_margin_is_none_for_every_row(ford_quarterly):
     result = ratios.gross_margin(ford_quarterly)
     assert result["value"].apply(lambda v: v is None).all()
@@ -48,6 +67,42 @@ def test_revenue_growth_qoq_first_row_is_none(msft_quarterly):
 def test_revenue_growth_yoy_first_four_rows_are_none(msft_quarterly):
     result = ratios.revenue_growth_yoy(msft_quarterly)
     assert result["value"].iloc[:4].apply(lambda v: v is None).all()
+
+
+def test_revenue_growth_qoq_gap_returns_none_with_gap_reason():
+    stmt = _stmt_with_gap([100.0, 110.0, 120.0, 130.0, 140.0, 150.0], gap_at=3, extra_days=91)
+    result = ratios.revenue_growth_qoq(stmt)
+    assert result["value"].iloc[3] is None
+    assert result["revenue_growth_reason"].iloc[3] == "gap_no_prior_period"
+    # The row right after the gap has a normal, present prior quarter.
+    assert result["value"].iloc[4] is not None
+    assert result["revenue_growth_reason"].iloc[4] is None
+
+
+def test_revenue_growth_yoy_gap_returns_none_with_gap_reason():
+    stmt = _stmt_with_gap(
+        [100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0],
+        gap_at=1,
+        extra_days=365,
+    )
+    result = ratios.revenue_growth_yoy(stmt)
+    assert result["value"].iloc[4] is None
+    assert result["revenue_growth_reason"].iloc[4] == "gap_no_prior_period"
+
+
+def test_revenue_growth_qoq_first_row_reason_is_insufficient_history(msft_quarterly):
+    result = ratios.revenue_growth_qoq(msft_quarterly)
+    assert result["revenue_growth_reason"].iloc[0] == "insufficient_history"
+
+
+def test_revenue_growth_qoq_long_kroger_style_quarter_is_not_spuriously_refused():
+    # A ~111-day quarter is real (e.g. Kroger's Q1) -- 20 days off the
+    # ~91-day nominal target, well within tolerance. Growth must still be
+    # computed, not refused.
+    stmt = _stmt_with_gap([100.0, 110.0, 120.0, 130.0], gap_at=2, extra_days=20)
+    result = ratios.revenue_growth_qoq(stmt)
+    assert result["value"].iloc[2] is not None
+    assert result["revenue_growth_reason"].iloc[2] is None
 
 
 def test_free_cash_flow_matches_manual_calculation(msft_quarterly):
