@@ -66,6 +66,14 @@ RATIOS = {
     "roe": (ratios_mod.roe, ["net_income", "stockholders_equity"]),
 }
 
+# The stockholders_equity tag (see CONCEPTS["stockholders_equity"] in src/data/concepts.py)
+# that includes noncontrolling/minority interests in the equity balance -- the other tag,
+# StockholdersEquity, excludes them. get_ratios's roe-specific note below fires whenever this
+# tag backed any period's equity figure, since it changes what "equity" (and therefore ROE)
+# means. Duplicated here as a literal to keep this presentation-layer note independent of
+# concepts.py's tag-priority-list internals.
+_NCI_INCLUSIVE_EQUITY_TAG = "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+
 
 def _iso(value) -> str | None:
     """Timestamp/NaT -> 'YYYY-MM-DD' string, or None."""
@@ -263,6 +271,10 @@ def get_ratios(
     "notes" flags when the resolved ticker's CIK has implausibly little
     on-file history -- possibly a successor entity from a merger/
     reorganization/redomiciliation rather than a genuinely young company.
+    "notes" also flags for `roe` when its stockholders_equity input was
+    sourced (even partially) from the noncontrolling-interest-inclusive XBRL
+    tag rather than the parent-only tag -- see each period's
+    provenance.stockholders_equity.tag for the exact source.
     """
     ticker = ticker.upper()
     if ratio_names is None:
@@ -308,6 +320,34 @@ def get_ratios(
                 )
                 if note not in notes:
                     notes.append(note)
+            if name == "roe":
+                equity_tags = set(stmt["stockholders_equity_tag"].dropna())
+                if _NCI_INCLUSIVE_EQUITY_TAG in equity_tags:
+                    if len(equity_tags) > 1:
+                        note = (
+                            "roe's stockholders_equity is sourced from two different XBRL tags "
+                            "across this ticker's own reported history: some periods report "
+                            "StockholdersEquity (excludes noncontrolling/minority interests) and "
+                            "others report StockholdersEquityIncludingPortionAttributableTo"
+                            "NoncontrollingInterest (includes them) -- check each period's "
+                            "provenance.stockholders_equity.tag below. Even this ticker's own ROE "
+                            "isn't on a consistent basis period to period, so a trend across its "
+                            "history -- and any comparison to another company's ROE -- may reflect "
+                            "a change in what's counted as equity rather than a real change in "
+                            "profitability."
+                        )
+                    else:
+                        note = (
+                            "roe's stockholders_equity for this ticker is sourced from "
+                            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest, "
+                            "which includes noncontrolling/minority interests in the equity base -- "
+                            "see provenance.stockholders_equity.tag below. A company whose equity "
+                            "is instead sourced from the parent-only StockholdersEquity tag is on a "
+                            "different basis, so comparing ROE directly across the two isn't "
+                            "apples-to-apples."
+                        )
+                    if note not in notes:
+                        notes.append(note)
         else:
             ratio_df = func(stmt)
         rows = []

@@ -635,3 +635,33 @@
   a checker bug worth chasing further. Revisit if this table shape shows up again in a future eval
   pass — the corpus-wide scan above is what would need re-running to tell a recurrence from another
   one-off.
+
+- **`stockholders_equity`'s two-tag priority list can silently mix noncontrolling-interest-inclusive
+  and parent-only equity bases within one company's own history — confirmed for 2 of this project's
+  4 fixture companies, not a one-off edge case — now surfaced as a `get_ratios` `roe` note.**
+  `CONCEPTS["stockholders_equity"]["tags"]` (`src/data/concepts.py`) lists `StockholdersEquity`
+  (parent-only, excludes noncontrolling/minority interests) ahead of
+  `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest` (includes them);
+  `get_concept` fills gaps in the first tag's coverage from the second, recording which tag won
+  each period in a `tag` column that `statements.py` carries through as `stockholders_equity_tag`.
+  Checked against all 3 tickers with a `conftest.py` quarterly fixture plus WMT (checked directly
+  against cached EDGAR data, not fixture-backed here): MSFT and NVDA are single-sourced from
+  `StockholdersEquity` only (73 and 71 rows respectively, `mixed_tags=False`) — safe to compare
+  directly. Ford and Walmart both mix tags across their own history (Ford: 42 rows
+  NCI-inclusive vs. 30 parent-only, majority NCI-inclusive; WMT: 40 rows parent-only vs. 34
+  NCI-inclusive) — for these, even the company's own ROE trend isn't on a consistent equity basis
+  period to period, and comparing either one's ROE to MSFT/NVDA's (or to each other's) mixes bases
+  silently. `ratios.roe` has no awareness of which tag backed each row (it just divides
+  net_income_ttm by `stmt["stockholders_equity"]`), and `roa` is unaffected since it never touches
+  `stockholders_equity`. Deliberately not fixed at the data layer: per this project's provenance
+  principle, `get_concept`'s existing gap-filling behavior (second tag only fills periods the first
+  tag has no data for) is correct and unchanged — narrowing the tag list to `StockholdersEquity`
+  only would silently drop real periods for Ford/WMT rather than fix a bug, and there's no
+  well-defined "right" single tag to prefer given some companies never report the parent-only one
+  at all. Fixed instead by making the ambiguity visible where it's consumed: `agent/tools.py`'s
+  `get_ratios` now inspects `stmt["stockholders_equity_tag"]` when computing `roe` (only `roe`, not
+  `roa`) and appends a top-level note whenever any period's equity came from the NCI-inclusive tag
+  — one wording when it's the only tag used (still flags a cross-company comparability issue), a
+  more pointed one when tags are mixed within the ticker's own history (flags the within-company
+  trend issue too) — alongside the per-row `provenance.stockholders_equity.tag` that already
+  existed and is unchanged by this fix.

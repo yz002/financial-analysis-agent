@@ -222,6 +222,46 @@ def test_get_ratios_roa_roe_use_ttm_on_quarterly_cadence(monkeypatch):
         assert last_row["inputs"]["net_income_ttm"] is not None
 
 
+def test_get_ratios_roe_note_fires_when_equity_tag_is_nci_inclusive(monkeypatch):
+    stmt = _make_statement(8)
+    stmt["stockholders_equity_tag"] = (
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+    )
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("F", ratio_names=["roe"]))
+    assert any("noncontrolling" in n.lower() for n in result["notes"])
+
+
+def test_get_ratios_roe_note_distinguishes_mixed_tags_wording(monkeypatch):
+    stmt = _make_statement(8)
+    stmt["stockholders_equity_tag"] = ["StockholdersEquity"] * 4 + [
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+    ] * 4
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("F", ratio_names=["roe"]))
+    assert any("own reported history" in n for n in result["notes"])
+
+
+def test_get_ratios_roe_note_absent_when_equity_tag_is_plain(monkeypatch):
+    stmt = _make_statement(8)
+    stmt["stockholders_equity_tag"] = "StockholdersEquity"
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("MSFT", ratio_names=["roe"]))
+    assert not any("noncontrolling" in n.lower() for n in result["notes"])
+
+
+def test_get_ratios_roa_note_absent_even_when_equity_tag_would_trigger_it(monkeypatch):
+    # roa never touches stockholders_equity -- confirms the roe-only note doesn't leak into roa
+    # even when the underlying statement's equity tag would trigger it for roe.
+    stmt = _make_statement(8)
+    stmt["stockholders_equity_tag"] = (
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+    )
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("F", ratio_names=["roa"]))
+    assert not any("noncontrolling" in n.lower() for n in result["notes"])
+
+
 def test_get_ratios_missing_concept_note_and_null_values(monkeypatch):
     _install_statement(monkeypatch, _make_statement(8, missing=["gross_profit"]))
     result = json.loads(tools.get_ratios("F", ratio_names=["gross_margin"]))

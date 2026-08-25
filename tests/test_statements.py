@@ -43,6 +43,24 @@ def test_ford_missing_gross_profit_is_nan(ford_quarterly):
     assert ford_quarterly["gross_profit_tag"].isna().all()
 
 
+def test_stockholders_equity_tag_mixes_nci_for_ford_but_not_msft_nvda(
+    ford_quarterly, msft_quarterly, nvda_quarterly
+):
+    # CONCEPTS["stockholders_equity"]'s two-tag priority list (StockholdersEquity, parent-only,
+    # vs. StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest, NCI-inclusive)
+    # means get_concept can source different periods' equity from different bases. Ford mixes
+    # both tags across its history; MSFT/NVDA only ever report the plain, parent-only tag. See
+    # get_ratios's roe-specific note (src/agent/tools.py) for how this surfaces to a caller.
+    nci_tag = "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"
+
+    ford_tags = set(ford_quarterly["stockholders_equity_tag"].dropna())
+    assert nci_tag in ford_tags
+    assert "StockholdersEquity" in ford_tags
+
+    for stmt in (msft_quarterly, nvda_quarterly):
+        assert set(stmt["stockholders_equity_tag"].dropna()) == {"StockholdersEquity"}
+
+
 def test_ford_full_statement_does_not_raise(client):
     # Exercises the whole pipeline against Ford's degraded data (no
     # gross_profit at all) -- the important graceful-degradation case.
