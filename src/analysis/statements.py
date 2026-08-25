@@ -24,6 +24,23 @@ marked via a companion "{concept}_is_derived" boolean column; nothing is
 ever inserted unflagged, and real (non-derived) rows are always literal
 False there, never NaN.
 
+Cash-flow-statement concepts (operating_cash_flow, capex) are frequently filed as
+fiscal-year-to-date cumulative facts (H1, 9-month) rather than discrete quarters -- these show up
+as get_concept's period_length="other" rows and are invisible to a period_length="quarterly"
+fetch. Where a genuine gap exists, this module also derives Q2 = H1 - Q1, Q3 = 9-month - H1, and,
+as a last resort below the two Q4 paths described next, Q4 = FY - 9-month (see
+_derive_ytd_quarters). Precedence for a fiscal year's Q4 value is: (1) a real filed Q4 fact, (2)
+FY - (Q1+Q2+Q3) via three real filed quarters, (3) FY - 9-month via this YTD chain, tried only
+when neither (1) nor (2) already produced a value. Q2/Q3 are derived independently of Q4 and of
+each other, each from its own two adjacent real facts; a real filed Q2/Q3 fact always wins and is
+never overwritten. Every derived row -- from either derivation path -- carries the same
+"{concept}_is_derived" flag, plus a "{concept}_derivation_method" column ("q1q2q3_subtraction" or
+"ytd_chain", None for a real or missing-data row) recording which path produced it. Unlike the
+real-Q4-vs-subtraction case below, there is no reconciliation output for the YTD chain: a real
+fact and a YTD-chain-derived value are never simultaneously computable for the same slot by
+construction (derivation only runs when the slot is confirmed empty), so there's no "both
+available" moment to cross-check. See NOTES.md.
+
 Sometimes a real, separately filed Q4 fact already exists instead of
 needing to be derived -- 4 real quarterly candidates tiling the fiscal
 year, not 3 -- common for large-caps whose pre-~2021 10-Ks tagged a
@@ -100,6 +117,28 @@ _ONE_DAY = pd.Timedelta(days=1)
 # company still clears 3 annual periods easily, while a fresh successor registrant won't.
 _MIN_PLAUSIBLE_PERIODS = {"quarterly": 8, "annual": 3}
 
+# --- YTD-chain quarter derivation (Q2 = H1 - Q1, Q3 = 9M - H1, Q4 = FY - 9M) -------------------
+#
+# H1/9-month candidate day-span bounds, for recognizing an already get_concept-"other"-classified
+# YTD cumulative fact by its multi-quarter span. Deliberately a separate local constant from
+# concepts._QUARTERLY_DAYS_MIN/_QUARTERLY_DAYS_MAX (80-100) rather than importing those -- that
+# pair classifies a single reported fact and must stay tight so a real 6-/9-month YTD fact is
+# never misread as a quarter; these bounds instead recognize a fact *already* bucketed "other" by
+# its span, a different job. Roughly 2x/3x the 80-100 quarterly window, with enough margin
+# (+/-18 and +/-27 days) to absorb a 52/53-week fiscal calendar's extra week landing anywhere
+# inside H1/9M.
+_H1_SPAN_DAYS_MIN, _H1_SPAN_DAYS_MAX = 160, 200
+_NINE_MONTH_SPAN_DAYS_MIN, _NINE_MONTH_SPAN_DAYS_MAX = 240, 300
+
+# Bound for an *implied* Q2/Q3 span (H1.end - Q1.end, or 9M.end - H1.end). Unlike
+# _Q4_SPAN_DAYS_MIN/_Q4_SPAN_DAYS_MAX above, this stays as tight as concepts.py's own quarterly
+# classification bounds (80-100) rather than widened: Q2/Q3 are always a fiscal year's *middle*
+# quarters, and the 52/53-week elongation that justifies _Q4_SPAN_DAYS_MAX's wider range only
+# ever hits the fiscal year's opening (Kroger) or closing (Costco) quarter -- confirmed via
+# concepts._reclassify_long_opening_quarters' docstring -- never a middle one, so there's no
+# legitimate case where a middle quarter needs the wider tolerance.
+_MID_QUARTER_SPAN_DAYS_MIN, _MID_QUARTER_SPAN_DAYS_MAX = 80, 100
+
 
 def get_statement(
     ticker: str,
@@ -112,15 +151,17 @@ def get_statement(
     period_end, joining all 12 concepts in CONCEPTS.
 
     Columns: period_end, period_start, and per concept: "{concept}" (value),
-    "{concept}_tag" (source XBRL tag, or "derived" for a synthesized Q4
-    row), "{concept}_filed" (the filing date backing that value), and --
-    for duration concepts only -- "{concept}_is_derived" (bool, always
-    literal True/False, never NaN), "{concept}_q4_subtraction_value"
-    (float, NaN unless this row is a real filed Q4 fact being
-    cross-checked against subtraction -- see module docstring), and
-    "{concept}_q4_diverges_from_subtraction" (bool, always literal
-    True/False, never NaN). A concept with no usable data for this ticker
-    still gets these columns, filled with NaN/None/False.
+    "{concept}_tag" (source XBRL tag, or "derived" for any synthesized
+    row -- Q4-by-subtraction or a YTD-chain-derived Q2/Q3/Q4), "{concept}_filed"
+    (the filing date backing that value), and -- for duration concepts only --
+    "{concept}_is_derived" (bool, always literal True/False, never NaN),
+    "{concept}_derivation_method" ("q1q2q3_subtraction", "ytd_chain", or None
+    for a real or missing-data row -- see module docstring),
+    "{concept}_q4_subtraction_value" (float, NaN unless this row is a real
+    filed Q4 fact being cross-checked against subtraction -- see module
+    docstring), and "{concept}_q4_diverges_from_subtraction" (bool, always
+    literal True/False, never NaN). A concept with no usable data for this
+    ticker still gets these columns, filled with NaN/None/False.
 
     period_length: "quarterly" (default) or "annual". In "quarterly" mode,
     a Q4 row per fiscal year is synthesized for duration concepts where the
@@ -129,7 +170,10 @@ def get_statement(
     items) need no such synthesis since the 10-K already reports them at
     fiscal-year-end. When a real Q4 fact already exists instead, it's used
     directly and cross-checked against subtraction (see module docstring)
-    rather than synthesized.
+    rather than synthesized. Cash-flow-statement concepts filed as H1/9-month
+    cumulative facts instead of discrete quarters get Q2/Q3, and Q4 as a last
+    resort, derived from those YTD facts when the corresponding discrete
+    quarter is otherwise unavailable (see module docstring).
 
     periods: if given, return only the most recent `periods` rows (applied
     after assembling full history, since Q4 derivation for a recent quarter
@@ -166,6 +210,7 @@ def get_statement(
         if period_length == "quarterly" and qtr_df is not None:
             qtr_df = qtr_df.copy()
             qtr_df["is_derived"] = False
+            qtr_df["derivation_method"] = None
             ann_df = _try_get_concept(ticker, concept, "annual", client)
             if ann_df is not None:
                 ann_df = _dedupe_by_period_end(ann_df)
@@ -181,6 +226,15 @@ def get_statement(
                 qtr_df["q4_diverges_from_subtraction"] = (
                     qtr_df["q4_diverges_from_subtraction"].fillna(False).astype(bool)
                 )
+
+                # YTD-chain derivation (Q2 = H1-Q1, Q3 = 9M-H1, Q4 = FY-9M as a last resort) runs
+                # after _derive_q4 above, so it can see whether that already resolved this fiscal
+                # year's Q4 -- see _derive_ytd_quarters' docstring for the precedence ordering.
+                ytd_df = _try_get_ytd_concept(ticker, concept, client)
+                if ytd_df is not None:
+                    ytd_derived = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+                    if len(ytd_derived):
+                        qtr_df = pd.concat([qtr_df, ytd_derived], ignore_index=True)
         if qtr_df is not None:
             duration_frames[concept] = _prepare_duration_columns(qtr_df, concept)
 
@@ -221,6 +275,7 @@ def get_statement(
             statement[f"{concept}_tag"] = None
             statement[f"{concept}_filed"] = pd.NaT
             statement[f"{concept}_is_derived"] = False
+            statement[f"{concept}_derivation_method"] = None
             statement[f"{concept}_q4_subtraction_value"] = float("nan")
             statement[f"{concept}_q4_diverges_from_subtraction"] = False
     for concept in INSTANT_CONCEPTS:
@@ -298,6 +353,25 @@ def _try_get_concept(
         return None
 
 
+def _try_get_ytd_concept(ticker: str, concept: str, client: EdgarClient) -> pd.DataFrame | None:
+    """
+    Real filed fiscal-year-to-date cumulative facts for `concept` -- get_concept's
+    period_length="other" bucket (6-/9-month YTD figures; most common for cash-flow-statement
+    concepts, see module docstring), deduped to one row per period_end the same way qtr_df/ann_df
+    already are. get_concept doesn't accept period_length="other" directly (only
+    "quarterly"/"annual"/None -- see its docstring), so this fetches everything unfiltered and
+    filters to "other" locally. Returns None if this ticker has no usable "other"-classified data
+    for this concept at all.
+    """
+    df = _try_get_concept(ticker, concept, None, client)
+    if df is None:
+        return None
+    df = df[df["period_length"] == "other"]
+    if df.empty:
+        return None
+    return _dedupe_by_period_end(df)
+
+
 def _dedupe_by_period_end(df: pd.DataFrame) -> pd.DataFrame:
     """
     Collapse rows sharing the same period_end to one row -- this module's
@@ -320,6 +394,7 @@ def _dedupe_by_period_end(df: pd.DataFrame) -> pd.DataFrame:
 
 def _prepare_duration_columns(df: pd.DataFrame, concept: str) -> pd.DataFrame:
     is_derived = df["is_derived"] if "is_derived" in df.columns else False
+    derivation_method = df["derivation_method"] if "derivation_method" in df.columns else None
     q4_subtraction_value = (
         df["q4_subtraction_value"] if "q4_subtraction_value" in df.columns else float("nan")
     )
@@ -334,6 +409,7 @@ def _prepare_duration_columns(df: pd.DataFrame, concept: str) -> pd.DataFrame:
             f"{concept}_tag": df["tag"],
             f"{concept}_filed": df["filed"],
             f"{concept}_is_derived": is_derived,
+            f"{concept}_derivation_method": derivation_method,
             f"{concept}_q4_subtraction_value": q4_subtraction_value,
             f"{concept}_q4_diverges_from_subtraction": q4_diverges,
         }
@@ -415,6 +491,7 @@ def _derive_q4(qtr_df: pd.DataFrame, ann_df: pd.DataFrame) -> tuple[pd.DataFrame
                     "tag": "derived",
                     "period_length": "quarterly",
                     "is_derived": True,
+                    "derivation_method": "q1q2q3_subtraction",
                 }
             )
         elif len(candidates) == 4:
@@ -503,3 +580,152 @@ def _four_quarters_tile_fiscal_year(q1, q2, q3, q4, fy_start, fy_end) -> bool:
         return False
 
     return abs(q4.period_end - fy_end) <= tol
+
+
+def _select_ytd_candidate(
+    ytd_df: pd.DataFrame, fy_start: pd.Timestamp, span_min: int, span_max: int
+):
+    """
+    Return the single "other"-classified duration row in `ytd_df` whose period_start matches
+    `fy_start` (within _TILE_TOLERANCE_DAYS) and whose day-span falls in [span_min, span_max] --
+    i.e. a candidate H1 or 9-month year-to-date cumulative fact opening this fiscal year. Returns
+    None, refusing to guess, if zero or more than one row qualifies -- e.g. a stub period from a
+    fiscal-calendar transition that happens to also land in the same span bucket as the real fact.
+    """
+    tol = pd.Timedelta(days=_TILE_TOLERANCE_DAYS)
+    days = (ytd_df["period_end"] - ytd_df["period_start"]).dt.days
+    mask = (ytd_df["period_start"] - fy_start).abs() <= tol
+    mask &= (days >= span_min) & (days <= span_max)
+    matches = ytd_df[mask]
+    if len(matches) != 1:
+        return None
+    return matches.iloc[0]
+
+
+def _derive_ytd_quarters(
+    qtr_df: pd.DataFrame, ytd_df: pd.DataFrame, ann_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Derive Q2/Q3, and Q4 as a last resort, from real filed fiscal-year-to-date cumulative facts:
+    Q2 = H1 - Q1, Q3 = 9-month - H1, Q4 = FY - 9-month. Targets the coverage gap documented in
+    the module docstring and NOTES.md -- cash-flow-statement concepts (operating_cash_flow,
+    capex) are routinely filed as H1/9-month cumulative facts rather than discrete quarters,
+    which get_concept's period_length="quarterly" filter correctly excludes (they're genuinely
+    not quarterly facts) but which this module previously had no way to recover a discrete
+    quarter from.
+
+    `qtr_df` is expected to be the frame *after* _derive_q4's own output has already been
+    concatenated onto it -- Q4-via-9-month only fires for a fiscal year where neither a real
+    filed Q4 fact nor Q1+Q2+Q3 subtraction already produced one (see module docstring's
+    precedence ordering). Q2/Q3 similarly only fill a genuinely empty slot: a real filed
+    quarterly fact for that period always wins and is never overwritten or duplicated. "Already
+    covered" is checked by period_end match -- a discrete quarter and its corresponding YTD
+    cumulative fact always share the same period_end by calendar definition -- rather than by
+    positionally chaining through Q1/Q2/Q3.
+
+    Each of Q2, Q3, and Q4-via-9-month is derived independently per fiscal year from its own two
+    adjacent real facts (never chained through another *derived* value -- Q3 uses the real H1
+    fact, not a derived Q2) and independently refuses (skips that slot, that year) if its inputs
+    are missing, ambiguous, or don't plausibly tile -- the same "refuse rather than guess"
+    discipline as _derive_q4. Unlike _derive_q4, there is no reconciliation/cross-check output: a
+    real fact and one of these derived values are never simultaneously available for the same
+    slot by construction (derivation only runs when the slot is confirmed empty), so there is no
+    "both available, do they agree" case to reconcile -- see NOTES.md.
+
+    Returns a DataFrame of new rows only (period_end, period_start, value, fiscal_year,
+    fiscal_period, form, filed, tag, period_length, is_derived, derivation_method), meant to be
+    concatenated onto qtr_df by the caller exactly like _derive_q4's `derived` return value.
+    """
+    tol = pd.Timedelta(days=_TILE_TOLERANCE_DAYS)
+    real_qtr_df = qtr_df[~qtr_df["is_derived"]]
+    derived_rows = []
+
+    for fy in ann_df.itertuples():
+        h1 = _select_ytd_candidate(ytd_df, fy.period_start, _H1_SPAN_DAYS_MIN, _H1_SPAN_DAYS_MAX)
+        nine_month = _select_ytd_candidate(
+            ytd_df, fy.period_start, _NINE_MONTH_SPAN_DAYS_MIN, _NINE_MONTH_SPAN_DAYS_MAX
+        )
+
+        # Q2 = H1 - Q1: needs exactly one real filed fact opening this fiscal year (Q1) to
+        # subtract, and no real fact already covering H1's own period_end.
+        if h1 is not None:
+            q1_candidates = real_qtr_df[(real_qtr_df["period_start"] - fy.period_start).abs() <= tol]
+            q2_already_real = ((real_qtr_df["period_end"] - h1.period_end).abs() <= tol).any()
+            if len(q1_candidates) == 1 and not q2_already_real:
+                q1 = q1_candidates.iloc[0]
+                implied_start = q1.period_end + _ONE_DAY
+                implied_days = (h1.period_end - implied_start).days
+                if _MID_QUARTER_SPAN_DAYS_MIN <= implied_days <= _MID_QUARTER_SPAN_DAYS_MAX:
+                    derived_rows.append(
+                        {
+                            "period_end": h1.period_end,
+                            "period_start": implied_start,
+                            "value": h1.value - q1.value,
+                            "fiscal_year": fy.fiscal_year,
+                            "fiscal_period": "Q2",
+                            "form": h1.form,
+                            "filed": max(q1.filed, h1.filed),
+                            "tag": "derived",
+                            "period_length": "quarterly",
+                            "is_derived": True,
+                            "derivation_method": "ytd_chain",
+                        }
+                    )
+
+        # Q3 = 9-month - H1: needs the real filed H1 cumulative fact itself (not a derived Q2),
+        # and no real fact already covering the 9-month fact's own period_end.
+        if h1 is not None and nine_month is not None:
+            q3_already_real = ((real_qtr_df["period_end"] - nine_month.period_end).abs() <= tol).any()
+            implied_start = h1.period_end + _ONE_DAY
+            implied_days = (nine_month.period_end - implied_start).days
+            if (
+                not q3_already_real
+                and _MID_QUARTER_SPAN_DAYS_MIN <= implied_days <= _MID_QUARTER_SPAN_DAYS_MAX
+            ):
+                derived_rows.append(
+                    {
+                        "period_end": nine_month.period_end,
+                        "period_start": implied_start,
+                        "value": nine_month.value - h1.value,
+                        "fiscal_year": fy.fiscal_year,
+                        "fiscal_period": "Q3",
+                        "form": nine_month.form,
+                        "filed": max(h1.filed, nine_month.filed),
+                        "tag": "derived",
+                        "period_length": "quarterly",
+                        "is_derived": True,
+                        "derivation_method": "ytd_chain",
+                    }
+                )
+
+        # Q4 = FY - 9-month: lowest precedence -- only when neither a real filed Q4 fact nor
+        # _derive_q4's Q1+Q2+Q3 subtraction already produced a value at this fiscal year's
+        # period_end. qtr_df here already has _derive_q4's output concatenated on, so checking
+        # the *full* frame (real or derived, either counts as "resolved") is deliberate --
+        # unlike the real_qtr_df-only checks above for Q2/Q3, where nothing else could ever have
+        # produced a value.
+        if nine_month is not None:
+            q4_already_resolved = ((qtr_df["period_end"] - fy.period_end).abs() <= tol).any()
+            implied_start = nine_month.period_end + _ONE_DAY
+            implied_days = (fy.period_end - implied_start).days
+            if (
+                not q4_already_resolved
+                and _Q4_SPAN_DAYS_MIN <= implied_days <= _Q4_SPAN_DAYS_MAX
+            ):
+                derived_rows.append(
+                    {
+                        "period_end": fy.period_end,
+                        "period_start": implied_start,
+                        "value": fy.value - nine_month.value,
+                        "fiscal_year": fy.fiscal_year,
+                        "fiscal_period": "Q4",
+                        "form": fy.form,
+                        "filed": max(nine_month.filed, fy.filed),
+                        "tag": "derived",
+                        "period_length": "quarterly",
+                        "is_derived": True,
+                        "derivation_method": "ytd_chain",
+                    }
+                )
+
+    return pd.DataFrame(derived_rows)

@@ -129,27 +129,64 @@
   numeric statement columns directly rather than going through
   `ratios.py`.
 
-- **Cash flow items are commonly filed as fiscal-year-to-date cumulative
-  figures rather than discrete quarters, so `get_concept`'s
-  `period_length="quarterly"` filter correctly excludes them — and
-  `statements.py` has no way to recover a discrete quarter from that YTD
-  data.** Confirmed across MSFT, NVDA, Ford, and Coca-Cola:
-  `operating_cash_flow`/`capex`'s `quarterly`-classified coverage runs
-  25–75% below the same company's income-statement concepts (e.g. NVDA
-  `capex`: only 15 of ~66 real quarters have a discrete-quarter fact at
-  all; the rest exist only as 6-/9-/12-month cumulative figures). This is
-  specific to cash-flow-statement items — `revenue`/`gross_profit`/
-  `operating_income`/`net_income` also pick up a meaningful share of
-  extra YTD-classified ("other") facts, but their `quarterly` coverage
-  still spans essentially the entire real history in every company
-  checked, because those get a clean discrete-quarter figure filed
-  alongside any YTD comparative. `statements.get_statement` only derives
-  a *missing Q4* from a fiscal year's Q1+Q2+Q3 (see its module docstring);
-  it does not derive discrete quarters from mid-year YTD figures (e.g.
-  Q2 = H1 − Q1, Q3 = 9-month − H1) — that's a different, not-yet-built
-  piece of analysis-layer work. Until then, `ratios.free_cash_flow` is
-  sparse — often majority-`None` — for companies that report cash flow
-  this way.
+- **Cash flow items are commonly filed as fiscal-year-to-date cumulative figures rather than
+  discrete quarters; `statements.py` now recovers a discrete quarter from that YTD data via
+  `Q2 = H1 − Q1`, `Q3 = 9-month − H1`, and, as a last resort, `Q4 = FY − 9-month`
+  (`statements._derive_ytd_quarters`).** This is specific to cash-flow-statement items —
+  `revenue`/`gross_profit`/`operating_income`/`net_income` also pick up a meaningful share of
+  extra YTD-classified ("other") facts, but their `quarterly` coverage already spans essentially
+  the entire real history in every company checked, because those get a clean discrete-quarter
+  figure filed alongside any YTD comparative, so this derivation is effectively a no-op for them
+  (a real fact always wins over deriving one). Measured `operating_cash_flow`/`capex` coverage,
+  before vs. after this fix, out of total quarterly periods on file:
+
+  | Ticker | Concept             | Before (real + Q1+Q2+Q3-subtraction) | After (+ YTD chain) |
+  |--------|---------------------|---------------------------------------|----------------------|
+  | MSFT   | operating_cash_flow | 72/76 (94.7%)                          | 72/76 (94.7%, unchanged — real coverage already near-complete) |
+  | MSFT   | capex               | 72/76 (94.7%)                          | 72/76 (94.7%, unchanged) |
+  | NVDA   | operating_cash_flow | 19/73 (26.0%)                          | 71/73 (97.3%) |
+  | NVDA   | capex               | 15/73 (20.5%)                          | 31/73 (42.5%) |
+  | Ford   | operating_cash_flow | 27/72 (37.5%)                          | 71/72 (98.6%) |
+  | Ford   | capex               | 20/72 (27.8%)                          | 71/72 (98.6%) |
+  | WMT    | operating_cash_flow | 18/72 (25.0%)                          | 71/72 (98.6%) |
+  | WMT    | capex               | 18/72 (25.0%)                          | 71/72 (98.6%) |
+
+  NVDA `capex` improves the least in relative terms (only 16 additional quarters recovered)
+  because most of its still-missing quarters predate 2015, when NVDA didn't yet file *any*
+  capex-related XBRL fact (real, YTD, or otherwise) — nothing to derive from, correctly refused
+  rather than guessed.
+
+  Worked example, NVDA `capex` FY2022 (fiscal year ended 2022-01-30): real filed Q1 = $298M; H1
+  (YTD, period_end 2021-08-01) = $481M; 9-month (YTD, period_end 2021-10-31) = $703M; FY (annual,
+  period_end 2022-01-30) = $976M. None of Q2/Q3/Q4 had a real filed discrete-quarter fact for
+  this year. Derived Q2 = H1 − Q1 = $183M; Q3 = 9-month − H1 = $222M; Q4 = FY − 9-month = $273M.
+
+  Precedence for a fiscal year's Q4 value is: (1) a real filed Q4 fact, (2) `FY − (Q1+Q2+Q3)` via
+  three real filed quarters (the pre-existing `_derive_q4` path), (3) `FY − 9-month` via this new
+  YTD chain, tried only when neither (1) nor (2) already produced a value. Q2/Q3 are derived
+  independently of Q4 and of each other, each from its own two adjacent real filed facts (Q3
+  uses the real H1 fact, never a derived Q2); a real filed Q2/Q3 fact always wins and derivation
+  never overwrites or duplicates it. Every duration concept column set gained a new
+  `{concept}_derivation_method` column (`"q1q2q3_subtraction"`, `"ytd_chain"`, or `None`)
+  recording which path, if any, produced a given row.
+
+  Deliberately **not** built: a cross-check/reconciliation output for the new path — the
+  equivalent of `_derive_q4`'s `q4_subtraction_value`/`q4_diverges_from_subtraction` for the
+  real-Q4-vs-subtraction case. That reconciliation exists there because a real Q4 fact and the
+  subtraction value are *always* simultaneously computable whenever 4 real quarterly candidates
+  exist — free to compute, cheap to expose. There is no equivalent moment here: both the
+  Q4-via-9-month path and the Q2/Q3 paths only ever run when the corresponding real slot is
+  already confirmed empty (checked explicitly before deriving), so a real fact and a
+  YTD-chain-derived value for the same period are never both in hand at once to compare. This is
+  a deliberate scope decision, not an oversight — nothing rules out adding it later if a concrete
+  case turns up (e.g. a company with 4 real quarterly candidates *and* a redundant 9-month YTD
+  fact for the same year), but none has been found yet, and the primary coverage gap this
+  feature targets is specifically the case where real quarters are absent, not where they're
+  present and merely redundant with a YTD fact.
+
+  `ratios.free_cash_flow` is correspondingly less sparse now for companies that report cash flow
+  this way — it still reads `stmt["operating_cash_flow"]`/`stmt["capex"]` unchanged, gated by
+  `pd.notna()`, so newly-populated derived values flow through automatically.
 
 - **`market.py` depends on yfinance, an unofficial API.** yfinance scrapes
   Yahoo Finance rather than calling a supported, licensed API — it can

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.analysis.statements import _derive_q4, get_statement
+from src.analysis.statements import DURATION_CONCEPTS, _derive_q4, _derive_ytd_quarters, get_statement
 from src.data.concepts import ConceptNotFoundError
 
 
@@ -34,6 +34,23 @@ def _fy_row(period_start, period_end, value, fiscal_year=2024, form="10-K",
         "filed": pd.Timestamp(filed),
         "tag": tag,
         "period_length": "annual",
+    }
+
+
+def _ytd_row(period_start, period_end, value, fiscal_period="Q2", fiscal_year=2024,
+             form="10-Q", filed="2024-06-01", tag="RevTag"):
+    """A single 'other'-classified (fiscal-year-to-date cumulative) duration row, matching
+    get_concept's real column shape."""
+    return {
+        "period_start": pd.Timestamp(period_start),
+        "period_end": pd.Timestamp(period_end),
+        "value": value,
+        "fiscal_year": fiscal_year,
+        "fiscal_period": fiscal_period,
+        "form": form,
+        "filed": pd.Timestamp(filed),
+        "tag": tag,
+        "period_length": "other",
     }
 
 
@@ -136,6 +153,7 @@ def test_derive_q4_three_candidates_unchanged():
     row = derived.iloc[0]
     assert row["is_derived"]
     assert row["tag"] == "derived"
+    assert row["derivation_method"] == "q1q2q3_subtraction"
     assert row["value"] == pytest.approx(165)  # 630 - (150+160+155)
     assert reconciliation.empty
 
@@ -164,6 +182,7 @@ def test_get_statement_three_candidate_year_reconciliation_not_applicable(monkey
 
     row = stmt.loc[stmt["period_end"] == pd.Timestamp("2024-12-31")].iloc[0]
     assert row["revenue_is_derived"]
+    assert row["revenue_derivation_method"] == "q1q2q3_subtraction"
     assert pd.isna(row["revenue_q4_subtraction_value"])
     assert not row["revenue_q4_diverges_from_subtraction"]
 
@@ -186,6 +205,198 @@ def test_derive_q4_four_candidates_not_aligned_to_fy_end_refuses():
 
     assert derived.empty
     assert reconciliation.empty
+
+
+# --- YTD-chain quarter derivation (Q2 = H1-Q1, Q3 = 9M-H1, Q4 = FY-9M) -----------------------
+#
+# Shared fixture shape across these tests: Q1 = 2024-01-01..2024-03-31 (90d), H1 =
+# 2024-01-01..2024-06-30 (181d), 9-month = 2024-01-01..2024-09-30 (273d), FY =
+# 2024-01-01..2024-12-31 (365d) -- implied Q2 = Apr1-Jun30 (91d), implied Q3 = Jul1-Sep30 (92d),
+# implied Q4 = Oct1-Dec31 (92d), all within their respective bound checks.
+
+
+def test_derive_ytd_quarters_derives_q2_q3_q4_when_real_quarters_absent():
+    qtr_df = pd.DataFrame([_qtr_row("2024-01-01", "2024-03-31", 100, "Q1")])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([
+        _ytd_row("2024-01-01", "2024-06-30", 220, "Q2"),
+        _ytd_row("2024-01-01", "2024-09-30", 345, "Q3"),
+    ])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert len(result) == 3
+    assert set(result["derivation_method"]) == {"ytd_chain"}
+    assert set(result["is_derived"]) == {True}
+
+    q2 = result.loc[result["fiscal_period"] == "Q2"].iloc[0]
+    assert q2["period_end"] == pd.Timestamp("2024-06-30")
+    assert q2["value"] == pytest.approx(120)  # 220 - 100
+
+    q3 = result.loc[result["fiscal_period"] == "Q3"].iloc[0]
+    assert q3["period_end"] == pd.Timestamp("2024-09-30")
+    assert q3["value"] == pytest.approx(125)  # 345 - 220
+
+    q4 = result.loc[result["fiscal_period"] == "Q4"].iloc[0]
+    assert q4["period_end"] == pd.Timestamp("2024-12-31")
+    assert q4["value"] == pytest.approx(135)  # 480 - 345
+
+
+def test_derive_ytd_quarters_q2_not_derived_when_real_quarter_exists():
+    qtr_df = pd.DataFrame([
+        _qtr_row("2024-01-01", "2024-03-31", 100, "Q1"),
+        _qtr_row("2024-04-01", "2024-06-30", 121, "Q2"),
+    ])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([
+        _ytd_row("2024-01-01", "2024-06-30", 220, "Q2"),
+        _ytd_row("2024-01-01", "2024-09-30", 345, "Q3"),
+    ])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert "Q2" not in set(result["fiscal_period"])
+    assert set(result["fiscal_period"]) == {"Q3", "Q4"}
+
+
+def test_derive_ytd_quarters_q3_not_derived_when_real_quarter_exists():
+    qtr_df = pd.DataFrame([
+        _qtr_row("2024-01-01", "2024-03-31", 100, "Q1"),
+        _qtr_row("2024-07-01", "2024-09-30", 126, "Q3"),
+    ])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([
+        _ytd_row("2024-01-01", "2024-06-30", 220, "Q2"),
+        _ytd_row("2024-01-01", "2024-09-30", 345, "Q3"),
+    ])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert "Q3" not in set(result["fiscal_period"])
+    assert set(result["fiscal_period"]) == {"Q2", "Q4"}
+
+
+def test_derive_ytd_quarters_q4_not_derived_when_q1q2q3_subtraction_already_resolved():
+    # Build qtr_df the way get_statement actually does: run _derive_q4 first and concat its
+    # output on, so this exercises the real precedence check (full qtr_df, not just real rows).
+    qtr_df = pd.DataFrame([
+        _qtr_row("2024-01-01", "2024-03-31", 150, "Q1"),
+        _qtr_row("2024-04-01", "2024-06-30", 160, "Q2"),
+        _qtr_row("2024-07-01", "2024-09-30", 155, "Q3"),
+    ])
+    qtr_df["is_derived"] = False
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 630)])
+    derived, _reconciliation = _derive_q4(qtr_df, ann_df)
+    qtr_df = pd.concat([qtr_df, derived], ignore_index=True)
+
+    ytd_df = pd.DataFrame([_ytd_row("2024-01-01", "2024-09-30", 465, "Q3")])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert result.empty  # Q4 already resolved by subtraction; no H1 present for Q2/Q3 either
+
+
+def test_derive_ytd_quarters_q4_not_derived_when_real_q4_fact_already_exists():
+    qtr_df = pd.DataFrame([
+        _qtr_row("2022-01-01", "2022-03-31", 100, "Q1", fiscal_year=2022),
+        _qtr_row("2022-04-01", "2022-06-30", 110, "Q2", fiscal_year=2022),
+        _qtr_row("2022-07-01", "2022-09-30", 105, "Q3", fiscal_year=2022),
+        _qtr_row("2022-10-01", "2022-12-31", 115, "Q4", fiscal_year=2022),
+    ])
+    qtr_df["is_derived"] = False
+    ann_df = pd.DataFrame([_fy_row("2022-01-01", "2022-12-31", 430, fiscal_year=2022)])
+    ytd_df = pd.DataFrame([_ytd_row("2022-01-01", "2022-09-30", 315, "Q3", fiscal_year=2022)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    # No H1 fact provided, so Q2/Q3 can't derive either -- Q4 is the only thing that could have
+    # fired here, and it's blocked by the real filed Q4 fact already in qtr_df.
+    assert result.empty
+
+
+def test_derive_ytd_quarters_refuses_on_bad_implied_span():
+    # Q1 is deliberately not a plausible quarter length, to isolate the implied-span check.
+    qtr_df = pd.DataFrame([_qtr_row("2024-01-01", "2024-01-31", 100, "Q1")])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([_ytd_row("2024-01-01", "2024-06-30", 220, "Q2")])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert result.empty  # implied Q2 span (Feb1-Jun30, 150d) is outside the mid-quarter bounds
+
+
+def test_derive_ytd_quarters_refuses_on_ambiguous_h1_candidates():
+    qtr_df = pd.DataFrame([_qtr_row("2024-01-01", "2024-03-31", 100, "Q1")])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([
+        _ytd_row("2024-01-01", "2024-06-24", 215, "Q2"),  # 175d, also in the H1 bucket
+        _ytd_row("2024-01-01", "2024-06-30", 220, "Q2"),  # 181d
+    ])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert result.empty  # two H1 candidates -- refuse rather than guess which one is real
+
+
+def test_derive_ytd_quarters_refuses_when_h1_start_off_tolerance():
+    qtr_df = pd.DataFrame([_qtr_row("2024-01-01", "2024-03-31", 100, "Q1")])
+    qtr_df["is_derived"] = False
+    # period_start is 14 days off fy_start -- well outside _TILE_TOLERANCE_DAYS.
+    ytd_df = pd.DataFrame([_ytd_row("2024-01-15", "2024-07-14", 220, "Q2")])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)])
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert result.empty
+
+
+def test_derive_ytd_quarters_empty_when_no_annual_years():
+    qtr_df = pd.DataFrame([_qtr_row("2024-01-01", "2024-03-31", 100, "Q1")])
+    qtr_df["is_derived"] = False
+    ytd_df = pd.DataFrame([_ytd_row("2024-01-01", "2024-06-30", 220, "Q2")])
+    ann_df = pd.DataFrame([_fy_row("2024-01-01", "2024-12-31", 480)]).iloc[0:0]
+
+    result = _derive_ytd_quarters(qtr_df, ytd_df, ann_df)
+
+    assert result.empty
+
+
+def test_derivation_method_consistent_with_is_derived(msft_quarterly, nvda_quarterly, ford_quarterly):
+    # derivation_method must be None exactly where is_derived is False, and one of the two known
+    # method strings exactly where is_derived is True -- never left unset/misaligned by the
+    # concat/merge steps that assemble each concept's column.
+    for stmt in (msft_quarterly, nvda_quarterly, ford_quarterly):
+        for concept in DURATION_CONCEPTS:
+            is_derived = stmt[f"{concept}_is_derived"]
+            method = stmt[f"{concept}_derivation_method"]
+            assert method[~is_derived].isna().all()
+            assert method[is_derived].isin(["q1q2q3_subtraction", "ytd_chain"]).all()
+
+
+def test_nvda_fy2022_capex_ytd_chain_derivation(nvda_quarterly):
+    # NVDA files capex almost entirely as YTD cumulative facts (see NOTES.md) -- FY2022 (fiscal
+    # year ended 2022-01-30) has only a real filed Q1 ($298M); Q2/Q3/Q4 exist only as
+    # H1/9-month/FY cumulative facts, recoverable only via this YTD chain.
+    expected = {
+        pd.Timestamp("2021-08-01"): (183_000_000, "Q2"),
+        pd.Timestamp("2021-10-31"): (222_000_000, "Q3"),
+        pd.Timestamp("2022-01-30"): (273_000_000, "Q4"),
+    }
+    for period_end, (expected_value, expected_fp) in expected.items():
+        row = nvda_quarterly.loc[nvda_quarterly["period_end"] == period_end].iloc[0]
+        assert row["capex"] == pytest.approx(expected_value)
+        assert row["capex_is_derived"]
+        assert row["capex_derivation_method"] == "ytd_chain"
+
+    q1 = nvda_quarterly.loc[nvda_quarterly["period_end"] == pd.Timestamp("2021-05-02")].iloc[0]
+    assert q1["capex"] == pytest.approx(298_000_000)
+    assert not q1["capex_is_derived"]
+    assert q1["capex_derivation_method"] is None
 
 
 def test_wmt_fy2010_q4_diverges_from_subtraction(client):
