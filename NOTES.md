@@ -606,3 +606,32 @@
   recorded in this file, alongside a `$5`-shaped dollar-integer case, a control case proving scaled/
   percent/comma-grouped whole numbers are never downgraded, and a case proving best-match picks the
   numerically closest of two qualifying candidates rather than the first one in traversal order.
+
+- **The last open artifact class from the "44 remaining untraced" breakdown above — a markdown
+  table stating its unit once in the column header rather than per cell — is left open, not
+  fixed, because it turned out to be a one-off rather than a recurring format.** The case:
+  `aapl_operating_margin_trend_run2`'s answer table has `"Revenue ($B)"` / `"Operating income
+  ($B)"` column headers and bare per-cell values ("94.930" vs. a real `get_financial_statement`
+  value of `94,930,000,000.0`, `tag: "derived"`), so every cell in those two columns normalizes to
+  its literal, unscaled value and never matches the tool's raw dollar figure — 16 untraced figures
+  (8 rows × 2 columns), all 16 of them genuinely grounded content the checker simply can't scale.
+  Before writing a markdown-table parser for this, every table in all 21 saved traces was scanned
+  and each numeric column classified as unit-in-header-only, unit-repeated-per-cell, or
+  no-unit-indicated: 16 of the 21 traces contain at least one markdown table with a numeric
+  column, and 15 of those 16 tables already repeat the unit in every cell (`"$94.930B"`,
+  `"31.17%"`) — exactly the shape `_normalize`'s existing suffix/word/percent handling already
+  covers with zero table-structure awareness. Only `aapl_operating_margin_trend_run2`'s one table
+  does it the header-only way, and not even consistently for its own question: the same question's
+  other two runs (`run1`, `run3`) wrote the identical underlying data with per-cell units instead.
+  A real fix means giving the checker markdown-table structure awareness it doesn't have today —
+  detecting header/separator/body rows, mapping a candidate figure's character span to a column,
+  reading a per-column unit off the header text, applying it as a scale without double-counting a
+  cell that already carries its own unit (`"$94.930B"` in a `"($B)"` column), and without letting a
+  header-scaled bare integer fall into the existing `weak_match` bucket (which exists specifically
+  to flag *unscaled* bare integers as coincidence-prone — a header-scaled one no longer is) — real
+  surface area to carry for a pattern that appeared once across 706 candidate figures in 21 runs.
+  Left undone; pooled strict grounding is unchanged at 93.9% (663/706 traced), and these 16 figures
+  remain correctly reported as untraced instances of this specific, now-documented gap rather than
+  a checker bug worth chasing further. Revisit if this table shape shows up again in a future eval
+  pass — the corpus-wide scan above is what would need re-running to tell a recurrence from another
+  one-off.
