@@ -10,7 +10,7 @@ EdgarClient's on-disk cache state.
 import json
 
 import anthropic
-import httpx
+import httpx2 as httpx
 import pytest
 
 from src.app import main as app_main
@@ -225,6 +225,8 @@ def test_build_charts_returns_empty_list_with_no_qualifying_tool_calls():
 
 
 def _httpx_request():
+    # anthropic>=1.0's exception constructors type-hint request/response as httpx2, not httpx --
+    # use the real type here rather than relying on the hint going unenforced (see NOTES.md).
     return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
 
 

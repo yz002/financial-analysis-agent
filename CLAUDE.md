@@ -51,7 +51,9 @@ python -c "from src.data.concepts import get_concept; print(get_concept('AAPL', 
 ```
 
 Dependencies: `pip install -r requirements.txt` (Python, requests, pandas, numpy,
-python-dotenv, matplotlib, yfinance, anthropic, pytest).
+python-dotenv, matplotlib, yfinance, anthropic, pytest). `anthropic` tracks 1.0+ (its `httpx`→
+`httpx2` transport swap and what it took to move `tests/test_app.py` off plain `httpx` — see
+NOTES.md).
 
 Environment: copy `.env.example` to `.env` and set `SEC_USER_AGENT` (required — EDGAR rejects
 requests without a descriptive `Name email` User-Agent) and `ANTHROPIC_API_KEY`.

@@ -1,4 +1,4 @@
-anthropic<1.0.0
+anthropic
 requests
 pandas
 numpy

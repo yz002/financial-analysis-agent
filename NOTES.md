@@ -245,22 +245,58 @@
   production data source. A real deployment would use a licensed market
   data vendor instead.
 
-- **`anthropic` is pinned to `<1.0.0` in `requirements.txt` because 1.0 breaks
-  `tests/test_app.py`'s error-mocking.** Before this project pinned anything but `yfinance`,
-  a fresh `pip install -r requirements.txt` resolved `anthropic` to whatever was newest — as
-  of writing, that's 1.0.0, which replaced the SDK's `httpx` dependency with a new `httpx2`
-  package (`anthropic.APIConnectionError.__init__` now type-hints `request: httpx2.Request`,
-  not `httpx.Request`). `test_app.py` constructs that error with `httpx.Request(...)` to
-  simulate a connection failure for `src/app/main.py`'s error-mapping tests, and under 1.0
-  `httpx` isn't even transitively installed anymore, so test collection fails outright
-  (`ModuleNotFoundError: No module named 'httpx'`) — caught while building
-  `requirements-lock.txt` and dry-running it against a genuinely clean install, since the
-  project's own long-lived dev `.venv` had `anthropic==0.122.0` installed from before and
-  masked the break. Pinning below 1.0 is a deliberate stopgap, not a decision to skip the
-  migration: moving to 1.0/`httpx2` needs `test_app.py`'s mocking updated and
-  `src/app/main.py`'s `except anthropic.APIConnectionError` verified against the new SDK,
-  which is a real task with its own verification pass, not something to fold into unrelated
-  CI/lockfile setup.
+- **Resolved: the `anthropic<1.0.0` pin (see the superseded entry this replaces) has been lifted;
+  `anthropic==1.0.0` is now what `requirements.txt`/`requirements-lock.txt` install.** The pin's
+  original justification, re-verified in this pass: `anthropic` 1.0 dropped its `httpx` dependency
+  for a Pydantic-maintained fork, `httpx2` (`anthropic.APIConnectionError.__init__`/
+  `AuthenticationError.__init__` now type-hint `request`/`response` as `httpx2.Request`/
+  `httpx2.Response`), and `tests/test_app.py` constructs exactly those objects with plain
+  `httpx.Request(...)`/`httpx.Response(...)` to simulate a connection/auth failure for
+  `src/app/main.py`'s error-mapping tests. The specific failure mode is easy to get wrong by
+  testing in the wrong environment, which is worth recording explicitly: **in this project's
+  long-lived dev `.venv`, simply `pip install --upgrade anthropic` (no other change) and running
+  `pytest` reports 304 passed, 0 failed** — no hang, no live network call, no assertion failure,
+  nothing. That result is misleading. The dev `.venv` had plain `httpx==0.28.1` already installed
+  from before (an old, independent leftover, not a dependency `anthropic` 1.0 pulls back in);
+  `pip install --upgrade` never removes packages the new resolution no longer needs, so `import
+  httpx` in `test_app.py` kept succeeding, and the resulting `httpx.Request`/`httpx.Response`
+  objects still worked with `anthropic`'s exception constructors purely because those constructors
+  do no runtime isinstance/pydantic validation on `request`/`response` — the `httpx2` type hint is
+  advisory only. Confirmed directly: `anthropic.APIConnectionError(request=httpx.Request(...))`
+  builds fine, and `type(e.request)` is genuinely `httpx.Request`, not `httpx2.Request`. Only after
+  explicitly `pip uninstall httpx httpcore` (reproducing what a genuinely clean install of
+  `requirements.txt` — which never pinned `httpx` directly — actually provides once `anthropic` no
+  longer transitively requires it) does the real failure surface: `ModuleNotFoundError: No module
+  named 'httpx'` at `test_app.py` collection.
+
+  Also re-verified before deciding on a fix: every *other* place `anthropic` is mocked in this
+  test suite (`tests/test_agent.py`, `tests/test_evals_token_tracking.py`'s `TrackedClient`,
+  `tests/test_run_evals.py`) mocks at the client-object level — `MagicMock()` standing in for the
+  whole `anthropic.Anthropic` instance, `.messages.create` replaced directly — and never
+  constructs or imports `httpx` at all. None of it was ever at risk from the `httpx`→`httpx2`
+  swap; `test_app.py`'s two real object constructions were the only genuine integration point.
+  `src/` itself never imports `httpx` either (`edgar_client.py` uses `requests`, `market.py` goes
+  through `yfinance`), so the swap has zero effect on the data layer.
+
+  Given only one file needed a change, and that change is two lines, a process-wide
+  `httpx2.alias_httpx()` shim (redirecting `import httpx` for the whole interpreter, including
+  anthropic's own internal retry/proxy/timeout code and any transitive `httpx` use in other
+  dependencies) was rejected as solving a problem that turned out not to exist at that scope.
+  Fixed instead by pointing `test_app.py` at the real thing its objects are standing in for:
+  `import httpx2 as httpx` in that file, so `_httpx_request()`/the response it wraps are genuine
+  `httpx2.Request`/`httpx2.Response` instances rather than same-shaped-by-luck `httpx` ones. Also
+  removed the now-fully-orphaned plain `httpx`/`httpcore` packages from the dev `.venv` and from
+  `requirements-lock.txt`, and confirmed the full suite (304 tests) still passes with them
+  genuinely absent, plus a deliberate-break sanity check on both mocking styles (flipping an
+  assertion in `test_agent.py`'s client-level mock, and in `test_app.py`'s `httpx2`-based one) to
+  confirm each is actually being exercised, not passing because nothing hit the network.
+
+  Nothing else from 1.0's removal list applies here: no `temperature`/`top_p`/`top_k` passed to
+  `messages.create()` (`src/agent/agent.py`'s single call site passes only `model`, `max_tokens`,
+  `system`, `tools`, `messages`), no `isinstance(x, anthropic.Stream)` checks, nothing from the
+  legacy Text Completions API (`HUMAN_PROMPT`/`AI_PROMPT`/`.complete()`/`/v1/complete`) — confirmed
+  by grepping the whole repo, not assumed. The Python floor also needed no work: CI
+  (`.github/workflows/tests.yml`) already runs 3.14, well past 1.0's 3.10 minimum.
 
 - **The no-arithmetic constraint is now structurally checked (`src/agent/guardrails.py`'s
   `check_figures`, wired into `run_agent`'s returned `figure_check`), but it flags rather than
