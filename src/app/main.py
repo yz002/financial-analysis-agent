@@ -7,6 +7,7 @@ return dict, never recomputed or reformatted -- the no-model-arithmetic rule
 Run with `streamlit run src/app/main.py` from the repo root.
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -28,6 +29,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.agent.agent import run_agent  # noqa: E402 -- import after sys.path/load_dotenv setup above
+from src.analysis import csv_statement  # noqa: E402 -- see comment above
+from src.data import csv_ingest  # noqa: E402 -- see comment above
 from src.data.cik_lookup import get_company_name  # noqa: E402 -- see comment above
 
 EXAMPLE_QUESTIONS = [
@@ -309,6 +312,185 @@ def render_charts(result: dict) -> None:
         st.altair_chart(_altair_chart(chart["df"], chart["kind"]), use_container_width=True)
 
 
+_CSV_STATE_KEYS = [
+    "csv_file_hash", "csv_raw", "csv_parse_error",
+    "csv_proposal", "csv_proposal_error",
+    "csv_normalized", "csv_normalize_errors", "csv_normalize_warnings",
+]
+
+
+def _reset_csv_state() -> None:
+    """Clear every csv_* session-state key -- called whenever a genuinely new file is
+    uploaded (detected by content hash, see render_csv_upload_section), so a prior file's
+    parse result, mapping proposal, and normalized frame never leak into the next one. Also
+    clears each per-column mapping widget's own key (csv_role_<column>) -- those persist
+    independently of the keys above, and a new file's columns (even a same-named one, e.g.
+    both files having a "Date" column) must start from this file's own LLM proposal, not a
+    stale selection left over from the previous upload."""
+    for key in _CSV_STATE_KEYS:
+        st.session_state[key] = None
+    for key in [k for k in st.session_state if k.startswith("csv_role_")]:
+        del st.session_state[key]
+
+
+def _propose_mapping_or_error(raw) -> tuple[csv_ingest.MappingProposal | None, str | None]:
+    """propose_mapping, with the same exception-to-plain-English-message translation
+    _run_agent_or_error gives run_agent -- csv_ingest.propose_mapping doesn't catch Anthropic
+    API errors itself (same reasoning as run_agent: a genuine API failure is the UI's job to
+    translate, not the function's to swallow), so this does it once for the CSV flow. A
+    malformed-but-successful model response isn't an exception here -- it's a normal
+    MappingProposal with every column defaulted to "unmapped" and a `.note` explaining why
+    (see propose_mapping's docstring), so it doesn't come through this error path at all."""
+    try:
+        return csv_ingest.propose_mapping(raw, csv_statement.MAPPABLE_ROLES), None
+    except anthropic.AuthenticationError:
+        return None, (
+            "Anthropic API authentication failed. Check that ANTHROPIC_API_KEY is set "
+            "in your .env file and is valid."
+        )
+    except anthropic.APIConnectionError:
+        return None, "Could not reach the Anthropic API -- check your network connection and try again."
+    except anthropic.APIError as e:
+        return None, f"Anthropic API error: {e}"
+    except Exception as e:  # noqa: BLE001 -- last-resort catch so the UI never shows a raw traceback
+        return None, f"Unexpected error while proposing a mapping: {e}"
+
+
+def render_csv_upload_section() -> None:
+    """
+    Upload -> LLM-proposed mapping -> human confirmation -> normalization, per the approved
+    CSV-upload design doc's session 1 scope. Ends at an inspectable normalized DataFrame,
+    displayed via st.dataframe below -- nothing here is wired into the question/answer flow,
+    run_agent, or any render_* function below (that's session 2's scope). The confirmation
+    panel is deliberately as prominent as render_figure_check's warning banner (unresolved
+    violations block the confirm button, not just a subtle note), matching this project's
+    grounding-first UI philosophy.
+
+    Mapping state lives in each column's own st.selectbox widget (key=f"csv_role_{column}"),
+    not a separately-tracked session-state dict -- Streamlit already persists a keyed widget's
+    value across reruns, so a second copy would just be a second, driftable source of truth.
+    The mapping dict passed to validate_mapping/normalize is derived fresh from those widget
+    keys on every render instead.
+    """
+    st.subheader("Analyze your own business (CSV upload)")
+    st.caption(
+        "Upload a quarterly- or annual-cadence financial CSV (revenue required; net income "
+        "and balance-sheet figures recommended). An LLM proposes a column mapping below, "
+        "which you confirm or correct before anything is normalized -- this file isn't used "
+        "to answer questions yet."
+    )
+
+    for key in _CSV_STATE_KEYS:
+        if key not in st.session_state:
+            st.session_state[key] = None
+
+    uploaded_file = st.file_uploader("Upload a CSV", type="csv", key="csv_uploader")
+    if uploaded_file is None:
+        return
+
+    file_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    if st.session_state.csv_file_hash != file_hash:
+        _reset_csv_state()
+        st.session_state.csv_file_hash = file_hash
+        raw, error = csv_ingest.parse_csv(file_bytes, uploaded_file.name)
+        st.session_state.csv_raw = raw
+        st.session_state.csv_parse_error = error
+
+    if st.session_state.csv_parse_error:
+        st.error(st.session_state.csv_parse_error)
+        return
+
+    raw = st.session_state.csv_raw
+    st.success(f"Parsed {uploaded_file.name}: {len(raw.df)} rows, {len(raw.df.columns)} columns.")
+
+    if st.session_state.csv_proposal is None:
+        if st.button("Propose column mapping", key="csv_propose_button"):
+            with st.spinner("Asking the model to propose a column mapping..."):
+                proposal, error = _propose_mapping_or_error(raw)
+            st.session_state.csv_proposal = proposal
+            st.session_state.csv_proposal_error = error
+        if st.session_state.csv_proposal_error:
+            st.error(st.session_state.csv_proposal_error)
+        if st.session_state.csv_proposal is None:
+            return
+
+    proposal = st.session_state.csv_proposal
+    if proposal.note:
+        st.warning(proposal.note)
+
+    st.markdown("**Confirm the column mapping**")
+    entity_name = st.text_input(
+        "Business name (used to label results, not sent anywhere)", key="csv_entity_name"
+    )
+
+    proposal_by_column = {c.csv_column: c for c in proposal.columns}
+    role_options = [csv_statement.UNMAPPED_ROLE, csv_statement.PERIOD_ROLE, *csv_statement.ALL_CONCEPTS]
+    mapping = {}
+    for column in raw.df.columns:
+        col_proposal = proposal_by_column.get(column)
+        default_role = col_proposal.proposed_role if col_proposal else csv_statement.UNMAPPED_ROLE
+        widget_key = f"csv_role_{column}"
+        with st.container(border=True):
+            left, right = st.columns([1, 1])
+            left.markdown(f"**{column}**")
+            sample_values = raw.df[column].astype(str).head(3).tolist()
+            left.caption(f"e.g. {', '.join(sample_values)}")
+            if col_proposal and col_proposal.rationale:
+                left.caption(f"Model: {col_proposal.rationale}")
+            selected = right.selectbox(
+                "Role",
+                role_options,
+                index=role_options.index(default_role) if default_role in role_options else 0,
+                key=widget_key,
+            )
+        mapping[column] = selected
+
+    violations = csv_statement.validate_mapping(raw, mapping)
+    if violations:
+        with st.container(border=True):
+            st.warning("Resolve these before confirming:")
+            for v in violations:
+                st.markdown(f"- {v}")
+
+    entity_name_ok = bool(entity_name and entity_name.strip())
+    if not entity_name_ok:
+        st.info("Enter a business name above to enable confirmation.")
+
+    confirm_clicked = st.button(
+        "Confirm mapping and normalize",
+        type="primary",
+        disabled=bool(violations) or not entity_name_ok,
+    )
+    if confirm_clicked:
+        df, errors, warnings = csv_statement.normalize(raw, mapping, entity_name.strip())
+        st.session_state.csv_normalized = df
+        st.session_state.csv_normalize_errors = errors
+        st.session_state.csv_normalize_warnings = warnings
+
+    if st.session_state.csv_normalize_errors:
+        with st.container(border=True):
+            st.error("Could not normalize this file:")
+            for e in st.session_state.csv_normalize_errors:
+                st.markdown(f"- {e}")
+
+    if st.session_state.csv_normalized is not None:
+        normalized = st.session_state.csv_normalized
+        st.success(
+            f"Normalized {len(normalized)} period(s) for {normalized.attrs['entity_name']} "
+            f"({normalized.attrs['csv_source']['cadence'] or 'single-period'} cadence)."
+        )
+        if st.session_state.csv_normalize_warnings:
+            # Same visual weight as the mapping-violations block above (a colored st.warning
+            # banner, not a muted caption) -- a dropped row is data loss the human should
+            # actually notice, not a footnote.
+            with st.container(border=True):
+                st.warning("Notes from normalization:")
+                for w in st.session_state.csv_normalize_warnings:
+                    st.markdown(f"- {w}")
+        st.dataframe(normalized, use_container_width=True)
+
+
 def main() -> None:
     st.set_page_config(page_title="FP&A Copilot", page_icon="📊", layout="wide")
 
@@ -321,6 +503,9 @@ def main() -> None:
 
     st.title("FP&A Copilot")
     st.caption("Ask a question about a public company's financials, sourced from SEC filings.")
+
+    render_csv_upload_section()
+    st.divider()
 
     st.markdown("**Try an example:**")
     cols = st.columns(2)
