@@ -59,6 +59,20 @@ Every ticker gets the same fixed column schema regardless of what data is
 actually available (Ford has no gross_profit at all) -- a concept with
 zero usable data still gets its columns, filled with NaN/None/False, so
 callers (ratios.py) never need `hasattr`/`in df.columns` guards.
+
+total_liabilities gets this module's first derivation machinery for an *instant* (balance-sheet)
+concept -- everything above is duration-concept-only. Some filers (confirmed: Walmart, across its
+entire filing history) never report the rolled-up us-gaap:Liabilities tag at all, so
+_derive_total_liabilities falls back, per period_end, to current_liabilities +
+liabilities_noncurrent when both are present, then to the accounting identity
+total_assets - stockholders_equity when both of those are present, refusing (leaving the value
+absent) only if neither fallback's inputs are available. One convention differs from the
+duration-concept columns above: total_liabilities_derivation_method can be "direct_tag" even
+though total_liabilities_is_derived is False for that same row -- duration concepts never pair
+is_derived=False with a non-None method. See _derive_total_liabilities's own docstring for the
+full tier order, why the third tier is an accounting identity rather than a sum of individual
+liability line items, and NOTES.md for the real tag-availability findings and the confirmed
+divergence causes for the identity's own cross-check.
 """
 
 import pandas as pd
@@ -100,6 +114,21 @@ _Q4_SPAN_DAYS_MIN, _Q4_SPAN_DAYS_MAX = 80, 125
 # case (smallest: WMT FY2011 at 0.7%) while not firing on near-exact agreement (NVDA's smallest
 # real diff: 0.004%). See NOTES.md.
 _Q4_RECONCILIATION_TOLERANCE = 0.005
+
+# Relative tolerance (fraction of the directly filed total_liabilities value) for flagging a
+# divergence between that real value and the best available fallback cross-check
+# (current_liabilities + liabilities_noncurrent, or total_assets - stockholders_equity). Mirrors
+# _Q4_RECONCILIATION_TOLERANCE's value and reasoning: confirmed real divergences (MSFT
+# period_end 2016-06-30 at ~9.1%, two NVDA periods at ~3.1%/0.8%, all via the assets-minus-equity
+# identity) clear this threshold comfortably, while most periods checked against a filer with a
+# direct tag agree with the identity to 0.000%. The root cause is the same phenomenon documented
+# above for Q4 subtraction divergence -- each concept is deduped/tag-prioritized independently,
+# so total_assets/stockholders_equity/total_liabilities for the same period_end can legitimately
+# be sourced from different filings' restated comparative columns -- plus, for the identity
+# specifically, an additive source: stockholders_equity resolving to the noncontrolling-interest-
+# inclusive tag understates the identity's implied liabilities by the NCI amount (see
+# stockholders_equity_tag on the relevant row, and NOTES.md).
+_LIABILITIES_ALT_TOLERANCE = 0.005
 
 _ONE_DAY = pd.Timedelta(days=1)
 
@@ -148,11 +177,12 @@ def get_statement(
 ) -> pd.DataFrame:
     """
     Return one wide financial statement DataFrame for `ticker`, one row per
-    period_end, joining all 12 concepts in CONCEPTS.
+    period_end, joining all 13 concepts in CONCEPTS.
 
     Columns: period_end, period_start, and per concept: "{concept}" (value),
     "{concept}_tag" (source XBRL tag, or "derived" for any synthesized
-    row -- Q4-by-subtraction or a YTD-chain-derived Q2/Q3/Q4), "{concept}_filed"
+    row -- Q4-by-subtraction, a YTD-chain-derived Q2/Q3/Q4, or a
+    total_liabilities fallback), "{concept}_filed"
     (the filing date backing that value), and -- for duration concepts only --
     "{concept}_is_derived" (bool, always literal True/False, never NaN),
     "{concept}_derivation_method" ("q1q2q3_subtraction", "ytd_chain", or None
@@ -162,6 +192,15 @@ def get_statement(
     docstring), and "{concept}_q4_diverges_from_subtraction" (bool, always
     literal True/False, never NaN). A concept with no usable data for this
     ticker still gets these columns, filled with NaN/None/False.
+
+    total_liabilities alone additionally carries "total_liabilities_is_derived",
+    "total_liabilities_derivation_method" ("direct_tag",
+    "current_plus_noncurrent_sum", "assets_minus_equity_identity", or None),
+    "total_liabilities_alt_value" (float, NaN unless a direct-tag row also had a
+    fallback available to cross-check against), "total_liabilities_alt_method"
+    (same three method strings, or None), and
+    "total_liabilities_diverges_from_alt" (bool, always literal, never NaN) --
+    see module docstring and _derive_total_liabilities.
 
     period_length: "quarterly" (default) or "annual". In "quarterly" mode,
     a Q4 row per fiscal year is synthesized for duration concepts where the
@@ -291,6 +330,8 @@ def get_statement(
         statement[f"{concept}_q4_diverges_from_subtraction"] = (
             statement[f"{concept}_q4_diverges_from_subtraction"].fillna(False).astype(bool)
         )
+
+    statement = _derive_total_liabilities(statement)
 
     statement = statement.sort_values("period_end").reset_index(drop=True)
 
@@ -729,3 +770,124 @@ def _derive_ytd_quarters(
                 )
 
     return pd.DataFrame(derived_rows)
+
+
+def _derive_total_liabilities(statement: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resolve total_liabilities per period_end through three tiers, no partial credit at any tier
+    -- a period missing one of a tier's two required inputs moves to the next tier, never
+    computes a one-sided value:
+
+      (a) The real, directly filed Liabilities tag, if present -- used as-is.
+          derivation_method="direct_tag", is_derived=False. This is *not* a redefinition of
+          is_derived's usual "was this row synthesized" meaning: "direct_tag" is a real filed
+          value like any other concept's tag/value columns. The label exists only because,
+          unlike every other concept, total_liabilities can also be filled by fallback below, so
+          derivation_method needs a value even in the real-tag case (contrast with duration
+          concepts, where is_derived=False always pairs with derivation_method=None).
+      (b) current_liabilities + liabilities_noncurrent, only when BOTH are present for this
+          period_end. derivation_method="current_plus_noncurrent_sum", is_derived=True,
+          tag="derived" (mirroring _derive_q4's convention), filed=the later of the two inputs'
+          filed dates. In practice this rarely fires: LiabilitiesNoncurrent is absent from every
+          real filer checked while building this (MSFT, NVDA, Ford, WMT, KR, JPMorgan, BofA
+          Finance, Berkshire, GE, plus live-checked Ally and Schwab) -- kept because it's cheap
+          and correct on the rare filer that does report both.
+      (c) total_assets - stockholders_equity (Assets = Liabilities + Equity), only when BOTH are
+          present. derivation_method="assets_minus_equity_identity", is_derived=True,
+          tag="derived", filed=the later of the two inputs' filed dates. This is the tier that
+          recovers Walmart's total_liabilities: WMT has zero us-gaap:Liabilities facts across its
+          entire filing history and no LiabilitiesNoncurrent either, but total_assets and
+          stockholders_equity are both reliably reported. Deliberately the accounting identity
+          rather than a sum of individual liability line items (accounts payable, accrued
+          liabilities, long-term debt, deferred tax liabilities, ...): there is no way to prove
+          an arbitrary filer's liability tags have been enumerated *completely*, so a partial sum
+          could masquerade as "total liabilities" while understating it -- exactly the kind of
+          wrong-but-plausible number this project already refuses to produce (see the Q4-tiling
+          refusal above). Assets - Equity is definitionally exhaustive, a rearrangement of the
+          fundamental accounting equation rather than an enumeration, so there's no "did we miss
+          a part" question. See NOTES.md.
+      (d) Otherwise: refuse. total_liabilities/_tag/_filed are left exactly as they came in
+          (NaN/None/NaT), derivation_method=None, is_derived=False.
+
+    When tier (a) is what filled a row, this also opportunistically computes the best available
+    *alternative* purely for cross-checking -- tier (b)'s sum if both its inputs are present,
+    else tier (c)'s identity if both its inputs are present, else nothing -- without ever
+    overriding the real filed value:
+      - total_liabilities_alt_value (float, NaN = not computable)
+      - total_liabilities_alt_method ("current_plus_noncurrent_sum" /
+        "assets_minus_equity_identity", or None)
+      - total_liabilities_diverges_from_alt (bool, always literal, default False): True when the
+        alt value differs from the real filed value by more than _LIABILITIES_ALT_TOLERANCE of
+        the real value. A zero real value can't produce a meaningful relative divergence --
+        defaults to False, same guard _derive_q4 uses for a zero FY total. A True here is not
+        necessarily an error in either number -- see _LIABILITIES_ALT_TOLERANCE's comment and
+        NOTES.md for the two confirmed real causes (cross-filing restatement-vintage mismatch;
+        an NCI-inclusive stockholders_equity tag).
+
+    Every row gets all five new columns set -- never left unset -- mirroring this module's
+    existing convention that a derived-value flag is always a real bool/None, never NaN.
+    """
+    statement = statement.copy()
+    n = len(statement)
+
+    direct = statement["total_liabilities"]
+    cur = statement["current_liabilities"]
+    noncur = statement["liabilities_noncurrent"]
+    assets = statement["total_assets"]
+    equity = statement["stockholders_equity"]
+    cur_filed = statement["current_liabilities_filed"]
+    noncur_filed = statement["liabilities_noncurrent_filed"]
+    assets_filed = statement["total_assets_filed"]
+    equity_filed = statement["stockholders_equity_filed"]
+
+    new_value = list(direct)
+    new_tag = list(statement["total_liabilities_tag"])
+    new_filed = list(statement["total_liabilities_filed"])
+    is_derived = [False] * n
+    method: list = [None] * n
+    alt_value = [float("nan")] * n
+    alt_method: list = [None] * n
+    diverges = [False] * n
+
+    for i in range(n):
+        if pd.notna(direct.iloc[i]):
+            method[i] = "direct_tag"
+            alt = None
+            if pd.notna(cur.iloc[i]) and pd.notna(noncur.iloc[i]):
+                alt, alt_method[i] = cur.iloc[i] + noncur.iloc[i], "current_plus_noncurrent_sum"
+            elif pd.notna(assets.iloc[i]) and pd.notna(equity.iloc[i]):
+                alt, alt_method[i] = assets.iloc[i] - equity.iloc[i], "assets_minus_equity_identity"
+            if alt is not None:
+                alt_value[i] = float(alt)
+                real = direct.iloc[i]
+                diverges[i] = bool(
+                    real != 0 and abs(alt - real) / abs(real) > _LIABILITIES_ALT_TOLERANCE
+                )
+            continue
+
+        if pd.notna(cur.iloc[i]) and pd.notna(noncur.iloc[i]):
+            new_value[i] = cur.iloc[i] + noncur.iloc[i]
+            new_tag[i] = "derived"
+            new_filed[i] = max(cur_filed.iloc[i], noncur_filed.iloc[i])
+            method[i] = "current_plus_noncurrent_sum"
+            is_derived[i] = True
+            continue
+
+        if pd.notna(assets.iloc[i]) and pd.notna(equity.iloc[i]):
+            new_value[i] = assets.iloc[i] - equity.iloc[i]
+            new_tag[i] = "derived"
+            new_filed[i] = max(assets_filed.iloc[i], equity_filed.iloc[i])
+            method[i] = "assets_minus_equity_identity"
+            is_derived[i] = True
+            continue
+        # else: refuse -- leave new_value[i]/new_tag[i]/new_filed[i] as the original NaN/None/NaT.
+
+    statement["total_liabilities"] = new_value
+    statement["total_liabilities_tag"] = new_tag
+    statement["total_liabilities_filed"] = pd.to_datetime(new_filed)
+    statement["total_liabilities_is_derived"] = pd.array(is_derived, dtype=bool)
+    statement["total_liabilities_derivation_method"] = method
+    statement["total_liabilities_alt_value"] = alt_value
+    statement["total_liabilities_alt_method"] = alt_method
+    statement["total_liabilities_diverges_from_alt"] = pd.array(diverges, dtype=bool)
+    return statement

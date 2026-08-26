@@ -1,7 +1,13 @@
 import pandas as pd
 import pytest
 
-from src.analysis.statements import DURATION_CONCEPTS, _derive_q4, _derive_ytd_quarters, get_statement
+from src.analysis.statements import (
+    DURATION_CONCEPTS,
+    _derive_q4,
+    _derive_total_liabilities,
+    _derive_ytd_quarters,
+    get_statement,
+)
 from src.data.concepts import ConceptNotFoundError
 
 
@@ -441,7 +447,11 @@ def test_is_derived_columns_are_bool_never_nan(msft_quarterly, ford_quarterly):
     # data (MSFT) and one with a fully-missing concept (Ford).
     for stmt in (msft_quarterly, ford_quarterly):
         for col in stmt.columns:
-            if col.endswith("_is_derived") or col.endswith("_q4_diverges_from_subtraction"):
+            if (
+                col.endswith("_is_derived")
+                or col.endswith("_q4_diverges_from_subtraction")
+                or col.endswith("_diverges_from_alt")
+            ):
                 assert stmt[col].dtype == bool, f"{col} is {stmt[col].dtype}, not bool"
                 assert not stmt[col].isna().any(), f"{col} has NaN values"
 
@@ -458,9 +468,197 @@ def test_periods_truncation(client, msft_quarterly):
 
 
 def test_annual_mode_no_derivation(msft_annual):
-    derived_cols = [c for c in msft_annual.columns if c.endswith("_is_derived")]
+    # Scoped to duration concepts: Q4-by-subtraction and YTD-chain derivation are quarterly-only
+    # concerns (a fiscal year's own annual row needs no Q4 synthesized from itself). total_liabilities's
+    # is_derived is deliberately excluded -- its sum-of-parts/identity fallback is period_length-
+    # independent, so it can legitimately be True in annual mode too (e.g. a period lacking a
+    # direct us-gaap:Liabilities tag) -- see statements.py's _derive_total_liabilities.
+    derived_cols = [f"{c}_is_derived" for c in DURATION_CONCEPTS]
     for col in derived_cols:
         assert not msft_annual[col].any()
+
+
+# --- total_liabilities fallback derivation -----------------------------------------------------
+
+
+def _liabilities_stmt_row(
+    period_end="2024-01-31",
+    tl=float("nan"), tl_tag=None, tl_filed=pd.NaT,
+    cl=float("nan"), cl_filed=pd.NaT,
+    ln=float("nan"), ln_filed=pd.NaT,
+    ta=float("nan"), ta_filed=pd.NaT,
+    se=float("nan"), se_filed=pd.NaT,
+):
+    """One row of the minimal column set _derive_total_liabilities reads."""
+    return {
+        "period_end": pd.Timestamp(period_end),
+        "total_liabilities": tl,
+        "total_liabilities_tag": tl_tag,
+        "total_liabilities_filed": pd.Timestamp(tl_filed) if pd.notna(tl_filed) else pd.NaT,
+        "current_liabilities": cl,
+        "current_liabilities_filed": pd.Timestamp(cl_filed) if pd.notna(cl_filed) else pd.NaT,
+        "liabilities_noncurrent": ln,
+        "liabilities_noncurrent_filed": pd.Timestamp(ln_filed) if pd.notna(ln_filed) else pd.NaT,
+        "total_assets": ta,
+        "total_assets_filed": pd.Timestamp(ta_filed) if pd.notna(ta_filed) else pd.NaT,
+        "stockholders_equity": se,
+        "stockholders_equity_filed": pd.Timestamp(se_filed) if pd.notna(se_filed) else pd.NaT,
+    }
+
+
+def test_derive_total_liabilities_tier_b_current_plus_noncurrent():
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(cl=600, cl_filed="2024-03-01", ln=400, ln_filed="2024-02-01")]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities"] == 1000
+    assert row["total_liabilities_tag"] == "derived"
+    assert row["total_liabilities_filed"] == pd.Timestamp("2024-03-01")
+    assert row["total_liabilities_is_derived"]
+    assert row["total_liabilities_derivation_method"] == "current_plus_noncurrent_sum"
+
+
+def test_derive_total_liabilities_tier_c_assets_minus_equity():
+    # Only current_liabilities present (no noncurrent) -- tier b can't fire, falls to tier c.
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(cl=600, cl_filed="2024-03-01", ta=1000, ta_filed="2024-04-01",
+                                se=400, se_filed="2024-05-01")]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities"] == 600
+    assert row["total_liabilities_tag"] == "derived"
+    assert row["total_liabilities_filed"] == pd.Timestamp("2024-05-01")
+    assert row["total_liabilities_is_derived"]
+    assert row["total_liabilities_derivation_method"] == "assets_minus_equity_identity"
+
+
+def test_derive_total_liabilities_tier_c_when_only_noncurrent_present():
+    # Mirror of the tier-c test above: liabilities_noncurrent present, current_liabilities
+    # genuinely absent (NaN, not 0) -- tier b's `pd.notna(cur) and pd.notna(noncur)` gate must
+    # fail on the missing cur alone, falling through to tier c, not silently treat the missing
+    # current_liabilities as 0 and sum noncur+0. Values are chosen so a buggy "treat missing as
+    # 0" tier-b computation (400 + 0 = 400) would produce a numerically different result from the
+    # correct tier-c identity (1000 - 250 = 750), so the assertion on total_liabilities itself --
+    # not just derivation_method -- would catch that bug too.
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(ln=400, ln_filed="2024-02-01", ta=1000, ta_filed="2024-04-01",
+                                se=250, se_filed="2024-05-01")]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities"] == 750
+    assert row["total_liabilities_tag"] == "derived"
+    assert row["total_liabilities_filed"] == pd.Timestamp("2024-05-01")
+    assert row["total_liabilities_is_derived"]
+    assert row["total_liabilities_derivation_method"] == "assets_minus_equity_identity"
+
+
+def test_derive_total_liabilities_refuses_with_no_partial_credit():
+    # Only one of current/noncurrent AND only one of assets/equity present -- neither tier
+    # has both its required inputs, so no fallback fires and no partial sum is reported.
+    stmt = pd.DataFrame([_liabilities_stmt_row(cl=600, cl_filed="2024-03-01", ta=1000, ta_filed="2024-04-01")])
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert pd.isna(row["total_liabilities"])
+    assert row["total_liabilities_tag"] is None
+    assert pd.isna(row["total_liabilities_filed"])
+    assert not row["total_liabilities_is_derived"]
+    assert row["total_liabilities_derivation_method"] is None
+
+
+def test_derive_total_liabilities_alt_divergence_flags():
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(tl=1000, tl_tag="Liabilities", tl_filed="2024-03-01",
+                                ta=1200, ta_filed="2024-04-01", se=100, se_filed="2024-05-01")]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities"] == 1000
+    assert row["total_liabilities_derivation_method"] == "direct_tag"
+    assert not row["total_liabilities_is_derived"]
+    assert row["total_liabilities_alt_value"] == 1100
+    assert row["total_liabilities_alt_method"] == "assets_minus_equity_identity"
+    assert row["total_liabilities_diverges_from_alt"]
+
+
+def test_derive_total_liabilities_alt_agrees_within_tolerance():
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(tl=1000, tl_tag="Liabilities", tl_filed="2024-03-01",
+                                ta=1400, ta_filed="2024-04-01", se=401, se_filed="2024-05-01")]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities_alt_value"] == 999
+    assert not row["total_liabilities_diverges_from_alt"]
+
+
+def test_derive_total_liabilities_alt_prefers_tier_b_over_tier_c():
+    stmt = pd.DataFrame(
+        [_liabilities_stmt_row(
+            tl=1000, tl_tag="Liabilities", tl_filed="2024-03-01",
+            cl=600, cl_filed="2024-02-01", ln=400, ln_filed="2024-01-01",
+            ta=1200, ta_filed="2024-04-01", se=100, se_filed="2024-05-01",
+        )]
+    )
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert row["total_liabilities_alt_method"] == "current_plus_noncurrent_sum"
+    assert row["total_liabilities_alt_value"] == 1000
+
+
+def test_derive_total_liabilities_no_alt_when_neither_available():
+    stmt = pd.DataFrame([_liabilities_stmt_row(tl=1000, tl_tag="Liabilities", tl_filed="2024-03-01")])
+    result = _derive_total_liabilities(stmt)
+    row = result.iloc[0]
+    assert pd.isna(row["total_liabilities_alt_value"])
+    assert row["total_liabilities_alt_method"] is None
+    assert not row["total_liabilities_diverges_from_alt"]
+
+
+def test_wmt_total_liabilities_derived_via_assets_minus_equity_identity(client):
+    stmt = get_statement("WMT", "quarterly", client=client)
+    assert stmt["total_liabilities"].notna().all()
+    assert (stmt["total_liabilities_derivation_method"] == "assets_minus_equity_identity").all()
+    assert stmt["total_liabilities_is_derived"].all()
+    assert (stmt["total_liabilities_tag"] == "derived").all()
+
+    fy2025 = stmt.loc[stmt["period_end"] == pd.Timestamp("2025-01-31")].iloc[0]
+    assert fy2025["total_liabilities"] == pytest.approx(163_402_000_000, rel=1e-3)
+
+
+def test_msft_nvda_ford_total_liabilities_direct_tag(msft_quarterly, nvda_quarterly, ford_quarterly):
+    # All three report us-gaap:Liabilities directly in recent history, though a company's
+    # earliest XBRL-era quarters can predate that tag and fall back to the identity (confirmed
+    # for MSFT's own 2009 annual row) -- so this checks the most recent period, not every period.
+    for stmt in (msft_quarterly, nvda_quarterly, ford_quarterly):
+        latest = stmt.iloc[-1]
+        assert latest["total_liabilities_derivation_method"] == "direct_tag"
+        assert not latest["total_liabilities_is_derived"]
+        direct_rows = stmt.loc[stmt["total_liabilities_derivation_method"] == "direct_tag"]
+        assert not direct_rows["total_liabilities_is_derived"].any()
+
+
+def test_msft_total_liabilities_diverges_from_alt_2016(msft_quarterly):
+    row = msft_quarterly.loc[msft_quarterly["period_end"] == pd.Timestamp("2016-06-30")].iloc[0]
+    assert row["total_liabilities_derivation_method"] == "direct_tag"
+    assert row["total_liabilities_diverges_from_alt"]
+    assert row["total_liabilities_alt_method"] == "assets_minus_equity_identity"
+
+
+def test_total_liabilities_derivation_method_consistent_with_is_derived(
+    msft_quarterly, nvda_quarterly, ford_quarterly
+):
+    # Unlike DURATION_CONCEPTS (where is_derived=False always pairs with derivation_method=None
+    # -- see test_derivation_method_consistent_with_is_derived), total_liabilities's is_derived=
+    # False legitimately pairs with derivation_method="direct_tag" for a real filed value, so
+    # this invariant is checked separately rather than folded into that generic test.
+    for stmt in (msft_quarterly, nvda_quarterly, ford_quarterly):
+        derived = stmt["total_liabilities_is_derived"]
+        method = stmt["total_liabilities_derivation_method"]
+        assert method[derived].isin(["current_plus_noncurrent_sum", "assets_minus_equity_identity"]).all()
+        assert method[~derived].isin([None, "direct_tag"]).all()
 
 
 def test_sorted_by_period_end(msft_quarterly):

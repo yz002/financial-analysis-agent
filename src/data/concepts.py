@@ -142,6 +142,7 @@ CONCEPTS = {
     },
     "current_assets": {"tags": ["AssetsCurrent"], "kind": "instant"},
     "current_liabilities": {"tags": ["LiabilitiesCurrent"], "kind": "instant"},
+    "liabilities_noncurrent": {"tags": ["LiabilitiesNoncurrent"], "kind": "instant"},
 }
 
 

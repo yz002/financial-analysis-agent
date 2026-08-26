@@ -116,8 +116,10 @@ Phase 7 documentation and demo).
 ### Analysis layer (`src/analysis/`)
 
 - **`statements.py`** — `get_statement(ticker, period_length="quarterly", periods=None)`: joins
-  all 12 `CONCEPTS` (the original 9 plus `stockholders_equity`/`current_assets`/
-  `current_liabilities`, added specifically to unblock ROE/current ratio below) into one wide
+  all 13 `CONCEPTS` (the original 9 plus `stockholders_equity`/`current_assets`/
+  `current_liabilities`, added specifically to unblock ROE/current ratio below, plus
+  `liabilities_noncurrent`, a fallback input for `total_liabilities` below that's populated for
+  almost no real filer) into one wide
   DataFrame per ticker, indexed by `period_end` — never `fiscal_year`, per this project's core
   design principle. Every ticker gets the identical column schema regardless of what data is
   actually available (a concept with zero usable data, e.g. Ford's `gross_profit`, still gets its
@@ -139,7 +141,20 @@ Phase 7 documentation and demo).
   never get that refresh; see NOTES.md. `is_derived`'s own meaning is unchanged by this — it's a
   new, additional signal, not a redefinition. Also handles a real EDGAR data quirk found while
   building this: two duration rows can share the same `period_end` with a one-day-different
-  `period_start` (`_dedupe_by_period_end`; see NOTES.md).
+  `period_start` (`_dedupe_by_period_end`; see NOTES.md). `total_liabilities` (an *instant*
+  concept) gets this module's only other derivation machinery, `_derive_total_liabilities`:
+  some filers (confirmed: Walmart, across its whole filing history) never report a rolled-up
+  `us-gaap:Liabilities` tag at all, so it falls back, per `period_end`, to `current_liabilities +
+  liabilities_noncurrent` when both are present, then to the accounting identity `total_assets -
+  stockholders_equity` when both of those are present (deliberately the identity rather than an
+  enumerated sum of individual liability line items — an incomplete enumeration could masquerade
+  as a full total, the same "refuse rather than guess" reasoning as the Q4-tiling check), refusing
+  only when neither fallback's inputs are available. `total_liabilities_derivation_method` records
+  which of `"direct_tag"`/`"current_plus_noncurrent_sum"`/`"assets_minus_equity_identity"`/`None`
+  applies; when the direct tag was used, `total_liabilities_alt_value`/`_alt_method`/
+  `_diverges_from_alt` opportunistically cross-check it against the best available fallback — a
+  divergence there reflects the same filing-vintage-mismatch phenomenon as the Q4 case, or an
+  NCI-inclusive `stockholders_equity` tag; see NOTES.md.
 - **`periods.py`** — `find_prior_period(period_ends, i, quarters_back)`: looks up "N quarters
   back" (only `quarters_back=1`/QoQ and `4`/YoY are supported — the only two offsets used
   anywhere in this codebase) by the calendar date it should land on, within a fixed tolerance
@@ -194,7 +209,10 @@ Phase 7 documentation and demo).
   `q4_diverges_from_subtraction` on a duration concept's entry when that period is a real filed
   Q4 fact being cross-checked against `FY−(Q1+Q2+Q3)` subtraction (see `statements.py` below) —
   present only when applicable, with an explanatory note appended when any period diverges.
-  Absence is
+  `total_liabilities`'s entry similarly carries `derivation_method` always, and `alt_value`/
+  `alt_method`/`diverges_from_alt` when a direct-tag period had a fallback available to
+  cross-check against (see `statements.py`'s `_derive_total_liabilities`) — `get_ratios` surfaces
+  the same fields in `debt_to_assets`'s provenance and notes. Absence is
   always legible — a concept a company doesn't report (e.g. Ford's `gross_profit`) comes back
   `null` with a plain-English note, never an empty frame or a silent omission. Errors carry a
   typed `error_type` (`data_unavailable` — a fact to relay, e.g. nothing reported or an

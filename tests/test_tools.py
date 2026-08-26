@@ -25,7 +25,12 @@ def _make_statement(n_periods, missing=(), start="2020-03-31", filed_tag="SomeTa
     concept in tools.ALL_CONCEPTS: "{concept}", "{concept}_tag",
     "{concept}_filed", and (duration concepts only) "{concept}_is_derived",
     "{concept}_q4_subtraction_value" (default NaN -- not applicable),
-    "{concept}_q4_diverges_from_subtraction" (default False).
+    "{concept}_q4_diverges_from_subtraction" (default False). total_liabilities
+    additionally gets "total_liabilities_is_derived" (False),
+    "total_liabilities_derivation_method" ("direct_tag" when present, None
+    when missing -- see statements._derive_total_liabilities), and
+    "total_liabilities_alt_value"/"_alt_method"/"_diverges_from_alt" (NaN/
+    None/False -- no cross-check computed by default).
     `missing` concepts get an all-NaN/None column, exactly like a concept
     with zero usable data for a ticker (e.g. Ford's gross_profit).
     """
@@ -49,6 +54,14 @@ def _make_statement(n_periods, missing=(), start="2020-03-31", filed_tag="SomeTa
             data[f"{concept}_is_derived"] = [False] * n_periods
             data[f"{concept}_q4_subtraction_value"] = [float("nan")] * n_periods
             data[f"{concept}_q4_diverges_from_subtraction"] = [False] * n_periods
+        if concept == "total_liabilities":
+            data["total_liabilities_is_derived"] = [False] * n_periods
+            data["total_liabilities_derivation_method"] = [
+                None if concept in missing else "direct_tag"
+            ] * n_periods
+            data["total_liabilities_alt_value"] = [float("nan")] * n_periods
+            data["total_liabilities_alt_method"] = [None] * n_periods
+            data["total_liabilities_diverges_from_alt"] = [False] * n_periods
 
     return pd.DataFrame(data)
 
@@ -85,7 +98,14 @@ def test_get_financial_statement_shape_and_provenance(monkeypatch):
     for concept in tools.INSTANT_CONCEPTS:
         entry = period[concept]
         assert entry["tag"] == "SomeTag"
-        assert "is_derived" not in entry
+        if concept == "total_liabilities":
+            # total_liabilities is the one instant concept with its own derivation
+            # machinery (see statements._derive_total_liabilities) -- it always carries
+            # is_derived/derivation_method, unlike every other instant concept.
+            assert entry["is_derived"] is False
+            assert entry["derivation_method"] == "direct_tag"
+        else:
+            assert "is_derived" not in entry
 
 
 def test_get_financial_statement_q4_reconciliation_fields(monkeypatch):
@@ -105,6 +125,45 @@ def test_get_financial_statement_q4_reconciliation_fields(monkeypatch):
     assert "q4_diverges_from_subtraction" not in non_diverging_period["revenue"]
 
     assert any("q4_subtraction_value" in n for n in result["notes"])
+
+
+def test_get_financial_statement_total_liabilities_derivation_fields(monkeypatch):
+    stmt = _make_statement(4)
+    derived_idx = stmt.index[-1]
+    stmt.loc[derived_idx, "total_liabilities_is_derived"] = True
+    stmt.loc[derived_idx, "total_liabilities_derivation_method"] = "assets_minus_equity_identity"
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_financial_statement("msft", periods=4))
+
+    derived_period = result["periods"][-1]
+    assert derived_period["total_liabilities"]["is_derived"] is True
+    assert derived_period["total_liabilities"]["derivation_method"] == "assets_minus_equity_identity"
+
+    real_period = result["periods"][0]
+    assert real_period["total_liabilities"]["is_derived"] is False
+    assert real_period["total_liabilities"]["derivation_method"] == "direct_tag"
+
+    assert any("derived from" in n and "total_liabilities" in n for n in result["notes"])
+
+
+def test_get_financial_statement_total_liabilities_alt_divergence_note(monkeypatch):
+    stmt = _make_statement(4)
+    diverging_idx = stmt.index[-1]
+    stmt.loc[diverging_idx, "total_liabilities_alt_value"] = 999.0
+    stmt.loc[diverging_idx, "total_liabilities_alt_method"] = "assets_minus_equity_identity"
+    stmt.loc[diverging_idx, "total_liabilities_diverges_from_alt"] = True
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_financial_statement("msft", periods=4))
+
+    diverging_period = result["periods"][-1]
+    assert diverging_period["total_liabilities"]["alt_value"] == 999.0
+    assert diverging_period["total_liabilities"]["alt_method"] == "assets_minus_equity_identity"
+    assert diverging_period["total_liabilities"]["diverges_from_alt"] is True
+
+    non_diverging_period = result["periods"][0]
+    assert "alt_value" not in non_diverging_period["total_liabilities"]
+
+    assert any("diverges" in n.lower() and "total_liabilities" in n for n in result["notes"])
 
 
 def test_fords_missing_gross_profit_in_concepts_unavailable(monkeypatch):
@@ -260,6 +319,40 @@ def test_get_ratios_roa_note_absent_even_when_equity_tag_would_trigger_it(monkey
     _install_statement(monkeypatch, stmt)
     result = json.loads(tools.get_ratios("F", ratio_names=["roa"]))
     assert not any("noncontrolling" in n.lower() for n in result["notes"])
+
+
+def test_get_ratios_debt_to_assets_provenance_includes_derivation_method(monkeypatch):
+    stmt = _make_statement(4)
+    derived_idx = stmt.index[-1]
+    stmt.loc[derived_idx, "total_liabilities_is_derived"] = True
+    stmt.loc[derived_idx, "total_liabilities_derivation_method"] = "assets_minus_equity_identity"
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("WMT", ratio_names=["debt_to_assets"]))
+
+    derived_row = result["ratios"]["debt_to_assets"][-1]
+    assert derived_row["provenance"]["total_liabilities"]["is_derived"] is True
+    assert (
+        derived_row["provenance"]["total_liabilities"]["derivation_method"]
+        == "assets_minus_equity_identity"
+    )
+    real_row = result["ratios"]["debt_to_assets"][0]
+    assert real_row["provenance"]["total_liabilities"]["derivation_method"] == "direct_tag"
+    assert any("derived from" in n and "total_liabilities" in n for n in result["notes"])
+
+
+def test_get_ratios_debt_to_assets_alt_divergence_note_and_provenance(monkeypatch):
+    stmt = _make_statement(4)
+    diverging_idx = stmt.index[-1]
+    stmt.loc[diverging_idx, "total_liabilities_alt_value"] = 999.0
+    stmt.loc[diverging_idx, "total_liabilities_alt_method"] = "assets_minus_equity_identity"
+    stmt.loc[diverging_idx, "total_liabilities_diverges_from_alt"] = True
+    _install_statement(monkeypatch, stmt)
+    result = json.loads(tools.get_ratios("MSFT", ratio_names=["debt_to_assets"]))
+
+    diverging_row = result["ratios"]["debt_to_assets"][-1]
+    assert diverging_row["provenance"]["total_liabilities"]["alt_value"] == 999.0
+    assert diverging_row["provenance"]["total_liabilities"]["diverges_from_alt"] is True
+    assert any("diverges" in n.lower() and "total_liabilities" in n for n in result["notes"])
 
 
 def test_get_ratios_missing_concept_note_and_null_values(monkeypatch):

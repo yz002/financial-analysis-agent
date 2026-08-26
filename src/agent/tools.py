@@ -159,15 +159,15 @@ def get_financial_statement(
     ticker: str, period_length: str = "quarterly", periods: int | None = DEFAULT_PERIODS
 ) -> str:
     """
-    Return `ticker`'s financial statement (all 12 tracked concepts, one row
+    Return `ticker`'s financial statement (all 13 tracked concepts, one row
     per period_end) as a JSON string. Every present value carries its
-    source tag, filing date, and (for duration concepts) whether it was
-    derived. A concept with zero usable data for this ticker is listed in
-    "concepts_unavailable" with a plain-English note, and every one of its
-    per-period values is null rather than silently missing. `periods`
-    (including null, meaning "full history") is capped at MAX_PERIODS
-    periods to bound response size -- pass a smaller `periods` and repeat
-    the call to page through a longer history.
+    source tag, filing date, and (for concepts that can be derived) whether
+    it was derived and by which method. A concept with zero usable data for
+    this ticker is listed in "concepts_unavailable" with a plain-English
+    note, and every one of its per-period values is null rather than
+    silently missing. `periods` (including null, meaning "full history") is
+    capped at MAX_PERIODS periods to bound response size -- pass a smaller
+    `periods` and repeat the call to page through a longer history.
 
     When a fiscal year's Q4 is a real filed fact rather than a synthesized
     one, its entry may also carry "q4_subtraction_value" (what
@@ -176,6 +176,18 @@ def get_financial_statement(
     present only when applicable. A divergence reflects a real vintage
     mismatch between the fiscal-year total and the quarters (see the
     "notes" entry when this occurs), not an error in either figure.
+
+    total_liabilities may be a fallback-derived value rather than a
+    directly filed one -- some filers (e.g. Walmart) never report a
+    rolled-up us-gaap:Liabilities tag -- in which case its entry's
+    "derivation_method" names the fallback used
+    ("current_plus_noncurrent_sum" or "assets_minus_equity_identity"). When
+    the direct tag *was* used, the entry may still carry "alt_value"/
+    "alt_method"/"diverges_from_alt": a cross-check against the best
+    available fallback, present only when computable. A divergence there,
+    like the Q4 case, reflects a real vintage mismatch or a
+    noncontrolling-interest-inclusive equity tag, not necessarily an error
+    (see the "notes" entry when this occurs).
 
     If the resolved ticker's CIK has implausibly little on-file history for
     an established company (e.g. only a couple of quarters), "notes" names
@@ -204,6 +216,7 @@ def get_financial_statement(
 
     periods_out = []
     any_q4_divergence = False
+    any_liabilities_alt_divergence = False
     for row in stmt.itertuples():
         period = {
             "period_end": _iso(row.period_end),
@@ -219,8 +232,13 @@ def get_financial_statement(
                 "tag": getattr(row, f"{concept}_tag"),
                 "filed": _iso(getattr(row, f"{concept}_filed")),
             }
-            if concept in DURATION_CONCEPTS:
+            if hasattr(row, f"{concept}_is_derived"):
                 entry["is_derived"] = bool(getattr(row, f"{concept}_is_derived"))
+            if hasattr(row, f"{concept}_derivation_method"):
+                dm = getattr(row, f"{concept}_derivation_method")
+                if dm is not None and not (isinstance(dm, float) and pd.isna(dm)):
+                    entry["derivation_method"] = dm
+            if hasattr(row, f"{concept}_q4_subtraction_value"):
                 q4_subtraction_value = getattr(row, f"{concept}_q4_subtraction_value")
                 if not pd.isna(q4_subtraction_value):
                     entry["q4_subtraction_value"] = _num(q4_subtraction_value)
@@ -228,6 +246,15 @@ def get_financial_statement(
                     entry["q4_diverges_from_subtraction"] = diverges
                     if diverges:
                         any_q4_divergence = True
+            if hasattr(row, f"{concept}_alt_value"):
+                alt_value = getattr(row, f"{concept}_alt_value")
+                if not pd.isna(alt_value):
+                    entry["alt_value"] = _num(alt_value)
+                    entry["alt_method"] = getattr(row, f"{concept}_alt_method")
+                    alt_diverges = bool(getattr(row, f"{concept}_diverges_from_alt"))
+                    entry["diverges_from_alt"] = alt_diverges
+                    if alt_diverges:
+                        any_liabilities_alt_divergence = True
             period[concept] = entry
         periods_out.append(period)
 
@@ -240,6 +267,38 @@ def get_financial_statement(
             "fiscal-year total being sourced from a later filing's restated comparative column "
             "under a possibly different tag than the quarters, which are filed together and "
             "don't get that later refresh."
+        )
+
+    if "total_liabilities" in stmt.columns and stmt["total_liabilities_is_derived"].any():
+        derived_count = int(stmt["total_liabilities_is_derived"].sum())
+        methods = set(
+            stmt.loc[stmt["total_liabilities_is_derived"], "total_liabilities_derivation_method"]
+        )
+        desc = []
+        if "current_plus_noncurrent_sum" in methods:
+            desc.append("current_liabilities + liabilities_noncurrent")
+        if "assets_minus_equity_identity" in methods:
+            desc.append("total_assets - stockholders_equity (the accounting identity)")
+        notes.append(
+            f"total_liabilities for {derived_count} period(s) is not directly reported by "
+            f"{ticker} (no us-gaap:Liabilities tag) and was instead derived from "
+            f"{' and/or '.join(desc)} -- see total_liabilities.derivation_method on the "
+            "relevant periods."
+        )
+    if any_liabilities_alt_divergence:
+        notes.append(
+            "Some periods' directly filed total_liabilities differs from the best available "
+            "fallback cross-check (current_liabilities + liabilities_noncurrent, or "
+            "total_assets - stockholders_equity) by more than a routine difference -- see "
+            "total_liabilities.alt_value/alt_method/diverges_from_alt on the relevant periods. "
+            "This is not necessarily an error in either number: a common cause is "
+            "total_liabilities being sourced from a different filing vintage than the "
+            "assets/equity used for the cross-check (the same phenomenon as "
+            "q4_diverges_from_subtraction above), or -- when alt_method is the "
+            "assets-minus-equity identity -- that period's stockholders_equity being sourced "
+            "from the noncontrolling-interest-inclusive tag (see that period's "
+            "stockholders_equity.tag), which understates the identity's implied liabilities by "
+            "the NCI amount."
         )
 
     result = {
@@ -274,7 +333,12 @@ def get_ratios(
     "notes" also flags for `roe` when its stockholders_equity input was
     sourced (even partially) from the noncontrolling-interest-inclusive XBRL
     tag rather than the parent-only tag -- see each period's
-    provenance.stockholders_equity.tag for the exact source.
+    provenance.stockholders_equity.tag for the exact source. For
+    `debt_to_assets`, "notes" similarly flags when total_liabilities was
+    derived from a fallback rather than a direct XBRL tag, or when a
+    direct-tag period's value diverges from the fallback cross-check --
+    see each period's provenance.total_liabilities.derivation_method/
+    alt_value/alt_method/diverges_from_alt.
     """
     ticker = ticker.upper()
     if ratio_names is None:
@@ -350,6 +414,39 @@ def get_ratios(
                         notes.append(note)
         else:
             ratio_df = func(stmt)
+
+        if name == "debt_to_assets" and stmt["total_liabilities_is_derived"].any():
+            derived_count = int(stmt["total_liabilities_is_derived"].sum())
+            methods = set(
+                stmt.loc[
+                    stmt["total_liabilities_is_derived"], "total_liabilities_derivation_method"
+                ]
+            )
+            desc = []
+            if "current_plus_noncurrent_sum" in methods:
+                desc.append("current_liabilities + liabilities_noncurrent")
+            if "assets_minus_equity_identity" in methods:
+                desc.append("total_assets - stockholders_equity (the accounting identity)")
+            note = (
+                f"debt_to_assets's total_liabilities for {derived_count} period(s) is not "
+                f"directly reported by {ticker} (no us-gaap:Liabilities tag) and was instead "
+                f"derived from {' and/or '.join(desc)} -- see "
+                "provenance.total_liabilities.derivation_method on the relevant periods."
+            )
+            if note not in notes:
+                notes.append(note)
+        if name == "debt_to_assets" and stmt["total_liabilities_diverges_from_alt"].any():
+            note = (
+                "Some periods' directly filed total_liabilities differs from the best "
+                "available fallback cross-check by more than a routine difference -- see "
+                "provenance.total_liabilities.alt_value/alt_method/diverges_from_alt on the "
+                "relevant periods. This is not necessarily an error in either number -- a "
+                "common cause is a filing-vintage mismatch between total_liabilities and the "
+                "assets/equity used for the cross-check, or a noncontrolling-interest-"
+                "inclusive stockholders_equity tag (see provenance.stockholders_equity.tag)."
+            )
+            if note not in notes:
+                notes.append(note)
         rows = []
         for srow, rrow in zip(stmt.itertuples(), ratio_df.itertuples()):
             def _input_value(col):
@@ -369,6 +466,17 @@ def get_ratios(
                 }
                 if hasattr(srow, f"{c}_is_derived"):
                     prov["is_derived"] = bool(getattr(srow, f"{c}_is_derived"))
+                if hasattr(srow, f"{c}_derivation_method"):
+                    dm = getattr(srow, f"{c}_derivation_method")
+                    prov["derivation_method"] = (
+                        None if dm is None or (isinstance(dm, float) and pd.isna(dm)) else dm
+                    )
+                if hasattr(srow, f"{c}_alt_value"):
+                    alt_value = getattr(srow, f"{c}_alt_value")
+                    if not pd.isna(alt_value):
+                        prov["alt_value"] = _num(alt_value)
+                        prov["alt_method"] = getattr(srow, f"{c}_alt_method")
+                        prov["diverges_from_alt"] = bool(getattr(srow, f"{c}_diverges_from_alt"))
                 provenance[c] = prov
             rows.append(
                 {

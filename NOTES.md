@@ -85,6 +85,49 @@
   `q4_diverges_from_subtraction` is a common signal, not a rare edge case. It does not mean either
   number is wrong, only that they were sourced from filings of different vintages.
 
+- **`total_liabilities` needed a fallback because some filers never report `us-gaap:Liabilities`
+  at all — Walmart being the confirmed real case, and the same restatement-vintage divergence
+  documented above for Q4 turns out to apply across instant concepts too.** A sweep of the
+  project's cached filers (MSFT, NVDA, Ford, WMT, KR, JPMorgan, BofA Finance, Berkshire, GE) plus
+  two live EDGAR lookups (Ally Financial, Charles Schwab) found: WMT has **zero**
+  `us-gaap:Liabilities` facts across its entire ~18-year filing history (not sparse — the tag is
+  entirely absent); `us-gaap:LiabilitiesNoncurrent` is absent from *every one* of those nine
+  filers, including the two bank/broker holding companies, which instead report `Liabilities`
+  directly but skip a current/noncurrent split altogether (an unclassified balance-sheet
+  presentation). `statements._derive_total_liabilities` resolves `total_liabilities` per
+  `period_end` through three tiers — the real `Liabilities` tag; `current_liabilities +
+  liabilities_noncurrent` when both are present (rarely, given the above); and, as the tier that
+  actually recovers WMT, the accounting identity `total_assets - stockholders_equity` — refusing
+  outright (no partial sum) rather than falling back to summing an open-ended, unenumerable set of
+  individual liability line items (accounts payable, accrued liabilities, long-term debt, deferred
+  tax liabilities, ...): there's no way to prove such an enumeration is complete for an arbitrary
+  filer, so a partial sum could masquerade as "total liabilities" while understating it — the same
+  "refuse rather than guess" principle behind `_derive_q4`'s tiling refusal. `Assets - Equity` is
+  definitionally exhaustive instead, a rearrangement of the accounting equation rather than an
+  enumeration. Cross-checking that identity against filers that *do* have the direct tag (MSFT,
+  NVDA, Ford annual statements) found two distinguishable, real divergence causes, both confirmed,
+  not hypothetical: (1) the same filing-vintage mismatch documented above for Q4 — MSFT's
+  `period_end=2016-06-30` diverges 9.1% (`total_liabilities`=$121.471B vs.
+  `total_assets - stockholders_equity`=$110.378B) because its `stockholders_equity` for that
+  period was sourced from a 2018-08-03 filing while `total_assets`/`total_liabilities` for the
+  same `period_end` came from a 2017-08-02 filing, each concept independently deduped to its own
+  latest-`filed` appearance; NVDA shows the identical pattern at smaller magnitude on two of its
+  own annual periods — `period_end=2016-01-31` diverges 3.1% ($2.814B vs. $2.901B) and
+  `period_end=2017-01-29` diverges 0.8% ($4.048B vs. $4.079B). This is a real, independent finding
+  about the pre-existing per-concept tag-dedup/restatement behavior `get_concept`/
+  `_dedupe_by_period_end` already have — not an artifact introduced by this fallback's own new
+  code, which only *exposes* a discrepancy that was already latent between `total_assets` and
+  `stockholders_equity` for the same `period_end`; (2) an
+  NCI-inclusive `stockholders_equity` tag (see the `stockholders_equity_tag` entry below and
+  commit `29904d0`'s `roe` note) understates the identity's implied liabilities by the
+  noncontrolling-interest amount — Ford mixes both equity tags across its own history, a real case
+  of this. Both causes are surfaced (not silently hidden) via `total_liabilities_alt_value`/
+  `_alt_method`/`_diverges_from_alt`, computed opportunistically as a cross-check whenever the
+  direct tag *was* used and a fallback's inputs are also available, at the same
+  `_LIABILITIES_ALT_TOLERANCE = 0.005` (0.5%) `_Q4_RECONCILIATION_TOLERANCE` uses, chosen for the
+  identical reason: it clears the confirmed real divergences by a wide margin while not firing on
+  the many periods that match to 0.000%.
+
 - **`fiscal_year`/`fiscal_period` reflect the filing's own attribution, not
   necessarily the period's "true" fiscal year.** When the same period is
   reported again as a comparative column in a later filing, EDGAR's `fy`/

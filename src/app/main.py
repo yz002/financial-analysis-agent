@@ -40,12 +40,16 @@ EXAMPLE_QUESTIONS = [
     "Project Costco's revenue for the next two quarters and explain the assumptions.",
 ]
 
-# The 12 concepts tracked by src/analysis/statements.py's get_statement(), in the same
-# order get_financial_statement's JSON carries them.
+# The 13 concepts tracked by src/analysis/statements.py's get_statement(), in the same
+# order get_financial_statement's JSON carries them. liabilities_noncurrent is a rarely-
+# populated fallback input for total_liabilities (see statements._derive_total_liabilities)
+# rather than a concept most tickers report directly -- included here anyway for schema
+# consistency with the tool's output.
 ALL_CONCEPTS = [
     "revenue", "gross_profit", "operating_income", "net_income",
     "operating_cash_flow", "capex", "total_assets", "total_liabilities",
     "cash", "stockholders_equity", "current_assets", "current_liabilities",
+    "liabilities_noncurrent",
 ]
 
 MAX_CHARTS = 4
