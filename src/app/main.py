@@ -28,6 +28,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.agent import csv_session  # noqa: E402 -- see comment above
 from src.agent.agent import run_agent  # noqa: E402 -- import after sys.path/load_dotenv setup above
 from src.analysis import csv_statement  # noqa: E402 -- see comment above
 from src.data import csv_ingest  # noqa: E402 -- see comment above
@@ -94,13 +95,14 @@ def _mentions(name: str, text: str) -> int | None:
 
 
 def build_charts(question: str, final_answer: str, tool_calls: list[dict]) -> list[dict]:
-    """Build up to MAX_CHARTS (ticker, concept/ratio) time series from this run's own
-    get_financial_statement/get_ratios tool results -- never a fresh fetch. Plotting every
-    concept/ratio unfiltered would be a wall of charts (a single statement call alone carries
-    12 concepts), so candidates are ranked: anything named in the question or answer text
-    first (in order of first mention), then revenue plus whatever ratios were actually
-    requested via get_ratios' ratio_names argument -- the model already told us what it cared
-    about when it made that call. Unranked candidates are dropped rather than padding the list.
+    """Build up to MAX_CHARTS (entity, concept/ratio) time series from this run's own
+    get_financial_statement/get_ratios/get_csv_statement/get_csv_ratios tool results -- never a
+    fresh fetch. Plotting every concept/ratio unfiltered would be a wall of charts (a single
+    statement call alone carries 12 concepts), so candidates are ranked: anything named in the
+    question or answer text first (in order of first mention), then revenue plus whatever
+    ratios were actually requested via a get_ratios/get_csv_ratios ratio_names argument -- the
+    model already told us what it cared about when it made that call. Unranked candidates are
+    dropped rather than padding the list.
     """
     candidates = []
     seen = set()
@@ -114,8 +116,15 @@ def build_charts(question: str, final_answer: str, tool_calls: list[dict]) -> li
         except (json.JSONDecodeError, TypeError):
             continue
 
-        if tc["tool_name"] == "get_financial_statement":
-            ticker = data.get("ticker", "?")
+        if tc["tool_name"] in ("get_financial_statement", "get_csv_statement"):
+            # get_csv_statement has no "ticker" -- it identifies the business via
+            # "business_name" instead (see src/agent/tools.py; a CSV upload's human-supplied
+            # name is not a real ticker, so it's kept out of the "ticker" field entirely to
+            # avoid get_company_name below ever mistaking it for one). Reusing the same
+            # internal "ticker" candidate-dict key for both is just this function's own uid/
+            # grouping key, not anything exposed outside build_charts.
+            is_csv = tc["tool_name"] == "get_csv_statement"
+            ticker = data.get("business_name", "?") if is_csv else data.get("ticker", "?")
             for concept in ALL_CONCEPTS:
                 points = {
                     row["period_end"]: row[concept]["value"]
@@ -125,16 +134,27 @@ def build_charts(question: str, final_answer: str, tool_calls: list[dict]) -> li
                 uid = (ticker, concept)
                 if len(points) >= 2 and uid not in seen:
                     seen.add(uid)
-                    candidates.append({"name": concept, "ticker": ticker, "points": points})
+                    candidates.append(
+                        {
+                            "name": concept, "ticker": ticker, "points": points,
+                            "source": "csv" if is_csv else "edgar",
+                        }
+                    )
 
-        elif tc["tool_name"] == "get_ratios":
-            ticker = data.get("ticker", "?")
+        elif tc["tool_name"] in ("get_ratios", "get_csv_ratios"):
+            is_csv = tc["tool_name"] == "get_csv_ratios"
+            ticker = data.get("business_name", "?") if is_csv else data.get("ticker", "?")
             for ratio_name, rows in data.get("ratios", {}).items():
                 points = {r["period_end"]: r["value"] for r in rows if r.get("value") is not None}
                 uid = (ticker, ratio_name)
                 if len(points) >= 2 and uid not in seen:
                     seen.add(uid)
-                    candidates.append({"name": ratio_name, "ticker": ticker, "points": points})
+                    candidates.append(
+                        {
+                            "name": ratio_name, "ticker": ticker, "points": points,
+                            "source": "csv" if is_csv else "edgar",
+                        }
+                    )
             for name in (tc.get("tool_input") or {}).get("ratio_names") or []:
                 if name not in requested_ratio_names:
                     requested_ratio_names.append(name)
@@ -162,7 +182,12 @@ def build_charts(question: str, final_answer: str, tool_calls: list[dict]) -> li
         df = pd.DataFrame({"period_end": pd.to_datetime(list(c["points"].keys())),
                             "value": list(c["points"].values())})
         df = df.sort_values("period_end").reset_index(drop=True)
-        company = get_company_name(c["ticker"]) or c["ticker"]
+        # Never call get_company_name for a CSV-sourced candidate: c["ticker"] is a
+        # human-supplied business name here, not a real ticker, and get_company_name's plain
+        # dict lookup would silently mislabel it if it happened to collide with a real ticker
+        # symbol (e.g. a business literally named "IBM") -- degrading gracefully for an
+        # *unrecognized* string isn't the same as being safe to call on a non-ticker one.
+        company = c["ticker"] if c["source"] == "csv" else (get_company_name(c["ticker"]) or c["ticker"])
         kind = "percent" if c["name"] in PERCENT_RATIOS else "dollar" if c["name"] in DOLLAR_SERIES else "ratio"
         charts.append({"title": f"{company} — {c['name']}", "df": df, "kind": kind})
     return charts
@@ -189,6 +214,59 @@ def render_answer(result: dict) -> None:
     st.markdown(_escape_markdown_dollars(result["final_answer"]))
 
 
+_JSON_PATH_TOKEN_RE = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
+
+
+def _json_path_parent(payload, json_path: str):
+    """Walk `json_path` (as produced by guardrails._walk_json_numbers, e.g.
+    "periods[3].revenue.value" or "ratios.gross_margin[2].provenance.revenue.value") to the
+    parent object containing its final key, so a caller can look up sibling fields next to the
+    matched leaf (e.g. source_file/source_row/source_column/uploaded_at). Returns None if the
+    path can't be resolved (malformed path, or the parent isn't a dict)."""
+    tokens = [
+        m.group(1) if m.group(1) is not None else int(m.group(2))
+        for m in _JSON_PATH_TOKEN_RE.finditer(json_path)
+    ]
+    obj = payload
+    try:
+        for token in tokens[:-1]:
+            obj = obj[token]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+_CSV_CITATION_FIELDS = ("source_file", "source_row", "source_column", "uploaded_at")
+
+
+def _figure_citation_caption(result: dict, match: dict) -> str:
+    """The default caption (`via {tool_name} -> {json_path} = {matched_value}`) is an opaque
+    JSON path for a human to read. When the matched leaf's sibling fields include all four CSV
+    citation fields (see src/agent/tools.py's get_csv_statement/get_csv_ratios), render a real
+    citation instead -- which uploaded file, row, and column the figure came from. Purely
+    structural (checks field presence, not tool_name): a get_csv_ratios match on a *ratio's
+    own* computed value has no single source cell and correctly falls back to the default
+    caption, while a match on one of that ratio's *inputs* (which does carry the four fields,
+    under provenance.{concept}) gets the rich citation exactly like a direct
+    get_csv_statement match would, with no tool-specific branching needed."""
+    default = f"via `{match['tool_name']}` → `{match['json_path']}` = {match['matched_value']}"
+    tool_calls = result.get("tool_calls") or []
+    idx = match["tool_call_index"]
+    if not (0 <= idx < len(tool_calls)):
+        return default
+    try:
+        payload = json.loads(tool_calls[idx]["tool_result"])
+    except (json.JSONDecodeError, TypeError):
+        return default
+    parent = _json_path_parent(payload, match["json_path"])
+    if parent is None or not all(f in parent for f in _CSV_CITATION_FIELDS):
+        return default
+    return (
+        f'via uploaded file "{parent["source_file"]}", row {parent["source_row"]}, column '
+        f'"{parent["source_column"]}" (uploaded {parent["uploaded_at"]}) = {match["matched_value"]}'
+    )
+
+
 def render_figure_check(result: dict) -> None:
     fc = result["figure_check"]
     st.subheader("Figure check")
@@ -212,8 +290,7 @@ def render_figure_check(result: dict) -> None:
             icon = "✅" if fig["traced"] else ("🟡" if fig.get("weak_match") else "⚠️")
             st.markdown(f"{icon} **{_escape_markdown_dollars(fig['raw_text'])}**")
             if fig["match"] is not None:
-                m = fig["match"]
-                caption = f"via `{m['tool_name']}` → `{m['json_path']}` = {m['matched_value']}"
+                caption = _figure_citation_caption(result, fig["match"])
                 if fig.get("weak_match"):
                     caption += " -- whole-number match only, could be coincidental"
                 st.caption(caption)
@@ -331,6 +408,7 @@ def _reset_csv_state() -> None:
         st.session_state[key] = None
     for key in [k for k in st.session_state if k.startswith("csv_role_")]:
         del st.session_state[key]
+    csv_session.set_active_csv(None)
 
 
 def _propose_mapping_or_error(raw) -> tuple[csv_ingest.MappingProposal | None, str | None]:
@@ -474,11 +552,15 @@ def render_csv_upload_section() -> None:
             for e in st.session_state.csv_normalize_errors:
                 st.markdown(f"- {e}")
 
+    if confirm_clicked and st.session_state.csv_normalized is not None:
+        csv_session.set_active_csv(st.session_state.csv_normalized)
+
     if st.session_state.csv_normalized is not None:
         normalized = st.session_state.csv_normalized
         st.success(
             f"Normalized {len(normalized)} period(s) for {normalized.attrs['entity_name']} "
-            f"({normalized.attrs['csv_source']['cadence'] or 'single-period'} cadence)."
+            f"({normalized.attrs['csv_source']['cadence'] or 'single-period'} cadence). "
+            f"You can now ask questions about {normalized.attrs['entity_name']} below."
         )
         if st.session_state.csv_normalize_warnings:
             # Same visual weight as the mapping-violations block above (a colored st.warning

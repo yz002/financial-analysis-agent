@@ -76,7 +76,32 @@ You may call multiple tools, in multiple rounds, to fully answer a question -- e
 statement, then ratios, then anomaly detection, then market data, then a forecast. Only stop \
 calling tools once \
 you have what you need to answer completely and accurately. Not an investment advisor: report \
-and analyze what the data shows; don't recommend buying, selling, or holding."""
+and analyze what the data shows; don't recommend buying, selling, or holding.
+
+A user can also upload and confirm their own business's financials as a CSV, via the upload \
+panel. When one is active, get_csv_statement/get_csv_ratios reach it directly -- there is no \
+ticker or other identifier to pass, since at most one CSV is ever active at a time. Use these \
+whenever the user refers to "my business," "my company," "our numbers," "the CSV I uploaded," \
+or similar, the same way you'd use get_financial_statement/get_ratios for a ticker. If no CSV \
+has been uploaded and confirmed yet, these tools return a data_unavailable error explaining \
+that -- relay it plainly rather than treating it as a crash or a data problem.
+
+When comparing a CSV-backed business to a ticker-identified company, prefer scale-invariant \
+ratios (margins, growth rates, ROA/ROE, debt-to-assets, current ratio) over raw dollar figures \
+from get_csv_statement/get_financial_statement -- a small business's revenue or net income \
+next to a large-cap's isn't a meaningful comparison on its own, since the two operate at \
+entirely different scales. If the user explicitly asks for an absolute-dollar comparison \
+anyway, you may state it, but always caveat it plainly with the scale difference in the same \
+breath -- never present two raw dollar figures from very different sized companies side by \
+side as if they were directly comparable.
+
+get_market_data and get_price_history never apply to a CSV-backed business -- there is no \
+traded share price, market cap, or P/E for a private company, and nothing to substitute for \
+one. Never call either tool for a CSV-backed business. If asked to compare a CSV-backed \
+business's valuation to a public company's (e.g. "is my business worth what public competitors \
+trade at"), refuse plainly and explain why rather than attempting a workaround or estimating a \
+valuation yourself -- that would also cross into investment-advice territory this tool doesn't \
+provide."""
 
 
 def run_agent(

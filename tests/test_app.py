@@ -219,6 +219,122 @@ def test_build_charts_returns_empty_list_with_no_qualifying_tool_calls():
     assert app_main.build_charts("anything", "anything", []) == []
 
 
+def _csv_statement_periods(business_name, concept_values):
+    """get_csv_statement-shaped periods (see src/agent/tools.py) -- no "ticker" key at all
+    (business_name instead), and each populated concept entry carries the four CSV citation
+    fields alongside value/tag/filed."""
+    n = len(next(iter(concept_values.values())))
+    periods = []
+    for i in range(n):
+        period = {"period_end": f"2024-0{i + 1}-01"}
+        for concept, values in concept_values.items():
+            v = values[i]
+            period[concept] = (
+                {
+                    "value": v, "tag": "Revenue", "filed": "2025-01-01",
+                    "source_file": "biz.csv", "source_row": i, "source_column": "Revenue",
+                    "uploaded_at": "2025-01-01 00:00:00",
+                }
+                if v is not None
+                else None
+            )
+        periods.append(period)
+    return {
+        "business_name": business_name, "cadence": "quarterly", "periods_returned": n,
+        "concepts_unavailable": [], "notes": [], "periods": periods,
+    }
+
+
+def test_build_charts_uses_business_name_for_csv_source_without_calling_get_company_name(monkeypatch):
+    """A CSV-backed candidate's identifier is a human-supplied business name, not a real
+    ticker -- confirms build_charts never calls get_company_name for it, which could silently
+    mislabel a business whose name happens to collide with a real ticker symbol (see
+    src/data/cik_lookup.py's get_company_name -- a flat dict lookup with no way to tell "not a
+    ticker" apart from "unrecognized ticker")."""
+
+    def fail_if_called(ticker):
+        raise AssertionError(f"get_company_name should never be called for a CSV entity, got {ticker!r}")
+
+    monkeypatch.setattr(app_main, "get_company_name", fail_if_called)
+
+    stmt = _csv_statement_periods("Test Bakery LLC", {"revenue": [100.0, 110.0]})
+    call = _tool_call("get_csv_statement", stmt)
+    charts = app_main.build_charts("What's my revenue trend?", "", [call])
+
+    assert charts[0]["title"] == "Test Bakery LLC — revenue"
+
+
+def test_build_charts_get_csv_ratios_also_uses_business_name(monkeypatch):
+    def fail_if_called(ticker):
+        raise AssertionError("get_company_name should never be called for a CSV entity")
+
+    monkeypatch.setattr(app_main, "get_company_name", fail_if_called)
+
+    ratios_payload = {
+        "business_name": "Test Bakery LLC", "cadence": "quarterly", "notes": [],
+        "ratios": {
+            "net_margin": [
+                {"period_end": "2024-01-01", "value": 0.1, "inputs": {}, "provenance": {}},
+                {"period_end": "2024-04-01", "value": 0.12, "inputs": {}, "provenance": {}},
+            ]
+        },
+    }
+    call = _tool_call("get_csv_ratios", ratios_payload, tool_input={"ratio_names": ["net_margin"]})
+    charts = app_main.build_charts("How's my margin?", "", [call])
+
+    assert charts[0]["title"] == "Test Bakery LLC — net_margin"
+
+
+# ---------------------------------------------------------------------------
+# _figure_citation_caption / _json_path_parent
+# ---------------------------------------------------------------------------
+
+
+def test_figure_citation_caption_renders_csv_citation_when_present():
+    payload = {
+        "business_name": "Test Bakery LLC", "cadence": "quarterly", "periods_returned": 1,
+        "concepts_unavailable": [], "notes": [],
+        "periods": [
+            {
+                "period_end": "2024-01-01",
+                "revenue": {
+                    "value": 125000.0, "tag": "Total Revenue", "filed": "2025-06-01",
+                    "source_file": "biz.csv", "source_row": 0, "source_column": "Total Revenue",
+                    "uploaded_at": "2025-06-01 12:00:00",
+                },
+            }
+        ],
+    }
+    call = _tool_call("get_csv_statement", payload)
+    result = {"tool_calls": [call]}
+    match = {
+        "tool_call_index": 0, "tool_name": "get_csv_statement", "iteration": 1,
+        "json_path": "periods[0].revenue.value", "matched_value": 125000.0,
+    }
+
+    caption = app_main._figure_citation_caption(result, match)
+    assert caption == (
+        'via uploaded file "biz.csv", row 0, column "Total Revenue" '
+        "(uploaded 2025-06-01 12:00:00) = 125000.0"
+    )
+
+
+def test_figure_citation_caption_falls_back_when_citation_fields_absent():
+    """An EDGAR-sourced match (or a get_csv_ratios match on a ratio's own computed value, which
+    has no single source cell) has no source_file/source_row/source_column/uploaded_at siblings
+    -- must fall back to the original opaque-but-generic caption, not raise or fabricate one."""
+    payload = _statement_periods("MSFT", {"revenue": [100.0]})
+    call = _tool_call("get_financial_statement", payload)
+    result = {"tool_calls": [call]}
+    match = {
+        "tool_call_index": 0, "tool_name": "get_financial_statement", "iteration": 1,
+        "json_path": "periods[0].revenue.value", "matched_value": 100.0,
+    }
+
+    caption = app_main._figure_citation_caption(result, match)
+    assert caption == "via `get_financial_statement` → `periods[0].revenue.value` = 100.0"
+
+
 # ---------------------------------------------------------------------------
 # _run_agent_or_error
 # ---------------------------------------------------------------------------

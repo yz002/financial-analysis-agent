@@ -18,6 +18,19 @@
   Fine at current scope, but would need rethinking (e.g. a shared/external
   rate limiter) if requests are parallelized.
 
+- **The CSV-upload active-business registry (`src/agent/csv_session.py`) is a single,
+  process-global slot, not per-browser-session — a concurrency limitation, not just a
+  persistence one.** Unlike `st.session_state` (scoped to one browser tab) or the app layer's
+  already-documented "no persistence across visits" (CLAUDE.md), `set_active_csv`/
+  `get_active_csv` hold exactly one normalized DataFrame per running Python process. If this
+  server is ever reachable by more than one person at the same time, one person's uploaded
+  financial data can be read back and answered against a *different* person's question — the
+  two people's data can cross, not merely fail to carry over between one person's own visits.
+  Safe only for a single-user, local-run deployment. Before this is ever run somewhere more
+  than one person could access concurrently, the registry needs to be keyed by something
+  session-scoped (e.g. Streamlit's own session ID) instead of a bare module-level global — not
+  designed here, just flagged so it isn't missed later.
+
 - **`concepts.get_concept` doesn't synthesize a Q4 value.** No company
   files a standalone Q4 report — 10-Qs cover Q1–Q3, and the 10-K reports
   the full fiscal year (`fiscal_period="FY"`), not a discrete fourth

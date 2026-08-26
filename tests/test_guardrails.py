@@ -24,6 +24,51 @@ def _result(final_answer, tool_calls):
     return {"final_answer": final_answer, "tool_calls": tool_calls}
 
 
+def _csv_statement_call(revenue_field, period_end="2025-06-30"):
+    """A get_csv_statement-shaped tool result -- see src/agent/tools.py. Unlike
+    _statement_call, a populated concept entry carries source_file/source_row/source_column/
+    uploaded_at citation fields alongside value/tag/filed; there's no "ticker" key at all."""
+    return _tool_call(
+        "get_csv_statement",
+        {
+            "business_name": "Test Bakery LLC",
+            "cadence": "quarterly",
+            "periods_returned": 1,
+            "concepts_unavailable": [],
+            "notes": [],
+            "periods": [{"period_end": period_end, "revenue": revenue_field}],
+        },
+    )
+
+
+def test_csv_sourced_figure_traces_with_citation_fields_present():
+    """Re-verifies this session's guardrails.py "no change needed" finding as an actual
+    regression test, not just reasoning: check_figures needs zero awareness of the new CSV
+    citation fields (source_file/source_row/source_column/uploaded_at) to trace a CSV-sourced
+    figure correctly -- it already works by generic JSON-value walking (_walk_json_numbers),
+    the same mechanism that already traces EDGAR-sourced figures."""
+    call = _csv_statement_call(
+        {
+            "value": 125000.0,
+            "tag": "Total Revenue",
+            "filed": "2025-06-01",
+            "source_file": "sample_small_business.csv",
+            "source_row": 0,
+            "source_column": "Total Revenue",
+            "uploaded_at": "2025-06-01 12:00:00",
+        }
+    )
+    report = guardrails.check_figures(_result("Revenue was $125,000 last quarter.", [call]))
+
+    assert report["figures_checked"] == 1
+    assert report["all_traced"] is True
+    fig = report["figures"][0]
+    assert fig["traced"] is True
+    assert fig["match"]["tool_name"] == "get_csv_statement"
+    assert fig["match"]["json_path"] == "periods[0].revenue.value"
+    assert fig["match"]["matched_value"] == 125000.0
+
+
 def _statement_call(revenue_field, period_end="2025-06-30"):
     return _tool_call(
         "get_financial_statement",

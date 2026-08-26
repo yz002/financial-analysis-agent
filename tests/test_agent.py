@@ -170,3 +170,49 @@ def test_final_answer_falls_back_to_placeholder_when_no_text(monkeypatch):
     client = _client_with_responses([_response([], "end_turn")])
     result = agent.run_agent("Silent response.", client=client)
     assert result["final_answer"] == "(Claude produced no text response.)"
+
+
+def test_csv_and_ticker_tool_calls_in_one_round(monkeypatch):
+    """Mechanics-only check for the CSV-vs-ticker comparison scenario (see the approved
+    Session 2 plan's test-scope decision): confirms the loop can execute get_csv_ratios and
+    get_ratios(ticker=...) together, within one iteration's multiple tool_use blocks, and that
+    both results land in tool_calls correctly. Whether the model's own prose actually prefers
+    scale-invariant ratios and caveats absolute figures is the model's judgment, not code, and
+    is checked live (not here) per that decision."""
+    monkeypatch.setattr(
+        tools, "execute_tool", lambda name, tool_input: json.dumps({"tool": name, "input": tool_input})
+    )
+    responses = [
+        _response(
+            [
+                _tool_use_block("get_csv_ratios", {"ratio_names": ["net_margin"]}, block_id="toolu_csv"),
+                _tool_use_block(
+                    "get_ratios",
+                    {"ticker": "MSFT", "ratio_names": ["net_margin"]},
+                    block_id="toolu_msft",
+                ),
+            ],
+            "tool_use",
+        ),
+        _response([_text_block("Comparison done.")], "end_turn"),
+    ]
+    client = _client_with_responses(responses)
+
+    result = agent.run_agent("How does my margin compare to Microsoft's?", client=client)
+
+    assert result["iterations_used"] == 2
+    assert result["hit_iteration_cap"] is False
+    assert [c["tool_name"] for c in result["tool_calls"]] == ["get_csv_ratios", "get_ratios"]
+    assert [c["iteration"] for c in result["tool_calls"]] == [1, 1]
+    assert result["final_answer"] == "Comparison done."
+
+
+def test_system_prompt_covers_csv_comparison_and_market_data_scope():
+    """Cheap regression for "forgot to add this instruction" mistakes -- doesn't test that the
+    model actually follows these instructions (checked live, per the Session 2 plan's test-scope
+    decision), just that they genuinely exist in the prompt sent to it."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "get_csv_statement" in prompt
+    assert "get_csv_ratios" in prompt
+    assert "scale-invariant" in prompt
+    assert "get_market_data" in prompt and "never apply" in prompt

@@ -10,12 +10,44 @@ call, live EDGAR request, or yfinance call happens anywhere in this file.
 """
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from src.agent import tools
+from src.agent import csv_session, tools
+from src.analysis import csv_statement
+from src.data import csv_ingest
 from src.data.concepts import ConceptNotFoundError
+
+CSV_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sample_small_business.csv"
+_CSV_UPLOADED_AT = pd.Timestamp("2025-06-01 12:00:00").to_pydatetime()
+_CSV_MAPPING = {
+    "Quarter Ending": "period_end", "Total Revenue": "revenue", "Net Income": "net_income",
+    "Total Assets": "total_assets", "Total Liabilities": "total_liabilities",
+    "Cash on Hand": "cash", "Owner's Equity": "stockholders_equity", "Internal Notes": "unmapped",
+}
+
+
+@pytest.fixture(autouse=True)
+def _reset_csv_session():
+    """csv_session's active-CSV registry is a process-global (see src/agent/csv_session.py) --
+    reset it before and after every test in this file so a CSV set active by one test can never
+    leak into an unrelated EDGAR-only test, and so tests can rely on "no active CSV" as their
+    starting state without depending on test execution order."""
+    csv_session.set_active_csv(None)
+    yield
+    csv_session.set_active_csv(None)
+
+
+def _normalized_csv_statement():
+    raw, error = csv_ingest.parse_csv(
+        CSV_FIXTURE_PATH.read_bytes(), "sample_small_business.csv", uploaded_at=_CSV_UPLOADED_AT
+    )
+    assert error is None, error
+    df, errors, _warnings = csv_statement.normalize(raw, _CSV_MAPPING, entity_name="Test Bakery LLC")
+    assert errors == [], errors
+    return df
 
 
 def _make_statement(n_periods, missing=(), start="2020-03-31", filed_tag="SomeTag"):
@@ -382,6 +414,112 @@ def test_get_ratios_cap_note(monkeypatch):
     assert any(str(tools.MAX_PERIODS) in n for n in result["notes"])
 
 
+# --- get_csv_statement / get_csv_ratios --------------------------------------
+
+
+def test_get_csv_statement_no_active_csv_is_data_unavailable():
+    result = json.loads(tools.get_csv_statement())
+    assert result["error_type"] == "data_unavailable"
+    assert result["business_name"] is None
+
+
+def test_get_csv_ratios_no_active_csv_is_data_unavailable():
+    result = json.loads(tools.get_csv_ratios())
+    assert result["error_type"] == "data_unavailable"
+
+
+def test_get_csv_statement_shape_and_citation_fields():
+    csv_session.set_active_csv(_normalized_csv_statement())
+    result = json.loads(tools.get_csv_statement())
+
+    assert result["business_name"] == "Test Bakery LLC"
+    assert result["cadence"] == "quarterly"
+    assert result["periods_returned"] == 8
+    assert set(result["concepts_unavailable"]) == {
+        "gross_profit", "operating_income", "operating_cash_flow", "capex",
+        "current_assets", "current_liabilities", "liabilities_noncurrent",
+    }
+
+    revenue_entry = result["periods"][0]["revenue"]
+    assert revenue_entry["value"] == 125000.0
+    assert revenue_entry["tag"] == "Total Revenue"
+    assert revenue_entry["source_file"] == "sample_small_business.csv"
+    assert revenue_entry["source_row"] == 0
+    assert revenue_entry["source_column"] == "Total Revenue"
+    assert revenue_entry["uploaded_at"] == "2025-06-01 12:00:00"
+    # No EDGAR-only derivation fields should ever appear on a CSV-sourced entry -- none of
+    # that machinery applies to CSV data (see csv_statement.py's module docstring).
+    for key in (
+        "is_derived", "derivation_method", "q4_subtraction_value", "q4_diverges_from_subtraction",
+    ):
+        assert key not in revenue_entry
+
+    assert result["periods"][0]["gross_profit"] is None
+
+
+def test_get_csv_ratios_shape_and_citation_fields():
+    csv_session.set_active_csv(_normalized_csv_statement())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin", "gross_margin"]))
+
+    assert result["business_name"] == "Test Bakery LLC"
+    assert result["cadence"] == "quarterly"
+    # gross_margin's input (gross_profit) isn't mapped -- should be noted, not silently omitted.
+    assert any("gross_profit" in n for n in result["notes"])
+
+    net_margin_last = result["ratios"]["net_margin"][-1]
+    assert net_margin_last["value"] is not None
+    revenue_prov = net_margin_last["provenance"]["revenue"]
+    assert revenue_prov["source_file"] == "sample_small_business.csv"
+    assert revenue_prov["source_row"] == 7
+    assert revenue_prov["source_column"] == "Total Revenue"
+
+    gross_margin_rows = result["ratios"]["gross_margin"]
+    assert all(r["value"] is None for r in gross_margin_rows)
+
+
+def test_get_csv_ratios_unknown_ratio_is_invalid_input():
+    result = json.loads(tools.get_csv_ratios(ratio_names=["not_a_real_ratio"]))
+    assert result["error_type"] == "invalid_input"
+
+
+def test_get_csv_ratios_single_period_roa_roe_use_annual_semantics():
+    """A single-period CSV has no detected cadence (None) -- roa/roe should still compute a
+    real value by treating it as annual (net_income used directly), not silently return None
+    for lack of a trailing window that could never exist regardless of cadence."""
+    df_raw = pd.DataFrame(
+        {"Date": ["2024-12-31"], "Revenue": ["100000"], "NetIncome": ["10000"], "Assets": ["50000"]}
+    )
+    raw = csv_ingest.RawCsv(df=df_raw, filename="single.csv", uploaded_at=_CSV_UPLOADED_AT)
+    mapping = {
+        "Date": "period_end", "Revenue": "revenue", "NetIncome": "net_income", "Assets": "total_assets",
+    }
+    df, errors, _warnings = csv_statement.normalize(raw, mapping, entity_name="Single Period Co")
+    assert errors == []
+    csv_session.set_active_csv(df)
+
+    result = json.loads(tools.get_csv_ratios(ratio_names=["roa"]))
+    assert result["cadence"] is None
+    roa_row = result["ratios"]["roa"][0]
+    assert roa_row["value"] == pytest.approx(0.2)
+
+
+def test_execute_tool_dispatches_get_csv_statement():
+    """execute_tool's dispatch is pure name -> function, additive for the two new CSV tools --
+    confirms get_csv_statement is reachable the same way every other tool is, with no special
+    casing needed in execute_tool itself."""
+    result = json.loads(tools.execute_tool("get_csv_statement", {}))
+    assert result["error_type"] == "data_unavailable"  # no active CSV in this test
+
+
+def test_csv_tool_schemas_have_no_ticker_or_period_length_input():
+    for name in ("get_csv_statement", "get_csv_ratios"):
+        defn = next(d for d in tools.TOOL_DEFINITIONS if d["name"] == name)
+        properties = defn["input_schema"]["properties"]
+        assert "ticker" not in properties
+        assert "period_length" not in properties
+        assert defn["input_schema"]["required"] == []
+
+
 # --- get_market_data -------------------------------------------------------
 
 
@@ -428,6 +566,28 @@ def test_get_market_data_valuation_source_error(monkeypatch):
     result = json.loads(tools.get_market_data("MSFT"))
     assert result["valuation"] is None
     assert result["valuation_error"]["error_type"] == "source_error"
+
+
+def test_get_market_data_degrades_cleanly_for_non_ticker_business_name(monkeypatch):
+    """The system prompt tells the model never to call get_market_data for a CSV-backed
+    business (no traded share price exists for a private company) -- this is the deterministic
+    safety net for if it ever did anyway: a business name passed where a ticker is expected
+    must still fail cleanly (data_unavailable), not crash, the same way any other unrecognized
+    ticker string already does. Simulates yfinance's real behavior for an unresolvable symbol
+    via the same MarketDataError mocking test_get_market_data_quote_data_unavailable uses --
+    the model's actual refusal to call this tool for a CSV entity is checked live, not here."""
+
+    def raise_mde(ticker):
+        raise tools.MarketDataError(f"No quote data for {ticker!r}")
+
+    monkeypatch.setattr(tools, "get_current_quote", raise_mde)
+    monkeypatch.setattr(tools, "get_valuation_metrics", raise_mde)
+
+    result = json.loads(tools.get_market_data("TEST BAKERY LLC"))
+    assert result["quote"] is None
+    assert result["quote_error"]["error_type"] == "data_unavailable"
+    assert result["valuation"] is None
+    assert result["valuation_error"]["error_type"] == "data_unavailable"
 
 
 # --- detect_anomalies --------------------------------------------------------

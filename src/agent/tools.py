@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from . import csv_session
 from ..analysis import forecast as forecast_mod
 from ..analysis import ratios as ratios_mod
 from ..analysis.statements import DURATION_CONCEPTS, INSTANT_CONCEPTS, get_statement
@@ -153,6 +154,57 @@ def _get_statement_or_error(ticker: str, period_length: str, periods: int | None
         return None, _error(ticker, "data_unavailable", str(e).strip('"'))
     except Exception as e:
         return None, _error(ticker, "source_error", f"EDGAR lookup failed for {ticker}: {e}")
+
+
+def _csv_error(business_name: str | None, error_type: str, message: str, **extra) -> str:
+    """Build a get_csv_statement/get_csv_ratios error payload -- mirrors _error()'s shape but
+    keyed "business_name" rather than "ticker", since a CSV-backed entity has no ticker."""
+    return json.dumps(
+        {"business_name": business_name, "error_type": error_type, "error": message, **extra}
+    )
+
+
+def _get_active_csv_or_error() -> tuple:
+    """csv_session.get_active_csv(), converted into a (df, error_json) pair -- mirrors
+    _get_statement_or_error's pattern. "data_unavailable": a fact to relay (no CSV has been
+    uploaded and confirmed yet via the upload panel), not a source failure. Returns
+    (df, None) on success, (None, error_json_string) otherwise."""
+    df = csv_session.get_active_csv()
+    if df is None:
+        return None, _csv_error(
+            None,
+            "data_unavailable",
+            "No CSV has been uploaded and confirmed yet -- ask the user to upload and confirm "
+            "a business CSV in the upload panel first.",
+        )
+    return df, None
+
+
+def _csv_unavailable_note(concept: str, business_name: str, suffix: str = "") -> str:
+    return (
+        f"No {concept} data available for {business_name}; this column wasn't mapped in the "
+        f"uploaded CSV.{suffix}"
+    )
+
+
+def _csv_citation(df_attrs: dict, concept: str, period_end_iso: str) -> dict:
+    """The four CSV-provenance citation fields for `concept` at `period_end_iso`
+    (source_file/source_row/source_column/uploaded_at), assembled from
+    df.attrs["csv_provenance"]/["csv_source"] -- see src/analysis/csv_statement.py's
+    normalize() docstring for the real shape of both (source_row/source_column live per
+    concept/period in csv_provenance; source_file/uploaded_at are constant for the whole
+    upload, in csv_source). Empty dict when this concept has no real value for that period --
+    mirrors tag/filed's own presence rule."""
+    prov = df_attrs.get("csv_provenance", {}).get(concept, {}).get(period_end_iso)
+    if prov is None:
+        return {}
+    source = df_attrs.get("csv_source", {})
+    return {
+        "source_file": source.get("filename"),
+        "source_row": prov["source_row"],
+        "source_column": prov["source_column"],
+        "uploaded_at": source.get("uploaded_at"),
+    }
 
 
 def get_financial_statement(
@@ -491,6 +543,171 @@ def get_ratios(
     result = {
         "ticker": ticker,
         "period_length": period_length,
+        "notes": notes,
+        "ratios": ratios_out,
+    }
+    return json.dumps(result, indent=2)
+
+
+def get_csv_statement(periods: int | None = DEFAULT_PERIODS) -> str:
+    """
+    Return the currently uploaded and confirmed CSV-backed business's statement (all 13
+    tracked concepts, one row per period_end) as a JSON string -- the CSV analog of
+    get_financial_statement, reading the single active upload (src/agent/csv_session.py)
+    rather than an EDGAR ticker; no identifier is needed since there is at most one active CSV.
+    Every present value carries the literal CSV column header it came from (as "tag"), the
+    upload timestamp (as "filed"), and four citation fields pinpointing exactly where in the
+    uploaded file it came from: source_file, source_row, source_column, uploaded_at.
+    EDGAR-only fields (is_derived, derivation_method, q4_subtraction_value, ...) never appear
+    here -- none of that derivation machinery applies to CSV data (see
+    src/analysis/csv_statement.py's module docstring). A concept with no mapped column is
+    listed in "concepts_unavailable" with a plain-English note, same as get_financial_statement
+    does for an EDGAR concept a company doesn't report. "cadence" is "quarterly"/"annual"/null
+    (a single-period upload has no cadence to classify). `periods` behaves like
+    get_financial_statement's (most recent N rows, capped at MAX_PERIODS), though a CSV upload
+    is rarely large enough for that cap to matter. Returns a data_unavailable error if no CSV
+    has been uploaded and confirmed yet.
+    """
+    effective_periods, capped = _cap_periods(periods)
+    full_df, error = _get_active_csv_or_error()
+    if error is not None:
+        return error
+
+    business_name = full_df.attrs["entity_name"]
+    cadence = full_df.attrs["csv_source"]["cadence"]
+    stmt = full_df.tail(effective_periods)
+
+    unavailable = [c for c in ALL_CONCEPTS if stmt[c].isna().all()]
+    notes = [_csv_unavailable_note(c, business_name) for c in unavailable]
+    if capped:
+        notes.append(
+            f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
+            f"(requested periods={periods!r}). Call again with a smaller `periods` for a "
+            "narrower, uncapped window."
+        )
+
+    periods_out = []
+    for row in stmt.itertuples():
+        period_end_iso = _iso(row.period_end)
+        period = {"period_end": period_end_iso}
+        for concept in ALL_CONCEPTS:
+            value = getattr(row, concept)
+            if pd.isna(value):
+                period[concept] = None
+                continue
+            entry = {
+                "value": _num(value),
+                "tag": getattr(row, f"{concept}_tag"),
+                "filed": _iso(getattr(row, f"{concept}_filed")),
+            }
+            entry.update(_csv_citation(full_df.attrs, concept, period_end_iso))
+            period[concept] = entry
+        periods_out.append(period)
+
+    result = {
+        "business_name": business_name,
+        "cadence": cadence,
+        "periods_returned": len(periods_out),
+        "concepts_unavailable": unavailable,
+        "notes": notes,
+        "periods": periods_out,
+    }
+    return json.dumps(result, indent=2)
+
+
+def get_csv_ratios(
+    ratio_names: list[str] | None = None, periods: int | None = DEFAULT_PERIODS
+) -> str:
+    """
+    Compute the requested ratios (default: all of them) for the currently uploaded and
+    confirmed CSV-backed business and return them as a JSON string -- the CSV analog of
+    get_ratios, reading the single active upload rather than an EDGAR ticker; no identifier is
+    needed. Each period's entry carries the computed value, raw inputs, and provenance (tag/
+    filed plus the four citation fields -- source_file/source_row/source_column/uploaded_at --
+    pinpointing where in the uploaded file each input came from) for every concept the ratio is
+    built from. A ratio that can't be computed because its input wasn't mapped in the CSV still
+    appears -- null values, with a note explaining why. roa/roe use the CSV's own detected
+    cadence: "quarterly" gets the same trailing-twelve-month net_income treatment as an EDGAR
+    ticker; "annual", or a single-period upload (which has no cadence to detect and no trailing
+    window to build regardless), uses net_income directly for that period. Returns a
+    data_unavailable error if no CSV has been uploaded and confirmed yet.
+    """
+    if ratio_names is None:
+        ratio_names = sorted(RATIOS)
+    unknown = [r for r in ratio_names if r not in RATIOS]
+    if unknown:
+        return _csv_error(
+            None,
+            "invalid_input",
+            f"Unknown ratio name(s) {unknown}; valid names: {sorted(RATIOS)}",
+        )
+
+    full_df, error = _get_active_csv_or_error()
+    if error is not None:
+        return error
+
+    business_name = full_df.attrs["entity_name"]
+    cadence = full_df.attrs["csv_source"]["cadence"]
+    ratio_period_length = cadence or "annual"
+
+    effective_periods, capped = _cap_periods(periods)
+    stmt = full_df.tail(effective_periods)
+
+    notes = []
+    if capped:
+        notes.append(
+            f"Returning at most the most recent {MAX_PERIODS} periods to bound response size "
+            f"(requested periods={periods!r}). Call again with a smaller `periods` for a "
+            "narrower, uncapped window."
+        )
+
+    ratios_out = {}
+    for name in ratio_names:
+        func, concept_cols = RATIOS[name]
+        for c in concept_cols:
+            if stmt[c].isna().all():
+                note = _csv_unavailable_note(c, business_name, f" {name} cannot be computed.")
+                if note not in notes:
+                    notes.append(note)
+
+        if name in ("roa", "roe"):
+            ratio_df = func(stmt, period_length=ratio_period_length)
+        else:
+            ratio_df = func(stmt)
+
+        rows = []
+        for srow, rrow in zip(stmt.itertuples(), ratio_df.itertuples()):
+            def _input_value(col):
+                raw = getattr(rrow, col)
+                if col.endswith("_reason"):
+                    return raw if pd.notna(raw) else None
+                return _num(raw)
+
+            inputs = {
+                col: _input_value(col) for col in ratio_df.columns if col not in ("period_end", "value")
+            }
+            period_end_iso = _iso(srow.period_end)
+            provenance = {}
+            for c in concept_cols:
+                prov = {
+                    "tag": getattr(srow, f"{c}_tag"),
+                    "filed": _iso(getattr(srow, f"{c}_filed")),
+                }
+                prov.update(_csv_citation(full_df.attrs, c, period_end_iso))
+                provenance[c] = prov
+            rows.append(
+                {
+                    "period_end": period_end_iso,
+                    "value": _num(rrow.value),
+                    "inputs": inputs,
+                    "provenance": provenance,
+                }
+            )
+        ratios_out[name] = rows
+
+    result = {
+        "business_name": business_name,
+        "cadence": cadence,
         "notes": notes,
         "ratios": ratios_out,
     }
@@ -846,6 +1063,70 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_csv_statement",
+        "description": (
+            "Get the financial statement of the business the user has uploaded and confirmed "
+            "via the CSV upload panel -- the same 13 tracked concepts as "
+            "get_financial_statement, one row per period, but sourced from their own uploaded "
+            "CSV instead of SEC EDGAR. Use this whenever the user refers to 'my business', 'my "
+            "company', 'our numbers', 'the CSV I uploaded', or similar -- there is no "
+            "identifier to pass, it always refers to whichever CSV is currently confirmed (at "
+            "most one). Every present value carries the literal CSV column header it came from "
+            "(as 'tag'), the upload timestamp (as 'filed'), and four citation fields "
+            "(source_file, source_row, source_column, uploaded_at) pinpointing exactly where "
+            "in the uploaded file it came from. A concept the CSV didn't map is listed in "
+            "concepts_unavailable with a plain-English note. Returns a data_unavailable error "
+            "if no CSV has been uploaded and confirmed yet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "periods": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        f"Most recent N periods to return. Defaults to {DEFAULT_PERIODS}. Pass "
+                        f"null for the longest available history, capped at {MAX_PERIODS}."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_csv_ratios",
+        "description": (
+            "Compute financial ratios (same set as get_ratios: gross_margin, "
+            "operating_margin, net_margin, revenue_growth_qoq, revenue_growth_yoy, "
+            "earnings_growth_qoq, earnings_growth_yoy, free_cash_flow, debt_to_assets, "
+            "current_ratio, roa, roe) for the business the user has uploaded and confirmed via "
+            "the CSV upload panel. No identifier needed, same as get_csv_statement. When "
+            "comparing this business to a ticker-identified company, prefer these ratios over "
+            "raw dollar figures from get_csv_statement/get_financial_statement -- absolute "
+            "figures aren't meaningful across very different company sizes. Every value "
+            "includes raw inputs and citation provenance (tag/filed plus source_file/"
+            "source_row/source_column/uploaded_at). Returns a data_unavailable error if no CSV "
+            "has been uploaded and confirmed yet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ratio_names": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string", "enum": sorted(RATIOS)},
+                    "description": "Which ratios to compute. Defaults to all of them if omitted.",
+                },
+                "periods": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        f"Most recent N periods. Defaults to {DEFAULT_PERIODS}. Pass null for "
+                        f"the longest available history, capped at {MAX_PERIODS}."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_market_data",
         "description": (
             "Get current price, market cap, shares outstanding, and valuation metrics "
@@ -989,6 +1270,8 @@ _TOOL_FUNCTIONS = {
     "detect_anomalies": detect_anomalies,
     "forecast_metric": forecast_metric_tool,
     "get_price_history": get_price_history_tool,
+    "get_csv_statement": get_csv_statement,
+    "get_csv_ratios": get_csv_ratios,
 }
 
 # Public so agent.py can check a tool name is known *before* calling execute_tool -- that lets
