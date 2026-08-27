@@ -844,3 +844,10 @@
   more pointed one when tags are mixed within the ticker's own history (flags the within-company
   trend issue too) — alongside the per-row `provenance.stockholders_equity.tag` that already
   existed and is unchanged by this fix.
+
+- **README's headline pooled grounding number had drifted from this file's own
+  most-recently-recorded value.** README still stated 94.3% (the pre-fix number, before the
+  sign-by-word and weak-precision-match entries above); this file's own last entry already read
+  93.9% (663/706). Reconciled during a pre-demo audit follow-up: README now states 93.9%
+  (663/706), matching this file exactly — no new eval run was needed, since this file already
+  held the authoritative, current number.

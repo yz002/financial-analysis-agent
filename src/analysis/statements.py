@@ -1,6 +1,7 @@
 """
 Assembles individual XBRL concepts (concepts.get_concept) into one wide
-financial statement per ticker/period, indexed by period_end.
+financial statement per ticker/period, sorted by period_end (an ordinary
+column, not the DataFrame's pandas index).
 
 period_end, not fiscal_year, is the join key throughout this module. Per
 NOTES.md, EDGAR's fiscal_year/fiscal_period can reflect a later filing's

@@ -40,8 +40,9 @@ for `test_statements.py`'s Q4-filed-vs-subtraction reconciliation regression tes
 clone's *first* `pytest` run makes live requests to SEC EDGAR to populate it (needs network
 access and a valid `SEC_USER_AGENT`) — only subsequent runs are actually offline. Run a single
 file/test with `pytest tests/test_ratios.py` or `pytest tests/test_ratios.py::test_name`. No
-linter or build tooling is set up yet (`evals/` and `notebooks/` are currently empty
-placeholders).
+linter or build tooling is set up yet (`notebooks/` is currently an empty placeholder;
+`evals/` holds the Phase 6 evaluation harness, run via `python -m evals.run_evals` — see the
+Architecture section).
 
 Modules other than tests have no `__main__` entry points — exercise them by importing functions in
 a Python session or a one-liner, e.g.:
@@ -75,8 +76,8 @@ Answer + charts + sources                                              (src/app/
 ```
 
 The data, analysis, agent, and app layers (`src/data/`, `src/analysis/`, `src/agent/`,
-`src/app/`) are built; see README.md's roadmap for what's left (Phase 6 evaluation harness,
-Phase 7 documentation and demo).
+`src/app/`) are built, and Phase 6 (the evaluation harness) is done too; see README.md's
+roadmap for what's left (Phase 7 documentation and demo).
 
 ### Data layer (`src/data/`)
 
@@ -122,7 +123,8 @@ Phase 7 documentation and demo).
   `current_liabilities`, added specifically to unblock ROE/current ratio below, plus
   `liabilities_noncurrent`, a fallback input for `total_liabilities` below that's populated for
   almost no real filer) into one wide
-  DataFrame per ticker, indexed by `period_end` — never `fiscal_year`, per this project's core
+  DataFrame per ticker, sorted by `period_end` (an ordinary column, not the DataFrame's pandas
+  index) — never `fiscal_year`, per this project's core
   design principle. Every ticker gets the identical column schema regardless of what data is
   actually available (a concept with zero usable data, e.g. Ford's `gross_profit`, still gets its
   columns, filled with NaN/None/False) so `ratios.py` never needs `hasattr`/`in df.columns`

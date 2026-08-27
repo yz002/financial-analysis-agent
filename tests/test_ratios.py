@@ -105,6 +105,29 @@ def test_revenue_growth_qoq_long_kroger_style_quarter_is_not_spuriously_refused(
     assert result["revenue_growth_reason"].iloc[2] is None
 
 
+def test_revenue_growth_qoq_returns_gap_for_every_row_on_annual_statement(msft_annual):
+    """Confirmed live during the pre-demo audit: on an annual-cadence statement,
+    revenue_growth_qoq's lag=1 targets ~3 calendar months back, which never matches annual
+    spacing -- every row comes back None, and every row but the first is "gap_no_prior_period"
+    (the first is "insufficient_history", same as on a quarterly statement). No existing test
+    exercised either growth direction against an annual statement before this."""
+    result = ratios.revenue_growth_qoq(msft_annual)
+    assert result["value"].apply(lambda v: v is None).all()
+    assert result["revenue_growth_reason"].iloc[0] == "insufficient_history"
+    assert (result["revenue_growth_reason"].iloc[1:] == "gap_no_prior_period").all()
+
+
+def test_revenue_growth_yoy_returns_real_growth_on_annual_statement(msft_annual):
+    """The correct call for annual YoY growth -- lag=4 targets ~12 months back, matching
+    annual spacing, so every row but the first (which has no prior year at all) gets a real
+    value. Range-checked rather than pinned to exact figures, since MSFT's live annual history
+    grows by a row every year."""
+    result = ratios.revenue_growth_yoy(msft_annual)
+    non_null_values = [v for v in result["value"] if v is not None]
+    assert len(non_null_values) == len(msft_annual) - 1
+    assert all(isinstance(v, float) and -0.9 < v < 2.0 for v in non_null_values)
+
+
 def test_free_cash_flow_matches_manual_calculation(msft_quarterly):
     result = ratios.free_cash_flow(msft_quarterly)
     latest_row = msft_quarterly.iloc[-1]

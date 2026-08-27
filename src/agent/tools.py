@@ -1034,7 +1034,11 @@ TOOL_DEFINITIONS = [
             "tag/filed date/derived flag. A ratio that can't be computed because an input "
             "concept isn't reported comes back null with an explanatory note, never silently "
             "omitted. Also flags implausibly little on-file history for the resolved CIK as a "
-            "possible successor-registrant case, same as get_financial_statement."
+            "possible successor-registrant case, same as get_financial_statement. For "
+            "period_length='annual', use the _yoy growth ratios (revenue_growth_yoy, "
+            "earnings_growth_yoy), never the _qoq ones -- the _qoq variants target roughly a "
+            "quarter back and return null for every annual period; _yoy targets roughly a "
+            "year back, which is what matches annual spacing."
         ),
         "input_schema": {
             "type": "object",
@@ -1104,7 +1108,10 @@ TOOL_DEFINITIONS = [
             "raw dollar figures from get_csv_statement/get_financial_statement -- absolute "
             "figures aren't meaningful across very different company sizes. Every value "
             "includes raw inputs and citation provenance (tag/filed plus source_file/"
-            "source_row/source_column/uploaded_at). Returns a data_unavailable error if no CSV "
+            "source_row/source_column/uploaded_at). If the response's cadence is 'annual', use "
+            "revenue_growth_yoy/earnings_growth_yoy for year-over-year growth, not the _qoq "
+            "variants -- same reasoning as get_ratios: _qoq targets roughly a quarter back and "
+            "returns null against annual spacing. Returns a data_unavailable error if no CSV "
             "has been uploaded and confirmed yet."
         ),
         "input_schema": {

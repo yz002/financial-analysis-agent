@@ -107,27 +107,36 @@ def _growth(stmt: pd.DataFrame, column: str, lag: int) -> pd.DataFrame:
 
 
 def revenue_growth_qoq(stmt: pd.DataFrame) -> pd.DataFrame:
-    """Quarter-over-quarter revenue growth. Assumes `stmt` is quarterly-cadence."""
+    """Quarter-over-quarter revenue growth. Only meaningful on a quarterly-cadence `stmt` -- on
+    an annual statement this returns gap_no_prior_period for every row, since lag=1 targets ~3
+    calendar months back (periods.find_prior_period), never matching annual spacing. Use
+    revenue_growth_yoy for annual-cadence year-over-year growth instead."""
     return _growth(stmt, "revenue", lag=1)
 
 
 def revenue_growth_yoy(stmt: pd.DataFrame) -> pd.DataFrame:
     """
-    Year-over-year revenue growth (current quarter vs. the same quarter a
-    year ago, lag=4). Assumes `stmt` is quarterly-cadence -- on an annual
-    statement, use revenue_growth_qoq instead, since consecutive annual
-    rows are already a year apart.
+    Year-over-year revenue growth (lag=4, targets ~12 calendar months back via
+    periods.find_prior_period). Works on both cadences: on a quarterly statement this is the
+    usual same-quarter-a-year-ago comparison; on an annual statement, this -- not
+    revenue_growth_qoq -- is the correct call for annual YoY growth, since consecutive annual
+    rows are naturally ~12 months apart, matching lag=4's target. (This docstring used to
+    recommend revenue_growth_qoq for annual data; that was only true under the old positional
+    shift(n) semantics this module no longer uses -- find_prior_period's lag is always a
+    calendar-month target, not a row count, so lag=1 can never match annual spacing.)
     """
     return _growth(stmt, "revenue", lag=4)
 
 
 def earnings_growth_qoq(stmt: pd.DataFrame) -> pd.DataFrame:
-    """Quarter-over-quarter net income growth. Assumes `stmt` is quarterly-cadence."""
+    """Quarter-over-quarter net income growth. Only meaningful on a quarterly-cadence `stmt` --
+    see revenue_growth_qoq's docstring; the same annual-cadence caveat applies here."""
     return _growth(stmt, "net_income", lag=1)
 
 
 def earnings_growth_yoy(stmt: pd.DataFrame) -> pd.DataFrame:
-    """Year-over-year net income growth (lag=4). Assumes `stmt` is quarterly-cadence."""
+    """Year-over-year net income growth (lag=4). Works on both cadences, including annual --
+    see revenue_growth_yoy's docstring for why."""
     return _growth(stmt, "net_income", lag=4)
 
 
