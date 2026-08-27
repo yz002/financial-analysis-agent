@@ -434,6 +434,14 @@ def _propose_mapping_or_error(raw) -> tuple[csv_ingest.MappingProposal | None, s
         return None, f"Unexpected error while proposing a mapping: {e}"
 
 
+def _sample_value_strings(series: pd.Series, n: int = 3) -> list[str]:
+    """Stringify the first n values of a column for the mapping-review caption. Skips
+    .astype(str) -- under pandas 3's default string dtype it leaves a missing cell as an actual
+    float/NA rather than stringifying it, which crashes the caller's ', '.join(...) on a mixed
+    list. pd.isna() catches every missing-value representation (None, float('nan'), pd.NA)."""
+    return ["(blank)" if pd.isna(v) else str(v) for v in series.head(n).tolist()]
+
+
 def render_csv_upload_section() -> None:
     """
     Upload -> LLM-proposed mapping -> human confirmation -> normalization, per the approved
@@ -512,7 +520,7 @@ def render_csv_upload_section() -> None:
         with st.container(border=True):
             left, right = st.columns([1, 1])
             left.markdown(f"**{column}**")
-            sample_values = raw.df[column].astype(str).head(3).tolist()
+            sample_values = _sample_value_strings(raw.df[column])
             left.caption(f"e.g. {', '.join(sample_values)}")
             if col_proposal and col_proposal.rationale:
                 left.caption(f"Model: {col_proposal.rationale}")

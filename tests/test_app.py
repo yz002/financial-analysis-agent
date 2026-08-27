@@ -11,6 +11,7 @@ import json
 
 import anthropic
 import httpx2 as httpx
+import pandas as pd
 import pytest
 
 from src.app import main as app_main
@@ -333,6 +334,21 @@ def test_figure_citation_caption_falls_back_when_citation_fields_absent():
 
     caption = app_main._figure_citation_caption(result, match)
     assert caption == "via `get_financial_statement` → `periods[0].revenue.value` = 100.0"
+
+
+# ---------------------------------------------------------------------------
+# _sample_value_strings
+# ---------------------------------------------------------------------------
+
+
+def test_sample_value_strings_handles_blank_cell_without_crashing():
+    """A blank/missing cell used to survive raw.df[column].astype(str) as an actual float under
+    pandas 3's default string dtype (older pandas stringified it to "nan"), crashing the mapping
+    caption's ', '.join(...) with TypeError: sequence item N: expected str instance, float found."""
+    series = pd.Series(["$125,000.00", None, "$160,000.00"])
+    values = app_main._sample_value_strings(series)
+    assert values == ["$125,000.00", "(blank)", "$160,000.00"]
+    assert ", ".join(values) == "$125,000.00, (blank), $160,000.00"  # the actual crash site
 
 
 # ---------------------------------------------------------------------------

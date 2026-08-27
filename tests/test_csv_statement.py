@@ -245,6 +245,61 @@ def test_bad_date_row_is_dropped_with_named_reason_and_good_rows_survive():
     assert "date" in reason.lower()  # explains *why*, not a bare "row 1 was dropped"
 
 
+def test_bad_date_row_amid_realistic_quarterly_history_still_normalizes():
+    """The audit found that dropping a bad-date row can widen the gap around it enough to fail
+    _detect_cadence's all-gaps check, rejecting the whole file -- test_bad_date_row_is_dropped_
+    with_named_reason_and_good_rows_survive above doesn't catch this because its "bad" row isn't
+    positioned between two rows that would otherwise be a normal quarter apart (removing it
+    doesn't widen anything). Here the bad row genuinely sits mid-series among 7 other real
+    quarters, so dropping it leaves a real ~183-day (2-quarter) gap between 2023-06-30 and
+    2023-12-31 -- this must still normalize as quarterly, not refuse the whole file."""
+    df_raw = pd.DataFrame(
+        {
+            "Date": [
+                "2023-03-31", "2023-06-30", "not-a-date", "2023-12-31",
+                "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+            ],
+            "Revenue": [
+                "125000", "138500", "999999", "160000",
+                "148000", "155000", "150000", "172000",
+            ],
+        }
+    )
+    raw = RawCsv(df=df_raw, filename="realistic.csv", uploaded_at=_UPLOADED_AT)
+    mapping = {"Date": "period_end", "Revenue": "revenue"}
+    df, errors, warnings = normalize(raw, mapping, entity_name="Realistic Co")
+
+    assert errors == []
+    assert df is not None
+    assert len(df) == 7  # only the "not-a-date" row is dropped
+    assert df.attrs["csv_source"]["cadence"] == "quarterly"
+
+    drop_warnings = [w for w in warnings if "row 2" in w.lower()]
+    assert len(drop_warnings) == 1
+    assert "not-a-date" in drop_warnings[0]
+
+
+def test_two_consecutive_bad_dates_still_refuses_cadence():
+    """The one-missing-period tolerance added above has a real limit: two consecutive
+    unparseable dates widen the surviving gap to ~3 quarters, which must still be refused --
+    confirms the fix doesn't just accept any gap, only a single missing period's worth."""
+    df_raw = pd.DataFrame(
+        {
+            "Date": [
+                "2023-03-31", "2023-06-30", "not-a-date", "also-bad",
+                "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+            ],
+            "Revenue": ["125000", "138500", "0", "0", "148000", "155000", "150000", "172000"],
+        }
+    )
+    raw = RawCsv(df=df_raw, filename="tworows.csv", uploaded_at=_UPLOADED_AT)
+    mapping = {"Date": "period_end", "Revenue": "revenue"}
+    df, errors, _warnings = normalize(raw, mapping, entity_name="Two Bad Co")
+
+    assert df is None
+    assert any("spacing" in e.lower() for e in errors)
+
+
 def test_unparseable_numeric_cell_becomes_nan_not_zero():
     """A revenue cell that's still not a number after $/comma/parens cleanup (blank, "N/A",
     whitespace-only) must become NaN for that period -- never silently coerced to 0, which

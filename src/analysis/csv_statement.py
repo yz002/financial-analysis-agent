@@ -160,30 +160,57 @@ def _clean_numeric_series(s: pd.Series) -> pd.Series:
     return s.map(clean_one)
 
 
+def _fits_step_or_one_missing(gap: int, lo: int, hi: int) -> bool:
+    """A gap fits this cadence's normal step, or exactly one period's worth of it is missing
+    (2x the step) -- the latter is what a single dropped bad-date row leaves behind, and is
+    indistinguishable from a filer that genuinely skipped reporting one period. Capped at
+    exactly one missing period (not 3x/unbounded) so a genuinely annual file's ~365-day gaps
+    can't spuriously satisfy a widened quarterly tolerance band -- see _detect_cadence."""
+    return (lo <= gap <= hi) or (2 * lo <= gap <= 2 * hi)
+
+
 def _detect_cadence(period_ends: list) -> tuple[str | None, str | None]:
     """
     Classify `period_ends` (already unique, sorted ascending) as "quarterly" or "annual" by
     the spacing between consecutive periods. Fewer than 2 periods can't be classified -- not a
     refusal, a single-period CSV is valid (see the design doc) and simply has no cadence to
     check growth ratios against. Returns (cadence, None) on a match, or (None, reason) when
-    the spacing doesn't cleanly fit either supported cadence.
+    the spacing doesn't cleanly fit either supported cadence, tolerating at most one missing
+    period per gap (see _fits_step_or_one_missing) so that dropping a single bad-date row (see
+    normalize()) doesn't turn a real quarterly/annual file into a whole-file refusal.
     """
     if len(period_ends) < 2:
         return None, None
 
     gaps = [(b - a).days for a, b in zip(period_ends, period_ends[1:])]
-    if all(_QUARTER_SPACING_DAYS_MIN <= g <= _QUARTER_SPACING_DAYS_MAX for g in gaps):
+    if all(_fits_step_or_one_missing(g, _QUARTER_SPACING_DAYS_MIN, _QUARTER_SPACING_DAYS_MAX) for g in gaps):
         return "quarterly", None
-    if all(_ANNUAL_SPACING_DAYS_MIN <= g <= _ANNUAL_SPACING_DAYS_MAX for g in gaps):
+    if all(_fits_step_or_one_missing(g, _ANNUAL_SPACING_DAYS_MIN, _ANNUAL_SPACING_DAYS_MAX) for g in gaps):
         return "annual", None
 
-    gaps_sorted = sorted(gaps)
-    median_gap = gaps_sorted[len(gaps_sorted) // 2]
+    # Name the actual offending gap(s) rather than an uninformative global median -- score
+    # against whichever cadence has fewer violations, since that's the more useful read to hand
+    # back to the user.
+    pairs = list(zip(period_ends, period_ends[1:], gaps))
+    offenders_by_cadence = {
+        "quarterly": [
+            p for p in pairs
+            if not _fits_step_or_one_missing(p[2], _QUARTER_SPACING_DAYS_MIN, _QUARTER_SPACING_DAYS_MAX)
+        ],
+        "annual": [
+            p for p in pairs
+            if not _fits_step_or_one_missing(p[2], _ANNUAL_SPACING_DAYS_MIN, _ANNUAL_SPACING_DAYS_MAX)
+        ],
+    }
+    _, offenders = min(offenders_by_cadence.items(), key=lambda kv: len(kv[1]))
+    named = "; ".join(f"{a.date()} to {b.date()} is {g} days" for a, b, g in offenders[:3])
+    more = f" (and {len(offenders) - 3} more)" if len(offenders) > 3 else ""
     return None, (
-        f"The spacing between periods (around {median_gap} days between rows) doesn't match "
-        "quarterly (~80-125 days) or annual (~350-380 days) spacing. Only quarterly- or "
-        "annual-cadence CSVs are supported in this version -- monthly or irregular spacing "
-        "is not yet supported."
+        f"The gap {named}{more} doesn't fit quarterly spacing (~80-125 days, or ~160-250 days "
+        "if exactly one period is missing) or annual spacing (~350-380 days, or ~700-760 days "
+        "if one period is missing). Only quarterly- or annual-cadence CSVs, allowing for at "
+        "most one missing period, are supported in this version -- monthly or irregular "
+        "spacing is not yet supported."
     )
 
 
