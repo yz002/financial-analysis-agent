@@ -6,6 +6,49 @@ An FP&A copilot that answers plain-English questions about company financials by
 data from SEC filings and market sources, running the analysis in Python, and explaining
 the results with sources attached.
 
+## Quick Start
+
+**What it is:** ask plain-English questions about a public company's finances (e.g. "What
+was Nvidia's revenue last quarter?") and get an answer backed by real SEC filings — or
+upload your own small business's numbers as a CSV and ask the same kinds of questions
+about your own data instead.
+
+**Before you install anything:** this is not a website you sign up for. It's a Python app
+you run on your own computer, using your own [Anthropic API key](https://console.anthropic.com).
+There's no hosted version to just click into.
+
+**Cost:** each question you ask makes real calls to the Anthropic API and SEC EDGAR, billed
+to your own API key — typically a few cents per question. Check current pricing at
+[console.anthropic.com](https://console.anthropic.com) before you start if that matters to you.
+
+**Setup** (needs [Python 3.10+](https://www.python.org/downloads/) and a terminal):
+
+```bash
+git clone https://github.com/yz002/financial-analysis-agent.git
+cd financial-analysis-agent
+pip install -r requirements.txt
+cp .env.example .env   # then open .env and fill in ANTHROPIC_API_KEY and SEC_USER_AGENT
+streamlit run src/app/main.py
+```
+
+`SEC_USER_AGENT` just needs to be a descriptive `Your Name your@email.com` string — SEC
+EDGAR requires it on every request but doesn't otherwise validate it. Streamlit will open
+the app in your browser automatically. First run needs network access to reach EDGAR and
+Anthropic; see [Setup details](#setup-details) below for what's cached and how long a
+question takes.
+
+**Try asking:** *"How has Apple's operating margin trended over the last 8 quarters?"* —
+you'll get a written answer plus a chart and, for every number quoted, exactly which
+filing and computation it came from.
+
+![Screenshot of the Streamlit UI answering a financial question, with sources and a grounding check](docs/screenshot.png)
+
+---
+
+The rest of this README goes deeper: why the project is built this way, what running the
+evals found, the messy real-world SEC data problems it had to solve, and the full
+architecture.
+
 ## The problem
 
 Ask an LLM about a company's financials directly and it will confidently hand back numbers
@@ -13,8 +56,6 @@ that sound right and aren't in any filing — there's no way to tell a real figu
 plausible-sounding one. This project fixes that: the model decides *what* to look up and how
 to explain it, but every number shown is the output of a deterministic Python computation over
 real SEC filings, with its source attached. The LLM never does arithmetic.
-
-![Screenshot of the Streamlit UI answering a financial question, with sources and a grounding check](docs/screenshot.png)
 
 ## Results
 
@@ -108,13 +149,10 @@ Guardrails       — source attribution, consistency checks, uncertainty flags
 Answer + charts + sources
 ```
 
-## Setup and running
+## Setup details
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env   # set ANTHROPIC_API_KEY and SEC_USER_AGENT
-streamlit run src/app/main.py
-```
+The [Quick Start](#quick-start) above covers the commands you need. This section has the
+reasoning behind them, for anyone who wants it.
 
 Needs network access on first use (SEC EDGAR and the Anthropic API); EDGAR responses are
 cached to `data/cache/` after that. A single query typically takes 30+ seconds — the agent
