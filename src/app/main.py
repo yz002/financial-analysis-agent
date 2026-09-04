@@ -391,7 +391,7 @@ def render_charts(result: dict) -> None:
 
 _CSV_STATE_KEYS = [
     "csv_file_hash", "csv_raw", "csv_parse_error",
-    "csv_proposal", "csv_proposal_error",
+    "csv_proposal", "csv_proposal_error", "csv_mapping_reused",
     "csv_normalized", "csv_normalize_errors", "csv_normalize_warnings",
 ]
 
@@ -442,6 +442,57 @@ def _sample_value_strings(series: pd.Series, n: int = 3) -> list[str]:
     return ["(blank)" if pd.isna(v) else str(v) for v in series.head(n).tolist()]
 
 
+def _normalize_business_key(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _find_remembered_mapping(raw, entity_name: str, remembered: dict) -> dict | None:
+    """Returns the remembered {column: role} mapping for entity_name if one exists AND
+    raw's column set exactly matches what it was recorded against (order-independent --
+    the mapping is a column-name-keyed dict, so column order doesn't matter); None
+    otherwise (no name yet, no memory for this name, or the columns changed), in which
+    case the caller must fall back to the normal propose-button + LLM flow rather than
+    reuse a mapping that might not even apply."""
+    key = _normalize_business_key(entity_name)
+    if not key:
+        return None
+    entry = remembered.get(key)
+    if entry is None or entry["columns"] != frozenset(raw.df.columns):
+        return None
+    return entry["mapping"]
+
+
+def _proposal_from_mapping(raw, mapping: dict) -> csv_ingest.MappingProposal:
+    """Synthesizes a MappingProposal from a remembered mapping so it can seed the existing
+    confirmation UI exactly like an LLM proposal would, without calling the LLM."""
+    columns = [
+        csv_ingest.ColumnProposal(
+            csv_column=col,
+            proposed_role=mapping.get(col, csv_statement.UNMAPPED_ROLE),
+            rationale="Reused from the mapping you confirmed earlier for this business.",
+        )
+        for col in raw.df.columns
+    ]
+    return csv_ingest.MappingProposal(columns=columns, note=None)
+
+
+def _resolve_mapping_proposal(raw, entity_name: str, remembered: dict) -> csv_ingest.MappingProposal | None:
+    """None means no remembered mapping applies -- the caller must run the normal
+    propose-button + LLM flow. Never calls propose_mapping itself."""
+    mapping = _find_remembered_mapping(raw, entity_name, remembered)
+    return None if mapping is None else _proposal_from_mapping(raw, mapping)
+
+
+def _remember_mapping(remembered: dict, entity_name: str, raw, mapping: dict) -> None:
+    """Records (or overwrites, if this business name was seen before this session) the
+    confirmed mapping so a later same-session upload for the same business can reuse it."""
+    remembered[_normalize_business_key(entity_name)] = {
+        "display_name": entity_name.strip(),
+        "columns": frozenset(raw.df.columns),
+        "mapping": dict(mapping),
+    }
+
+
 def render_csv_upload_section() -> None:
     """
     Upload -> LLM-proposed mapping -> human confirmation -> normalization, per the approved
@@ -469,6 +520,8 @@ def render_csv_upload_section() -> None:
     for key in _CSV_STATE_KEYS:
         if key not in st.session_state:
             st.session_state[key] = None
+    if "csv_remembered_mappings" not in st.session_state:
+        st.session_state.csv_remembered_mappings = {}
 
     uploaded_file = st.file_uploader("Upload a CSV", type="csv", key="csv_uploader")
     if uploaded_file is None:
@@ -491,6 +544,14 @@ def render_csv_upload_section() -> None:
     st.success(f"Parsed {uploaded_file.name}: {len(raw.df)} rows, {len(raw.df.columns)} columns.")
 
     if st.session_state.csv_proposal is None:
+        reused = _resolve_mapping_proposal(
+            raw, st.session_state.get("csv_entity_name") or "", st.session_state.csv_remembered_mappings
+        )
+        if reused is not None:
+            st.session_state.csv_proposal = reused
+            st.session_state.csv_mapping_reused = True
+
+    if st.session_state.csv_proposal is None:
         if st.button("Propose column mapping", key="csv_propose_button"):
             with st.spinner("Asking the model to propose a column mapping..."):
                 proposal, error = _propose_mapping_or_error(raw)
@@ -504,6 +565,11 @@ def render_csv_upload_section() -> None:
     proposal = st.session_state.csv_proposal
     if proposal.note:
         st.warning(proposal.note)
+    elif st.session_state.csv_mapping_reused:
+        st.info(
+            "Reusing the column mapping you confirmed earlier for this business -- "
+            "review and confirm below."
+        )
 
     st.markdown("**Confirm the column mapping**")
     entity_name = st.text_input(
@@ -553,6 +619,8 @@ def render_csv_upload_section() -> None:
         st.session_state.csv_normalized = df
         st.session_state.csv_normalize_errors = errors
         st.session_state.csv_normalize_warnings = warnings
+        if df is not None and not errors:
+            _remember_mapping(st.session_state.csv_remembered_mappings, entity_name, raw, mapping)
 
     if st.session_state.csv_normalize_errors:
         with st.container(border=True):

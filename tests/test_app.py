@@ -410,3 +410,84 @@ def test_run_agent_or_error_maps_unexpected_exception(monkeypatch):
     assert result is None
     assert "Unexpected error" in error
     assert "max_iterations must be at least 1" in error
+
+
+def _raw_csv(columns, filename="business.csv"):
+    """Minimal RawCsv for testing remembered-mapping logic -- content doesn't matter, only
+    the column headers (what remembered-mapping matching keys on)."""
+    from datetime import datetime
+
+    df = pd.DataFrame({c: ["x", "y"] for c in columns})
+    return app_main.csv_ingest.RawCsv(df=df, filename=filename, uploaded_at=datetime(2025, 1, 1))
+
+
+def test_remembered_mapping_reused_for_same_name_and_columns_skips_llm_call(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("propose_mapping should not be called when a remembered mapping applies")
+
+    monkeypatch.setattr(app_main.csv_ingest, "propose_mapping", fail_if_called)
+
+    raw = _raw_csv(["Date", "Revenue", "Net Income"])
+    remembered = {
+        "riverside hardware": {
+            "display_name": "Riverside Hardware",
+            "columns": frozenset(["Date", "Revenue", "Net Income"]),
+            "mapping": {"Date": "period_end", "Revenue": "revenue", "Net Income": "net_income"},
+        }
+    }
+
+    proposal = app_main._resolve_mapping_proposal(raw, "  riverside HARDWARE  ", remembered)
+
+    assert proposal is not None
+    proposed_roles = {c.csv_column: c.proposed_role for c in proposal.columns}
+    assert proposed_roles == {"Date": "period_end", "Revenue": "revenue", "Net Income": "net_income"}
+
+
+def test_remembered_mapping_not_reused_when_columns_differ():
+    raw = _raw_csv(["Date", "Revenue", "Net Income", "Region"])  # extra column vs. what was remembered
+    remembered = {
+        "riverside hardware": {
+            "display_name": "Riverside Hardware",
+            "columns": frozenset(["Date", "Revenue", "Net Income"]),
+            "mapping": {"Date": "period_end", "Revenue": "revenue", "Net Income": "net_income"},
+        }
+    }
+
+    assert app_main._find_remembered_mapping(raw, "Riverside Hardware", remembered) is None
+    assert app_main._resolve_mapping_proposal(raw, "Riverside Hardware", remembered) is None
+
+
+def test_remembered_mapping_not_reused_for_different_business_name():
+    raw = _raw_csv(["Date", "Revenue", "Net Income"])
+    remembered = {
+        "riverside hardware": {
+            "display_name": "Riverside Hardware",
+            "columns": frozenset(["Date", "Revenue", "Net Income"]),
+            "mapping": {"Date": "period_end", "Revenue": "revenue", "Net Income": "net_income"},
+        }
+    }
+
+    assert app_main._find_remembered_mapping(raw, "Acme Bakery", remembered) is None
+    assert app_main._resolve_mapping_proposal(raw, "Acme Bakery", remembered) is None
+    # Unknown/empty name never matches either
+    assert app_main._find_remembered_mapping(raw, "", remembered) is None
+
+
+def test_remember_mapping_stores_and_overwrites():
+    raw = _raw_csv(["Date", "Revenue"])
+    remembered = {}
+
+    app_main._remember_mapping(remembered, "Riverside Hardware", raw, {"Date": "period_end", "Revenue": "revenue"})
+
+    entry = remembered["riverside hardware"]
+    assert entry["display_name"] == "Riverside Hardware"
+    assert entry["columns"] == frozenset(["Date", "Revenue"])
+    assert entry["mapping"] == {"Date": "period_end", "Revenue": "revenue"}
+
+    # A later confirmation for the same (normalized) name overwrites rather than duplicates.
+    app_main._remember_mapping(
+        remembered, "riverside hardware", raw, {"Date": "period_end", "Revenue": "net_income"}
+    )
+
+    assert len(remembered) == 1
+    assert remembered["riverside hardware"]["mapping"] == {"Date": "period_end", "Revenue": "net_income"}
