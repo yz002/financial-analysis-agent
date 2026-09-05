@@ -96,27 +96,10 @@ def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
     return install
 
 
-# TEMPORARY -- test-only, Phase B session 3's Render timeout load test.
-# Forces run_agent to actually exhaust all max_iterations rounds
-# deterministically, rather than relying on a real question happening to
-# need that many, so the load test measures a genuine worst case. Remove
-# this constant and its use below once that load test is done; it must
-# never be a permanent, caller-facing part of the API contract (it is read
-# from a header, not AskRequest, specifically so it can't leak into the
-# design doc's real request schema).
-_DEBUG_FORCE_ITERATIONS_INSTRUCTION = (
-    "TEST MODE: for this conversation only, call an available tool at least "
-    "once in each of your first 7 responses, even if you already have enough "
-    "data to answer. Provide your final text-only answer, with no further "
-    "tool call, only on your 8th response."
-)
-
-
 @app.post("/v1/ask", response_model=AskResponse)
 def ask(
     request: AskRequest,
     x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
-    x_debug_force_iterations: bool = Header(False, alias="X-Debug-Force-Iterations"),
 ) -> AskResponse:
     session = get_session()
     try:
@@ -130,9 +113,8 @@ def ask(
     # existing conversation and seeding its history into run_agent needs the
     # prior_messages plumbing that's session 6's job. Every call here starts
     # a new conversation.
-    extra_system_instruction = _DEBUG_FORCE_ITERATIONS_INSTRUCTION if x_debug_force_iterations else None
     try:
-        result = run_agent(request.question, extra_system_instruction=extra_system_instruction)
+        result = run_agent(request.question)
     except anthropic.APIError as e:
         raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
     except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback

@@ -118,7 +118,6 @@ def run_agent(
     model: str = DEFAULT_MODEL,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    extra_system_instruction: str | None = None,
 ) -> dict:
     """
     Answer `question` using the Claude API with tool calling.
@@ -138,14 +137,6 @@ def run_agent(
     iterations_used, stop_reason (of the last model response), figure_check
     (guardrails.check_figures's report on whether final_answer's numbers
     trace back to tool_calls -- flags only, never alters final_answer).
-
-    TEMPORARY -- test-only, Phase B session 3's Render timeout load test.
-    `extra_system_instruction`, when given, is appended after SYSTEM_PROMPT
-    (never replacing it, so the no-arithmetic rules stay intact) so a test
-    caller can force deterministic worst-case tool-calling behavior instead
-    of relying on a real question happening to need many rounds. Remove this
-    parameter once that load test is done; it must never be a permanent,
-    caller-facing part of run_agent's signature.
     """
     if max_iterations < 1:
         # A configuration error, not a runtime condition -- there's no way to produce even
@@ -153,7 +144,6 @@ def run_agent(
         raise ValueError("max_iterations must be at least 1")
 
     client = client or anthropic.Anthropic()
-    system = SYSTEM_PROMPT + (f"\n\n{extra_system_instruction}" if extra_system_instruction else "")
     messages = [{"role": "user", "content": question}]
     trace_calls = []
     final_answer = None
@@ -164,7 +154,7 @@ def run_agent(
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=system,
+            system=SYSTEM_PROMPT,
             tools=tools.TOOL_DEFINITIONS,
             messages=messages,
         )
