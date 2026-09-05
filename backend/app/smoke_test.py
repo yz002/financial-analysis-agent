@@ -1,17 +1,21 @@
 """
-One-off smoke test for session 2: confirm every stubbed endpoint responds
-with the shape its Pydantic response model promises. Not a permanent pytest
-suite -- this session's scope is "confirm the route shape works end to end,"
-matching db/smoke_test.py's session-1 pattern. Run directly:
+One-off smoke test for sessions 2/3: confirm every endpoint responds with the
+shape its Pydantic response model promises. Not a permanent pytest suite --
+this session's scope is "confirm the route shape works end to end," matching
+db/smoke_test.py's session-1 pattern. Run directly:
 
     backend/.venv/Scripts/python.exe -m app.smoke_test
 
-from inside backend/. /v1/health additionally needs DATABASE_URL set
-(backend/.env) to reach a live Postgres connection; every other endpoint
-needs nothing beyond the app itself.
+from inside backend/. /v1/health needs DATABASE_URL set (backend/.env) to
+reach a live Postgres connection. /v1/ask is wired to a real run_agent call
+as of session 3, so it additionally needs ANTHROPIC_API_KEY and
+SEC_USER_AGENT set, makes a real (billed) Anthropic API call, and writes a
+real conversations/turns row -- every other endpoint still needs nothing
+beyond the app itself.
 """
 
 import sys
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -31,6 +35,7 @@ def main() -> int:
     resp = client.post(
         "/v1/ask",
         json={"question": "What was NVDA's revenue last quarter?"},
+        headers={"X-Install-Id": str(uuid.uuid4())},
     )
     print(f"POST /v1/ask -> {resp.status_code}")
     if resp.status_code != 200:

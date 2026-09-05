@@ -5,3 +5,8 @@ python-dotenv
 fastapi
 uvicorn[standard]
 httpx2
+anthropic
+requests
+pandas
+numpy
+yfinance==1.6.0
