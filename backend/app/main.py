@@ -13,6 +13,7 @@ with DATABASE_URL, ANTHROPIC_API_KEY, and SEC_USER_AGENT set (backend/.env)
 for /v1/health and /v1/ask to reach Postgres/Anthropic/EDGAR respectively.
 """
 
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -66,7 +67,7 @@ def health(response: Response) -> HealthResponse:
     except Exception:
         db_status = "error"
         response.status_code = 503
-    return HealthResponse(status="ok", db=db_status)
+    return HealthResponse(status="ok", db=db_status, commit=os.environ.get("RENDER_GIT_COMMIT"))
 
 
 def _get_or_create_install(session, install_id: uuid.UUID) -> Install:

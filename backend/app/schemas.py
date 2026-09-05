@@ -20,6 +20,11 @@ from pydantic import BaseModel
 class HealthResponse(BaseModel):
     status: str
     db: str
+    # Render sets RENDER_GIT_COMMIT automatically; echoing it here lets a
+    # deploy be confirmed against a specific pushed commit rather than just
+    # "some build is answering" (added for Phase B session 3's Render
+    # timeout validation). None when running outside Render (e.g. locally).
+    commit: str | None = None
 
 
 class AskRequest(BaseModel):
