@@ -13,10 +13,11 @@ with DATABASE_URL, ANTHROPIC_API_KEY, and SEC_USER_AGENT set (backend/.env)
 for /v1/health and /v1/ask to reach Postgres/Anthropic/EDGAR respectively.
 """
 
+import json
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
@@ -24,7 +25,7 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from sqlalchemy import text
 
 from db.base import get_session
-from db.models import Conversation, Install, Turn
+from db.models import Conversation, CsvStatement, Install, Turn
 
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
@@ -36,6 +37,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.agent.agent import DEFAULT_MODEL, run_agent  # noqa: E402 -- see sys.path note above
+from src.analysis.csv_statement import (  # noqa: E402 -- see sys.path note above
+    MAPPABLE_ROLES,
+    RECOMMENDED_CONCEPTS,
+    normalize,
+    validate_mapping,
+)
+from src.data.csv_ingest import MAX_SAMPLE_ROWS  # noqa: E402 -- see sys.path note above
+from src.data.csv_ingest import propose_mapping as generate_mapping_proposal  # noqa: E402
+from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
+    find_period_serial_number_value,
+    raw_csv_from_json,
+    raw_csv_to_json,
+    rows_to_raw_csv,
+)
 
 from .schemas import (
     AskRequest,
@@ -167,48 +182,142 @@ def ask(
     )
 
 
+def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
+    """
+    Load a csv_statements row scoped to the authenticated caller's install_id -- the design
+    doc's stated highest-value security control. A row that doesn't exist and a row that
+    exists but belongs to a different install are indistinguishable to the caller (both 404),
+    so a non-owner can't even confirm a csv_context_id exists.
+    """
+    row = session.get(CsvStatement, csv_context_id)
+    if row is None or row.install_id != install_id:
+        raise HTTPException(status_code=404, detail="csv context not found")
+    return row
+
+
 @app.post("/v1/csv/parse", response_model=CsvParseResponse)
-def csv_parse(request: CsvParseRequest) -> CsvParseResponse:
-    if not request.rows:
-        return CsvParseResponse(
-            csv_context_id=None,
-            columns=[],
-            sample_rows=[],
-            parse_error="no rows provided",
+def csv_parse(
+    request: CsvParseRequest,
+    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+) -> CsvParseResponse:
+    raw, error = rows_to_raw_csv(request.rows, request.filename)
+    if error is not None:
+        return CsvParseResponse(csv_context_id=None, columns=[], sample_rows=[], parse_error=error)
+
+    now = datetime.now(timezone.utc)
+    session = get_session()
+    try:
+        _get_or_create_install(session, x_install_id)
+        session.commit()
+    finally:
+        session.close()
+
+    session = get_session()
+    try:
+        row = CsvStatement(
+            install_id=x_install_id,
+            status="unconfirmed",
+            filename=raw.filename,
+            uploaded_at=now,
+            raw_columns=raw_csv_to_json(raw),
+            expires_at=now + timedelta(hours=1),
         )
-    columns = request.rows[0]
-    sample_rows = request.rows[1:6]
+        session.add(row)
+        session.commit()
+        csv_context_id = row.id
+    finally:
+        session.close()
+
     return CsvParseResponse(
-        csv_context_id=str(uuid.uuid4()),
-        columns=columns,
-        sample_rows=sample_rows,
+        csv_context_id=str(csv_context_id),
+        columns=raw.df.columns.tolist(),
+        sample_rows=raw.df.head(MAX_SAMPLE_ROWS).values.tolist(),
         parse_error=None,
     )
 
 
 @app.post("/v1/csv/{csv_context_id}/propose-mapping", response_model=ProposeMappingResponse)
-def propose_mapping(csv_context_id: str) -> ProposeMappingResponse:
-    return ProposeMappingResponse(
-        proposal=[
-            MappingProposalEntry(
-                csv_column="(stub)",
-                proposed_role="(stub)",
-                rationale="(stub) propose_mapping is not wired up yet.",
-            )
-        ],
-        note=None,
-    )
+def propose_mapping(
+    csv_context_id: uuid.UUID,
+    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+) -> ProposeMappingResponse:
+    session = get_session()
+    try:
+        row = _get_owned_csv_statement(session, csv_context_id, x_install_id)
+        raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
+
+        try:
+            result = generate_mapping_proposal(raw, roles=MAPPABLE_ROLES)
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
+        except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare traceback
+            raise HTTPException(status_code=500, detail=f"propose_mapping failed unexpectedly: {e}") from e
+
+        row.proposed_mapping = [
+            {"csv_column": c.csv_column, "proposed_role": c.proposed_role, "rationale": c.rationale}
+            for c in result.columns
+        ]
+        session.commit()
+
+        return ProposeMappingResponse(
+            proposal=[
+                MappingProposalEntry(
+                    csv_column=c.csv_column, proposed_role=c.proposed_role, rationale=c.rationale
+                )
+                for c in result.columns
+            ],
+            note=result.note,
+        )
+    finally:
+        session.close()
 
 
 @app.post("/v1/csv/{csv_context_id}/confirm", response_model=ConfirmResponse)
-def confirm_mapping(csv_context_id: str, request: ConfirmRequest) -> ConfirmResponse:
-    return ConfirmResponse(
-        confirmed=True,
-        cadence=None,
-        warnings=[],
-        concepts_unavailable=[],
-        errors=[],
-    )
+def confirm_mapping(
+    csv_context_id: uuid.UUID,
+    request: ConfirmRequest,
+    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+) -> ConfirmResponse:
+    session = get_session()
+    try:
+        row = _get_owned_csv_statement(session, csv_context_id, x_install_id)
+        raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
+
+        serial_reason = find_period_serial_number_value(raw, request.mapping)
+        if serial_reason is not None:
+            return ConfirmResponse(confirmed=False, errors=[serial_reason], warnings=[])
+
+        errors = validate_mapping(raw, request.mapping)
+        if errors:
+            return ConfirmResponse(confirmed=False, errors=errors, warnings=[])
+
+        df, errors, warnings = normalize(raw, request.mapping, request.entity_name)
+        if errors:
+            return ConfirmResponse(confirmed=False, errors=errors, warnings=warnings)
+
+        concepts_unavailable = [
+            concept for concept in RECOMMENDED_CONCEPTS if concept not in request.mapping.values()
+        ]
+
+        row.confirmed_mapping = request.mapping
+        row.entity_name = request.entity_name
+        row.cadence = df.attrs["csv_source"]["cadence"]
+        row.statement_data = json.loads(df.to_json(orient="records", date_format="iso"))
+        row.statement_attrs = df.attrs
+        row.status = "confirmed"
+        row.confirmed_at = datetime.now(timezone.utc)
+        row.expires_at = None
+        session.commit()
+
+        return ConfirmResponse(
+            confirmed=True,
+            cadence=row.cadence,
+            warnings=warnings,
+            concepts_unavailable=concepts_unavailable,
+            errors=[],
+        )
+    finally:
+        session.close()
 
 
 @app.post("/v1/install", response_model=InstallResponse)
