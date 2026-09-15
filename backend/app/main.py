@@ -36,11 +36,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.agent import csv_session  # noqa: E402 -- see sys.path note above
 from src.agent.agent import DEFAULT_MODEL, run_agent  # noqa: E402 -- see sys.path note above
 from src.analysis.csv_statement import (  # noqa: E402 -- see sys.path note above
     MAPPABLE_ROLES,
     RECOMMENDED_CONCEPTS,
     normalize,
+    statement_from_records,
     validate_mapping,
 )
 from src.data.csv_ingest import MAX_SAMPLE_ROWS  # noqa: E402 -- see sys.path note above
@@ -111,6 +113,32 @@ def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
     return install
 
 
+def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
+    """
+    Load a csv_statements row scoped to the authenticated caller's install_id -- the design
+    doc's stated highest-value security control. A row that doesn't exist and a row that
+    exists but belongs to a different install are indistinguishable to the caller (both 404),
+    so a non-owner can't even confirm a csv_context_id exists.
+    """
+    row = session.get(CsvStatement, csv_context_id)
+    if row is None or row.install_id != install_id:
+        raise HTTPException(status_code=404, detail="csv context not found")
+    return row
+
+
+def _load_confirmed_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
+    """
+    Like _get_owned_csv_statement, but also requires the row to be confirmed -- an unconfirmed
+    or still-in-progress csv_context_id is just as unusable to /v1/ask as one that doesn't exist
+    or belongs to someone else, so it gets the same 404 rather than a distinct status a caller
+    could use to fish for a context's existence/ownership.
+    """
+    row = _get_owned_csv_statement(session, csv_context_id, install_id)
+    if row.status != "confirmed":
+        raise HTTPException(status_code=404, detail="csv context not found")
+    return row
+
+
 @app.post("/v1/ask", response_model=AskResponse)
 def ask(
     request: AskRequest,
@@ -128,12 +156,33 @@ def ask(
     # existing conversation and seeding its history into run_agent needs the
     # prior_messages plumbing that's session 6's job. Every call here starts
     # a new conversation.
+    csv_context_uuid: uuid.UUID | None = None
+    csv_token = None
+    if request.csv_context_id is not None:
+        try:
+            csv_context_uuid = uuid.UUID(request.csv_context_id)
+        except ValueError as e:
+            # Malformed by construction can't match any row's PK -- same "fail clearly, don't
+            # silently proceed with no active CSV" contract as a well-formed but nonexistent id.
+            raise HTTPException(status_code=404, detail="csv context not found") from e
+        session = get_session()
+        try:
+            csv_row = _load_confirmed_csv_statement(session, csv_context_uuid, x_install_id)
+            df = statement_from_records(csv_row.statement_data, csv_row.statement_attrs)
+        finally:
+            session.close()
+        csv_token = csv_session.set_active_csv_with_token(df)
+
     try:
-        result = run_agent(request.question)
-    except anthropic.APIError as e:
-        raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
-    except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
-        raise HTTPException(status_code=500, detail=f"run_agent failed unexpectedly: {e}") from e
+        try:
+            result = run_agent(request.question)
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
+        except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
+            raise HTTPException(status_code=500, detail=f"run_agent failed unexpectedly: {e}") from e
+    finally:
+        if csv_token is not None:
+            csv_session.reset_active_csv(csv_token)
 
     turn_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
@@ -142,7 +191,7 @@ def ask(
         conversation = Conversation(
             install_id=x_install_id,
             title=request.question[:200],
-            csv_context_id=None,
+            csv_context_id=csv_context_uuid,
             last_turn_at=now,
         )
         session.add(conversation)
@@ -180,19 +229,6 @@ def ask(
         citations=[],  # deferred -- provenance-derived citations are new parsing logic, not minimal wiring
         tool_calls_summary=tool_calls_summary,
     )
-
-
-def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
-    """
-    Load a csv_statements row scoped to the authenticated caller's install_id -- the design
-    doc's stated highest-value security control. A row that doesn't exist and a row that
-    exists but belongs to a different install are indistinguishable to the caller (both 404),
-    so a non-owner can't even confirm a csv_context_id exists.
-    """
-    row = session.get(CsvStatement, csv_context_id)
-    if row is None or row.install_id != install_id:
-        raise HTTPException(status_code=404, detail="csv context not found")
-    return row
 
 
 @app.post("/v1/csv/parse", response_model=CsvParseResponse)

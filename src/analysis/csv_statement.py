@@ -214,6 +214,29 @@ def _detect_cadence(period_ends: list) -> tuple[str | None, str | None]:
     )
 
 
+def statement_from_records(records: list[dict], attrs: dict) -> pd.DataFrame:
+    """
+    Rebuild a normalize()-shaped DataFrame from its JSON round-trip: records is
+    df.to_json(orient="records", date_format="iso") already decoded back into a list of dicts
+    (as the backend's csv_statements.statement_data column stores it), attrs is the
+    corresponding df.attrs dict (csv_statements.statement_attrs). Used by the Sheets Add-on
+    backend to reload a previously confirmed CSV statement before wiring it into
+    src/agent/csv_session.py ahead of a run_agent call -- see backend/app/main.py.
+
+    The JSON round-trip turns period_end/period_start and every {concept}_filed column into
+    ISO-string (or None) values; this re-parses exactly those columns back to datetime64,
+    mirroring normalize()'s own final dtype-coercion block, so the result is dtype-identical to
+    what normalize() itself returns, not just value-identical.
+    """
+    df = pd.DataFrame.from_records(records)
+    df["period_end"] = pd.to_datetime(df["period_end"])
+    df["period_start"] = pd.to_datetime(df["period_start"])
+    for concept in ALL_CONCEPTS:
+        df[f"{concept}_filed"] = pd.to_datetime(df[f"{concept}_filed"])
+    df.attrs = dict(attrs)
+    return df
+
+
 def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None, list, list]:
     """
     Build a get_statement()-shaped DataFrame from `raw` (a csv_ingest.RawCsv) and a
