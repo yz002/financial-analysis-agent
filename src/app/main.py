@@ -649,8 +649,25 @@ def render_csv_upload_section() -> None:
         st.dataframe(normalized, use_container_width=True)
 
 
+def _rehydrate_active_csv() -> None:
+    """Re-assert this rerun's active CSV into csv_session's ContextVar (src/agent/csv_session.py)
+    from the confirmed DataFrame in st.session_state, if one exists. Streamlit reruns the whole
+    script on every interaction, and typically dispatches each rerun to a new thread -- a
+    ContextVar's value doesn't survive from one thread to the next the way the old module-global
+    did, only st.session_state does (it's Streamlit's own cross-rerun store, unrelated to
+    contextvars). So without this, a CSV confirmed on one rerun would appear active only for that
+    one rerun; the very next rerun (e.g. asking a question) would start with no active CSV at all,
+    even though the confirmed statement is still sitting in session_state. Must run at the start
+    of every single rerun, not just the confirm step's -- not conditional on anything just having
+    been clicked."""
+    normalized = st.session_state.get("csv_normalized")
+    if normalized is not None:
+        csv_session.set_active_csv(normalized)
+
+
 def main() -> None:
     st.set_page_config(page_title="FP&A Copilot", page_icon="📊", layout="wide")
+    _rehydrate_active_csv()
 
     if "question_input" not in st.session_state:
         st.session_state.question_input = ""
