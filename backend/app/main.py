@@ -21,11 +21,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
-from fastapi import FastAPI, Header, HTTPException, Response
+import stripe
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from db.base import get_session
-from db.models import Conversation, CsvStatement, Install, Turn, UsageEvent
+from db.models import Conversation, CsvStatement, Install, StripeWebhookEvent, Turn, UsageEvent
 
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
@@ -54,11 +57,13 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
     rows_to_raw_csv,
 )
 
+from . import billing
 from .gating import evaluate_ask_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
     AskResponse,
+    CheckoutSessionResponse,
     ConfirmRequest,
     ConfirmResponse,
     CsvParseRequest,
@@ -477,3 +482,103 @@ def usage(x_install_id: uuid.UUID = Header(alias="X-Install-Id")) -> UsageRespon
         response.monthly_cap = decision.cap
         response.period_ends_at = decision.resets_at
     return response
+
+
+_BILLING_SUCCESS_HTML = (
+    "<!doctype html><html><head><title>Subscription active</title></head>"
+    "<body><h1>Subscription active</h1>"
+    "<p>You can close this tab and return to your Google Sheet.</p></body></html>"
+)
+_BILLING_CANCEL_HTML = (
+    "<!doctype html><html><head><title>Checkout canceled</title></head>"
+    "<body><h1>Checkout canceled</h1>"
+    "<p>No changes were made. You can close this tab and return to your Google Sheet.</p>"
+    "</body></html>"
+)
+
+
+@app.get("/v1/billing/success", response_class=HTMLResponse)
+def billing_success() -> HTMLResponse:
+    return HTMLResponse(_BILLING_SUCCESS_HTML)
+
+
+@app.get("/v1/billing/cancel", response_class=HTMLResponse)
+def billing_cancel() -> HTMLResponse:
+    return HTMLResponse(_BILLING_CANCEL_HTML)
+
+
+@app.post("/v1/billing/checkout-session", response_model=CheckoutSessionResponse)
+def create_checkout_session_route(
+    request: Request,
+    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+) -> CheckoutSessionResponse:
+    session = get_session()
+    try:
+        install = _get_or_create_install(session, x_install_id)
+        session.commit()
+        # Read the fields billing.create_checkout_session needs while the session is still
+        # open -- session.close() below expires/detaches `install`, and the Stripe API call
+        # after that point shouldn't hold a DB connection open anyway.
+        identity_type = install.identity_type
+        identity_value = install.identity_value
+    finally:
+        session.close()
+
+    price_id = os.environ.get("STRIPE_PRICE_ID")
+    if not price_id:
+        raise HTTPException(status_code=500, detail="STRIPE_PRICE_ID is not configured")
+
+    success_url = str(request.base_url) + "v1/billing/success"
+    cancel_url = str(request.base_url) + "v1/billing/cancel"
+    checkout_url = billing.create_checkout_session(
+        x_install_id, identity_type, identity_value, price_id, success_url, cancel_url
+    )
+    return CheckoutSessionResponse(checkout_url=checkout_url)
+
+
+@app.post("/v1/billing/webhook")
+async def stripe_webhook(request: Request) -> dict:
+    """
+    The one endpoint besides /v1/health that does NOT require X-Install-Id -- Stripe calls
+    this directly and cannot carry that header (design doc SS1's explicitly-stated
+    exception). Deliberately async def, the one exception to this file's otherwise
+    consistent sync def (threadpool-dispatched) route convention: it needs await
+    request.body() to read the raw, unparsed body before FastAPI's normal body-parsing
+    machinery touches it -- re-serializing a parsed body breaks Stripe's signature check.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+    if not webhook_secret:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET is not configured")
+
+    try:
+        event = billing.verify_webhook_event(payload, sig_header, webhook_secret)
+    except (ValueError, stripe.SignatureVerificationError):
+        # Rejected before any DB access at all -- an unverified webhook is a real attack
+        # surface (design doc SS7.4).
+        raise HTTPException(status_code=400, detail="invalid Stripe webhook signature")
+
+    session = get_session()
+    try:
+        # Insert-first idempotency guard: the stripe_webhook_events PK is the source of
+        # truth under concurrent/duplicate delivery, not a check-then-insert (which has a
+        # race window). flush() (not commit()) sends the INSERT now, still inside this same
+        # transaction as the mutation below -- so if handle_stripe_event raises, rolling
+        # back undoes BOTH the marker and any partial mutation together, and a Stripe retry
+        # correctly reprocesses from scratch rather than silently no-oping forever against a
+        # marker row that was committed but never actually followed by its mutation.
+        session.add(StripeWebhookEvent(stripe_event_id=event["id"], event_type=event["type"]))
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            return {"received": True}
+        billing.handle_stripe_event(session, event)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    return {"received": True}

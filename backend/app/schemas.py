@@ -104,3 +104,7 @@ class UsageResponse(BaseModel):
     monthly_cap: int | None = None
     period_ends_at: datetime | None = None
     byo_key_required: bool
+
+
+class CheckoutSessionResponse(BaseModel):
+    checkout_url: str
