@@ -2,6 +2,7 @@ sqlalchemy
 alembic
 psycopg[binary]
 python-dotenv
+python-dateutil
 fastapi
 uvicorn[standard]
 httpx2
