@@ -86,12 +86,21 @@ class InstallRequest(BaseModel):
 
 class InstallResponse(BaseModel):
     install_id: str
-    free_window_started_at: datetime
 
 
 class UsageResponse(BaseModel):
+    """
+    Shape per the monetization amendment's SS7.2 (replaces the original free_window_ends_at
+    shape) -- only the fields for the caller's actual tier are populated: free ->
+    questions_today/daily_cap; paid -> questions_this_period/monthly_cap/period_ends_at;
+    byo_key -> none of those.
+    """
+
     install_id: str
-    free_window_ends_at: datetime
-    questions_today: int
-    daily_cap: int
+    tier: Literal["byo_key", "paid", "free"]
+    questions_today: int | None = None
+    daily_cap: int | None = None
+    questions_this_period: int | None = None
+    monthly_cap: int | None = None
+    period_ends_at: datetime | None = None
     byo_key_required: bool

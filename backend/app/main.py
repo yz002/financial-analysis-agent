@@ -25,7 +25,7 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from sqlalchemy import text
 
 from db.base import get_session
-from db.models import Conversation, CsvStatement, Install, Turn
+from db.models import Conversation, CsvStatement, Install, Turn, UsageEvent
 
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
@@ -54,6 +54,7 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
     rows_to_raw_csv,
 )
 
+from .gating import evaluate_ask_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
@@ -90,13 +91,15 @@ def health(response: Response) -> HealthResponse:
 
 def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
     """
-    TEMPORARY shim for Phase B session 3. Real identity issuance (POST
-    /v1/install actually persisting a row, plus the free-tier/rate-limiting
-    logic in the design doc's SS2 that assumes a real install already exists)
-    is session 7's job. Until then, any X-Install-Id a caller presents is
-    accepted at face value and a minimal row is auto-created for it if one
-    doesn't exist yet, purely so conversations.install_id's FK can be
-    satisfied. Session 7 should replace this with a lookup-or-404.
+    TEMPORARY shim, still in place after Phase B session 7a. Real identity issuance
+    (POST /v1/install actually persisting a row, distinguishing google_email from a
+    generated uuid) is still unbuilt -- any X-Install-Id a caller presents is accepted
+    at face value and a minimal row is auto-created for it if one doesn't exist yet,
+    purely so conversations.install_id's FK can be satisfied. Session 7a's three-tier
+    gating logic (app.gating.evaluate_ask_gate) runs against whatever Install row this
+    returns, auto-created or not -- it only needs a byo_key_id/subscriptions/
+    usage_events history to evaluate, not a "real" identity. A later session should
+    replace this with a real lookup-or-404 once /v1/install is implemented.
     """
     install = session.get(Install, install_id)
     now = datetime.now(timezone.utc)
@@ -105,7 +108,6 @@ def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
             install_id=install_id,
             identity_type="uuid",
             identity_value=str(install_id),
-            free_window_started_at=now,
             last_seen_at=now,
         )
         session.add(install)
@@ -153,15 +155,63 @@ def _get_owned_conversation(session, conversation_id: uuid.UUID, install_id: uui
     return row
 
 
+def _update_usage_event_outcome(usage_event_id: int, turn_id: uuid.UUID | None, outcome: str) -> None:
+    """
+    Updates a usage_events row's turn_id/outcome after run_agent resolves (success,
+    hit_iteration_cap, or a handled failure). The row itself is inserted with a
+    placeholder outcome before run_agent is even called (see ask() below), matching
+    design doc SS7.2's "counts against the cap even on a mid-run crash" rationale -- a
+    crash this update never runs for simply leaves that placeholder in place, still
+    correctly counted toward the cap (mislabeled, not miscounted).
+    """
+    session = get_session()
+    try:
+        usage_event = session.get(UsageEvent, usage_event_id)
+        if usage_event is not None:
+            usage_event.turn_id = turn_id
+            usage_event.outcome = outcome
+            session.commit()
+    finally:
+        session.close()
+
+
 @app.post("/v1/ask", response_model=AskResponse)
 def ask(
     request: AskRequest,
     x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
 ) -> AskResponse:
+    gate_now = datetime.now(timezone.utc)
     session = get_session()
     try:
-        _get_or_create_install(session, x_install_id)
+        install = _get_or_create_install(session, x_install_id)
         session.commit()
+        decision = evaluate_ask_gate(session, install, gate_now)
+        if not decision.allowed:
+            session.add(
+                UsageEvent(
+                    install_id=x_install_id,
+                    occurred_at=gate_now,
+                    turn_id=None,
+                    outcome=decision.reject_outcome,
+                )
+            )
+            session.commit()
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": decision.reject_error,
+                    "prompt_byo_key": decision.prompt_byo_key,
+                    "prompt_upgrade": decision.prompt_upgrade,
+                    "resets_at": decision.resets_at.isoformat() if decision.resets_at else None,
+                },
+            )
+        # Placeholder row, inserted before run_agent runs -- see _update_usage_event_outcome.
+        usage_event = UsageEvent(
+            install_id=x_install_id, occurred_at=gate_now, turn_id=None, outcome="answered"
+        )
+        session.add(usage_event)
+        session.commit()
+        usage_event_id = usage_event.id
     finally:
         session.close()
 
@@ -209,8 +259,10 @@ def ask(
         try:
             result = run_agent(request.question, prior_messages=prior_messages)
         except anthropic.APIError as e:
+            _update_usage_event_outcome(usage_event_id, None, "error")
             raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
         except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
+            _update_usage_event_outcome(usage_event_id, None, "error")
             raise HTTPException(status_code=500, detail=f"run_agent failed unexpectedly: {e}") from e
     finally:
         if csv_token is not None:
@@ -249,6 +301,9 @@ def ask(
                 model=DEFAULT_MODEL,
             )
         )
+        usage_event = session.get(UsageEvent, usage_event_id)
+        usage_event.turn_id = turn_id
+        usage_event.outcome = "hit_iteration_cap" if result["hit_iteration_cap"] else "answered"
         session.commit()
         conversation_id = conversation.id
     finally:
@@ -396,18 +451,29 @@ def confirm_mapping(
 
 @app.post("/v1/install", response_model=InstallResponse)
 def install(request: InstallRequest) -> InstallResponse:
-    return InstallResponse(
-        install_id=str(uuid.uuid4()),
-        free_window_started_at=datetime.now(timezone.utc),
-    )
+    return InstallResponse(install_id=str(uuid.uuid4()))
 
 
 @app.get("/v1/usage", response_model=UsageResponse)
-def usage() -> UsageResponse:
-    return UsageResponse(
-        install_id=str(uuid.uuid4()),
-        free_window_ends_at=datetime.now(timezone.utc),
-        questions_today=0,
-        daily_cap=20,
-        byo_key_required=False,
+def usage(x_install_id: uuid.UUID = Header(alias="X-Install-Id")) -> UsageResponse:
+    session = get_session()
+    try:
+        install_row = _get_or_create_install(session, x_install_id)
+        session.commit()
+        decision = evaluate_ask_gate(session, install_row, datetime.now(timezone.utc))
+    finally:
+        session.close()
+
+    response = UsageResponse(
+        install_id=str(x_install_id),
+        tier=decision.tier,
+        byo_key_required=decision.prompt_byo_key,
     )
+    if decision.tier == "free":
+        response.questions_today = decision.questions_used
+        response.daily_cap = decision.cap
+    elif decision.tier == "paid":
+        response.questions_this_period = decision.questions_used
+        response.monthly_cap = decision.cap
+        response.period_ends_at = decision.resets_at
+    return response

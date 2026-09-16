@@ -20,12 +20,24 @@ EXPECTED_TABLES = {
         "install_id",
         "identity_type",
         "identity_value",
-        "free_window_started_at",
         "byo_key_id",
         "created_at",
         "last_seen_at",
     },
     "byo_keys": {"id", "install_id", "encrypted_key", "created_at", "last_used_at", "is_active"},
+    "subscriptions": {
+        "id",
+        "install_id",
+        "stripe_customer_id",
+        "stripe_subscription_id",
+        "status",
+        "current_period_start",
+        "current_period_end",
+        "cancel_at_period_end",
+        "created_at",
+        "updated_at",
+    },
+    "stripe_webhook_events": {"stripe_event_id", "event_type", "processed_at"},
     "csv_statements": {
         "id",
         "install_id",
@@ -75,8 +87,8 @@ def main() -> int:
     with engine.connect() as conn:
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         print(f"alembic_version: {version}")
-        if version != "0001_initial_schema":
-            failures.append(f"expected alembic_version '0001_initial_schema', got {version!r}")
+        if version != "0002_monetization_tiers":
+            failures.append(f"expected alembic_version '0002_monetization_tiers', got {version!r}")
 
     inspector = inspect(engine)
     actual_tables = set(inspector.get_table_names())
@@ -113,7 +125,10 @@ def main() -> int:
             print(f"  - {f}")
         return 1
 
-    print("\nPASS: all 6 tables present with expected columns, both FK directions resolved.")
+    print(
+        f"\nPASS: all {len(EXPECTED_TABLES)} tables present with expected columns, "
+        "both FK directions resolved."
+    )
     return 0
 
 

@@ -3,7 +3,10 @@ ORM models for the Sheets Add-on backend, matching the approved architecture
 design's schema exactly (installs/usage_events/conversations/turns/byo_keys are
 verbatim from the design doc's SS2.4/SS3.1/SS4; csv_statements is a concrete
 elaboration of the design doc's SS1, which described it only conceptually -- see
-this session's plan for the reasoning behind every column there).
+this session's plan for the reasoning behind every column there). subscriptions/
+stripe_webhook_events and the updated usage_event_outcome enum are from the
+monetization amendment's SS7.3 (Phase B session 7a); installs.free_window_started_at,
+from the amendment's superseded two-tier model, is dropped as of that session.
 
 This module defines Base.metadata (used by Alembic's env.py as the
 autogenerate-comparison target) but the initial migration
@@ -44,8 +47,8 @@ UsageEventOutcome = Enum(
     "answered",
     "hit_iteration_cap",
     "error",
-    "rejected_free_window",
     "rejected_daily_cap",
+    "rejected_monthly_cap",
     name="usage_event_outcome",
 )
 CsvStatementStatus = Enum("unconfirmed", "confirmed", name="csv_statement_status")
@@ -62,7 +65,6 @@ class Install(Base):
     )
     identity_type: Mapped[str] = mapped_column(InstallIdentityType, nullable=False)
     identity_value: Mapped[str] = mapped_column(Text, nullable=False)
-    free_window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Circular FK with byo_keys -- see module docstring. Deferred via use_alter in the
     # hand-written migration; use_alter=True here keeps metadata-driven creation consistent.
     byo_key_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -95,6 +97,46 @@ class ByoKey(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     install: Mapped["Install"] = relationship(back_populates="byo_keys", foreign_keys=[install_id])
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    install_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("installs.install_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    stripe_customer_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    stripe_subscription_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Stripe's own status values, stored verbatim -- deliberately Text, not a native
+    # Postgres enum (design doc SS7.3): a Stripe status this design didn't anticipate
+    # shouldn't silently fail to fit an enum we'd have to migrate to extend.
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    current_period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StripeWebhookEvent(Base):
+    __tablename__ = "stripe_webhook_events"
+
+    # Stripe's own evt_... id -- the idempotency guard's natural key (session 7b writes
+    # to this table; created now, empty, matching this project's pattern of standing up a
+    # table in the session that designs its schema even before something populates it).
+    stripe_event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class CsvStatement(Base):
