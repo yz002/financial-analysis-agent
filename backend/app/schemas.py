@@ -108,3 +108,13 @@ class UsageResponse(BaseModel):
 
 class CheckoutSessionResponse(BaseModel):
     checkout_url: str
+
+
+class ByoKeyRequest(BaseModel):
+    api_key: str
+
+
+class ByoKeyResponse(BaseModel):
+    # Deliberately no key material or byo_keys.id echoed back -- the caller already has
+    # the plaintext key it just sent, and the row's id has no use on the client side.
+    registered: bool

@@ -851,3 +851,16 @@
   93.9% (663/706). Reconciled during a pre-demo audit follow-up: README now states 93.9%
   (663/706), matching this file exactly — no new eval run was needed, since this file already
   held the authoritative, current number.
+
+- **The dev/test Render Postgres instance (`backend/tests/`, via `DATABASE_URL`) has
+  intermittently dropped connections under sustained sequential test-suite load, across
+  multiple Phase B sessions now** — `psycopg.OperationalError: connection failed: ... SSL
+  connection has been closed unexpectedly`, surfacing as 1-3 unrelated test failures deep into
+  a full `pytest tests/` run (10+ minutes against this free/starter-tier instance) that
+  disappear when the same failing test file is re-run in isolation immediately after. Always
+  confirmed transient this way, never a real regression — every occurrence so far has been an
+  infra blip in the connection pool talking to Render's Postgres, not a bug in the code under
+  test. Recorded here so this is recognized as a known characteristic of the dev DB tier going
+  forward, rather than re-diagnosed as a new concern each session: if a full-suite run shows a
+  handful of failures with this exact error signature, re-run just the affected file(s) before
+  assuming a real regression.

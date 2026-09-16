@@ -14,6 +14,7 @@ for /v1/health and /v1/ask to reach Postgres/Anthropic/EDGAR respectively.
 """
 
 import json
+import logging
 import os
 import sys
 import uuid
@@ -24,11 +25,19 @@ import anthropic
 import stripe
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
 
 from db.base import get_session
-from db.models import Conversation, CsvStatement, Install, StripeWebhookEvent, Turn, UsageEvent
+from db.models import ByoKey, Conversation, CsvStatement, Install, StripeWebhookEvent, Turn, UsageEvent
+
+# No logging framework/handler config exists yet in this project -- this module-level
+# logger relies on Python's logging "handler of last resort" (WARNING+ to stderr with no
+# other setup) until a real one is added. logger.exception(...) below is still the right
+# call now, not a premature abstraction: it's the stdlib's own idiom for "log this with a
+# traceback," and switching to a configured handler later is a config change, not a
+# call-site change.
+logger = logging.getLogger(__name__)
 
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
@@ -58,11 +67,14 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
 )
 
 from . import billing
+from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
 from .gating import evaluate_ask_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
     AskResponse,
+    ByoKeyRequest,
+    ByoKeyResponse,
     CheckoutSessionResponse,
     ConfirmRequest,
     ConfirmResponse,
@@ -210,6 +222,25 @@ def ask(
                     "resets_at": decision.resets_at.isoformat() if decision.resets_at else None,
                 },
             )
+
+        byo_client: anthropic.Anthropic | None = None
+        if decision.tier == "byo_key":
+            byo_key = session.get(ByoKey, install.byo_key_id)
+            if byo_key is None:
+                # evaluate_ask_gate just confirmed an active row exists -- same session,
+                # no intervening commit could have removed it. Treat as an internal
+                # inconsistency rather than silently falling back to the master key.
+                raise HTTPException(status_code=500, detail="BYO key lookup failed unexpectedly.")
+            try:
+                raw_key = decrypt_byo_key(byo_key.encrypted_key)
+            except Exception as e:  # noqa: BLE001 -- never leak key material via a raised exception
+                raise HTTPException(
+                    status_code=500,
+                    detail="Stored BYO key could not be decrypted; please re-register it.",
+                ) from e
+            byo_client = anthropic.Anthropic(api_key=raw_key)
+            byo_key.last_used_at = gate_now
+
         # Placeholder row, inserted before run_agent runs -- see _update_usage_event_outcome.
         usage_event = UsageEvent(
             install_id=x_install_id, occurred_at=gate_now, turn_id=None, outcome="answered"
@@ -262,12 +293,48 @@ def ask(
 
     try:
         try:
-            result = run_agent(request.question, prior_messages=prior_messages)
+            # client is only passed when a BYO key applies -- omitting the kwarg entirely
+            # otherwise (rather than passing client=None) keeps run_agent's own default
+            # (anthropic.Anthropic() against the master ANTHROPIC_API_KEY) in charge of
+            # client construction for the free/paid tiers, unchanged from before this
+            # session.
+            run_agent_kwargs = {"prior_messages": prior_messages}
+            if byo_client is not None:
+                run_agent_kwargs["client"] = byo_client
+            result = run_agent(request.question, **run_agent_kwargs)
+        except anthropic.AuthenticationError as e:
+            # Caught ahead of the broader anthropic.APIError handler below (it's a
+            # subclass -- order matters). A key-rejection error is the one failure mode
+            # this session's BYO-key work makes concretely dangerous: the request that
+            # failed just carried either this caller's own BYO key or this server's
+            # master key, so str(e)/e.args must never reach the HTTP response even
+            # though, empirically, the Anthropic SDK's own message here is built from the
+            # API's JSON error body, not an echo of the request -- a defensive posture
+            # against a future SDK/proxy/network-layer change, not a reaction to an
+            # observed leak. The real exception (with traceback) is still logged
+            # server-side, so debuggability isn't lost, only what reaches the caller.
+            _update_usage_event_outcome(usage_event_id, None, "error")
+            logger.exception("Anthropic authentication error in /v1/ask (tier=%s)", decision.tier)
+            if byo_client is not None:
+                detail = "Your Anthropic API key was rejected. Please re-register a valid key."
+            else:
+                detail = "Anthropic API authentication failed."
+            raise HTTPException(status_code=502, detail=detail) from e
         except anthropic.APIError as e:
             _update_usage_event_outcome(usage_event_id, None, "error")
+            logger.exception("Anthropic API error in /v1/ask")
             raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
         except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
+            # str(e) is kept here deliberately, not removed as part of this fix -- see
+            # this session's plan/summary for the scoping reasoning: this catch-all's
+            # failures (a tool-execution bug, a pandas/EDGAR error inside run_agent, etc.)
+            # have no plausible path to carrying API key material, unlike the
+            # authentication-specific case above. A blanket "never include str(e)"
+            # policy across every error response in this codebase is a real option worth
+            # considering, but a bigger change than this narrowly-scoped fix -- left for
+            # a dedicated future audit rather than assumed here.
             _update_usage_event_outcome(usage_event_id, None, "error")
+            logger.exception("run_agent failed unexpectedly in /v1/ask")
             raise HTTPException(status_code=500, detail=f"run_agent failed unexpectedly: {e}") from e
     finally:
         if csv_token is not None:
@@ -482,6 +549,44 @@ def usage(x_install_id: uuid.UUID = Header(alias="X-Install-Id")) -> UsageRespon
         response.monthly_cap = decision.cap
         response.period_ends_at = decision.resets_at
     return response
+
+
+@app.post("/v1/byo-key", response_model=ByoKeyResponse)
+def register_byo_key(
+    request: ByoKeyRequest, x_install_id: uuid.UUID = Header(alias="X-Install-Id")
+) -> ByoKeyResponse:
+    """
+    Registers (or rotates) the caller's own Anthropic API key. A new key always replaces
+    any currently active one for this install -- soft-deactivating the old byo_keys row
+    rather than rejecting the request -- matching is_active's stated audit-trail purpose
+    (design doc SS4) and giving a caller a one-call way to rotate a leaked/expired key,
+    since there's no separate removal endpoint (out of scope for Phase B session 8; see
+    NOTES.md).
+    """
+    if not is_valid_byo_key_format(request.api_key):
+        raise HTTPException(
+            status_code=422, detail="That doesn't look like a valid Anthropic API key."
+        )
+    encrypted = encrypt_byo_key(request.api_key)
+
+    session = get_session()
+    try:
+        install = _get_or_create_install(session, x_install_id)
+        session.flush()
+        session.execute(
+            update(ByoKey)
+            .where(ByoKey.install_id == install.install_id, ByoKey.is_active.is_(True))
+            .values(is_active=False)
+        )
+        new_key = ByoKey(install_id=install.install_id, encrypted_key=encrypted, is_active=True)
+        session.add(new_key)
+        session.flush()  # populate new_key.id before repointing the FK below
+        install.byo_key_id = new_key.id
+        session.commit()
+    finally:
+        session.close()
+
+    return ByoKeyResponse(registered=True)
 
 
 _BILLING_SUCCESS_HTML = (
