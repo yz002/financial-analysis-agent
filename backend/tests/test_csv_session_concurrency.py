@@ -109,7 +109,7 @@ def test_concurrent_ask_calls_never_cross_installs_csv_data(install_ids, monkeyp
 
     barrier = threading.Barrier(2, timeout=10)
 
-    def fake_run_agent(question):
+    def fake_run_agent(question, prior_messages=None):
         # Read this request's context-local active CSV once immediately...
         before_df = csv_session.get_active_csv()
         before_entity = before_df.attrs["entity_name"] if before_df is not None else None
@@ -170,7 +170,7 @@ def test_ask_with_unconfirmed_csv_context_id_is_refused(install_ids, monkeypatch
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(install_id, csv_context_id)
@@ -185,7 +185,7 @@ def test_ask_with_foreign_csv_context_id_is_refused(install_ids, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(other_id, csv_context_id)
@@ -198,7 +198,7 @@ def test_ask_with_nonexistent_csv_context_id_is_refused(install_ids, monkeypatch
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(install_id, str(uuid.uuid4()))

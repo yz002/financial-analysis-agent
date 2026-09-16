@@ -118,6 +118,7 @@ def run_agent(
     model: str = DEFAULT_MODEL,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    prior_messages: list[dict] | None = None,
 ) -> dict:
     """
     Answer `question` using the Claude API with tool calling.
@@ -126,6 +127,16 @@ def run_agent(
     them via tools.execute_tool and feed the results back -- up to
     `max_iterations` rounds. Returns as soon as a response comes back with
     no tool calls (stop_reason != "tool_use").
+
+    `prior_messages`, when given, seeds the conversation with raw prior turns
+    (real Anthropic-API-shaped assistant tool_use / user tool_result blocks --
+    see the Sheets backend design doc's SS3.2) instead of starting fresh with
+    just `question`. Never pass a model-generated summary here: doing so would
+    let a previously tool-sourced figure re-enter the conversation as prose
+    indistinguishable from a recalled (ungrounded) one, with no way for
+    guardrails.check_figures to catch it on a later turn. Additive and
+    backward-compatible -- omitting it (the default, `None`) reproduces
+    exactly today's single-question seeding.
 
     Hitting `max_iterations` without a natural stop doesn't fail silently:
     the returned dict's `hit_iteration_cap` is True and `final_answer`
@@ -144,7 +155,9 @@ def run_agent(
         raise ValueError("max_iterations must be at least 1")
 
     client = client or anthropic.Anthropic()
-    messages = [{"role": "user", "content": question}]
+    # `+` builds a new list -- prior_messages itself is never mutated by this loop's
+    # subsequent .append() calls, so a caller can safely reuse/inspect it afterward.
+    messages = (prior_messages or []) + [{"role": "user", "content": question}]
     trace_calls = []
     final_answer = None
     hit_cap = False

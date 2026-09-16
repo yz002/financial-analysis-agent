@@ -207,6 +207,49 @@ def test_csv_and_ticker_tool_calls_in_one_round(monkeypatch):
     assert result["final_answer"] == "Comparison done."
 
 
+def test_prior_messages_none_is_backward_compatible(monkeypatch):
+    """Every existing zero-argument run_agent call site (Streamlit, every other test in this
+    file) must be completely unaffected by the new prior_messages parameter -- omitting it, or
+    passing it explicitly as None, must send exactly today's single-question messages list."""
+    monkeypatch.setattr(tools, "execute_tool", lambda name, tool_input: json.dumps({"ok": True}))
+    responses = [_response([_text_block("Straight answer.")], "end_turn")]
+    client = _client_with_responses(responses)
+
+    agent.run_agent("What is MSFT trading at?", client=client)
+
+    assert client.messages.create.call_args_list[0].kwargs["messages"] == [
+        {"role": "user", "content": "What is MSFT trading at?"}
+    ]
+
+    client2 = _client_with_responses([_response([_text_block("Straight answer.")], "end_turn")])
+    agent.run_agent("What is MSFT trading at?", client=client2, prior_messages=None)
+
+    assert client2.messages.create.call_args_list[0].kwargs["messages"] == [
+        {"role": "user", "content": "What is MSFT trading at?"}
+    ]
+
+
+def test_prior_messages_seeds_conversation_history(monkeypatch):
+    monkeypatch.setattr(tools, "execute_tool", lambda name, tool_input: json.dumps({"ok": True}))
+    responses = [_response([_text_block("Follow-up answer.")], "end_turn")]
+    client = _client_with_responses(responses)
+
+    prior_messages = [
+        {"role": "user", "content": "What was MSFT revenue last quarter?"},
+        {"role": "assistant", "content": "MSFT revenue was $X."},
+    ]
+    prior_messages_snapshot = json.loads(json.dumps(prior_messages))
+
+    agent.run_agent("And how did that compare YoY?", client=client, prior_messages=prior_messages)
+
+    sent_messages = client.messages.create.call_args_list[0].kwargs["messages"]
+    assert sent_messages == prior_messages + [
+        {"role": "user", "content": "And how did that compare YoY?"}
+    ]
+    # The caller's list must not be mutated by the loop's subsequent .append() calls.
+    assert prior_messages == prior_messages_snapshot
+
+
 def test_system_prompt_covers_csv_comparison_and_market_data_scope():
     """Cheap regression for "forgot to add this instruction" mistakes -- doesn't test that the
     model actually follows these instructions (checked live, per the Session 2 plan's test-scope

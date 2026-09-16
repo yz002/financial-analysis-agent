@@ -54,6 +54,7 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
     rows_to_raw_csv,
 )
 
+from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
     AskResponse,
@@ -139,6 +140,19 @@ def _load_confirmed_csv_statement(session, csv_context_id: uuid.UUID, install_id
     return row
 
 
+def _get_owned_conversation(session, conversation_id: uuid.UUID, install_id: uuid.UUID) -> Conversation:
+    """
+    Load a conversations row scoped to the authenticated caller's install_id --
+    symmetric to _get_owned_csv_statement above, for the same anti-enumeration reason: a
+    nonexistent conversation_id and one owned by a different install are indistinguishable
+    to the caller (both 404).
+    """
+    row = session.get(Conversation, conversation_id)
+    if row is None or row.install_id != install_id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return row
+
+
 @app.post("/v1/ask", response_model=AskResponse)
 def ask(
     request: AskRequest,
@@ -151,11 +165,29 @@ def ask(
     finally:
         session.close()
 
-    # request.conversation_id is accepted for shape-compatibility with the
-    # design doc's endpoint contract but ignored this session: continuing an
-    # existing conversation and seeding its history into run_agent needs the
-    # prior_messages plumbing that's session 6's job. Every call here starts
-    # a new conversation.
+    conversation_uuid: uuid.UUID | None = None
+    prior_messages: list[dict] | None = None
+    if request.conversation_id is not None:
+        try:
+            conversation_uuid = uuid.UUID(request.conversation_id)
+        except ValueError as e:
+            # Same "fail clearly, don't silently proceed" contract as csv_context_id below.
+            raise HTTPException(status_code=404, detail="conversation not found") from e
+        session = get_session()
+        try:
+            _get_owned_conversation(session, conversation_uuid, x_install_id)
+            recent_turns = (
+                session.query(Turn)
+                .filter(Turn.conversation_id == conversation_uuid)
+                .order_by(Turn.created_at.desc())
+                .limit(MAX_PRIOR_TURNS)
+                .all()
+            )
+            recent_turns.reverse()  # oldest to newest, for seeding order
+            prior_messages = build_prior_messages(recent_turns)
+        finally:
+            session.close()
+
     csv_context_uuid: uuid.UUID | None = None
     csv_token = None
     if request.csv_context_id is not None:
@@ -175,7 +207,7 @@ def ask(
 
     try:
         try:
-            result = run_agent(request.question)
+            result = run_agent(request.question, prior_messages=prior_messages)
         except anthropic.APIError as e:
             raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
         except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
@@ -188,13 +220,19 @@ def ask(
     now = datetime.now(timezone.utc)
     session = get_session()
     try:
-        conversation = Conversation(
-            install_id=x_install_id,
-            title=request.question[:200],
-            csv_context_id=csv_context_uuid,
-            last_turn_at=now,
-        )
-        session.add(conversation)
+        if conversation_uuid is not None:
+            # Ownership was already verified above; re-fetch in this block's own session
+            # rather than reusing the earlier (closed) session's now-detached instance.
+            conversation = session.get(Conversation, conversation_uuid)
+            conversation.last_turn_at = now
+        else:
+            conversation = Conversation(
+                install_id=x_install_id,
+                title=request.question[:200],
+                csv_context_id=csv_context_uuid,
+                last_turn_at=now,
+            )
+            session.add(conversation)
         session.flush()  # populate conversation.id before the Turn below references it
 
         session.add(
