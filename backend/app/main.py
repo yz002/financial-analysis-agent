@@ -234,9 +234,27 @@ def ask(
             try:
                 raw_key = decrypt_byo_key(byo_key.encrypted_key)
             except Exception as e:  # noqa: BLE001 -- never leak key material via a raised exception
+                # A decrypt failure here almost always means BYO_KEY_ENCRYPTION_KEY was
+                # rotated out from under this ciphertext (backend/SECURITY.md's Fernet
+                # rotation runbook is a hard cutover -- old ciphertext is unrecoverable by
+                # design). Deactivate the row so this doesn't repeat on every subsequent
+                # request: the next /v1/ask for this install falls through
+                # gating.evaluate_ask_gate's byo_key.is_active check straight to the
+                # paid/free tier instead of hitting this same dead end again.
+                deactivate_session = get_session()
+                try:
+                    row = deactivate_session.get(ByoKey, byo_key.id)
+                    if row is not None:
+                        row.is_active = False
+                        deactivate_session.commit()
+                finally:
+                    deactivate_session.close()
                 raise HTTPException(
                     status_code=500,
-                    detail="Stored BYO key could not be decrypted; please re-register it.",
+                    detail=(
+                        "Stored BYO key could not be decrypted and has been deactivated; "
+                        "please re-register it."
+                    ),
                 ) from e
             byo_client = anthropic.Anthropic(api_key=raw_key)
             byo_key.last_used_at = gate_now
@@ -321,21 +339,21 @@ def ask(
                 detail = "Anthropic API authentication failed."
             raise HTTPException(status_code=502, detail=detail) from e
         except anthropic.APIError as e:
+            # str(e) is deliberately kept out of the response (session 10's security
+            # hardening pass) -- the full exception, including any embedded request/
+            # response detail, is already captured server-side by logger.exception below.
             _update_usage_event_outcome(usage_event_id, None, "error")
             logger.exception("Anthropic API error in /v1/ask")
-            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
+            raise HTTPException(status_code=502, detail="Anthropic API error.") from e
         except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
-            # str(e) is kept here deliberately, not removed as part of this fix -- see
-            # this session's plan/summary for the scoping reasoning: this catch-all's
-            # failures (a tool-execution bug, a pandas/EDGAR error inside run_agent, etc.)
-            # have no plausible path to carrying API key material, unlike the
-            # authentication-specific case above. A blanket "never include str(e)"
-            # policy across every error response in this codebase is a real option worth
-            # considering, but a bigger change than this narrowly-scoped fix -- left for
-            # a dedicated future audit rather than assumed here.
+            # str(e) used to reach this response; session 10's security hardening pass
+            # closed that gap for every handler in this route, not just the
+            # authentication-specific one -- a tool-execution bug, a pandas/EDGAR error,
+            # etc. inside run_agent could in principle embed request detail, and the full
+            # exception is already captured server-side by logger.exception below.
             _update_usage_event_outcome(usage_event_id, None, "error")
             logger.exception("run_agent failed unexpectedly in /v1/ask")
-            raise HTTPException(status_code=500, detail=f"run_agent failed unexpectedly: {e}") from e
+            raise HTTPException(status_code=500, detail="run_agent failed unexpectedly.") from e
     finally:
         if csv_token is not None:
             csv_session.reset_active_csv(csv_token)

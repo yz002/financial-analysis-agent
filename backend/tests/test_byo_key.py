@@ -348,3 +348,103 @@ def test_ask_free_tier_passes_no_client_kwarg(install_ids, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     assert "client" not in captured
+
+
+# --- Session 10 security hardening: decrypt-failure recovery + str(e) leak fixes --------
+
+
+def test_ask_byo_key_decrypt_failure_deactivates_key_and_recovers_next_request(
+    install_ids, monkeypatch
+):
+    """A decrypt failure (the shape a Fernet key rotation produces against old ciphertext,
+    per backend/SECURITY.md's hard-cutover runbook) must deactivate the row rather than
+    fail the same way on every subsequent request -- the next /v1/ask for this install
+    should fall through gating.evaluate_ask_gate's byo_key.is_active check to the free
+    tier instead of repeating the decrypt error forever."""
+    install_id = _new_install_id(install_ids)
+    session = get_session()
+    try:
+        install = _seed_install(session, install_id)
+        byo_key = ByoKey(
+            install_id=install.install_id,
+            encrypted_key=encrypt_byo_key(_VALID_KEY),
+            is_active=True,
+        )
+        session.add(byo_key)
+        session.flush()
+        install.byo_key_id = byo_key.id
+        session.commit()
+        byo_key_id = byo_key.id
+    finally:
+        session.close()
+
+    # Simulate BYO_KEY_ENCRYPTION_KEY having been rotated out from under this
+    # already-encrypted row -- decrypt_byo_key now raises against a different key.
+    monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    resp = client.post(
+        "/v1/ask", json={"question": "What was MSFT revenue?"}, headers={"X-Install-Id": install_id}
+    )
+    assert resp.status_code == 500, resp.text
+    assert "deactivated" in resp.json()["detail"]
+
+    session = get_session()
+    try:
+        byo_key = session.get(ByoKey, byo_key_id)
+        assert byo_key.is_active is False
+    finally:
+        session.close()
+
+    captured: dict = {}
+
+    def _fake_run_agent(question, **kwargs):
+        captured.update(kwargs)
+        return _fake_result(question)
+
+    monkeypatch.setattr(app_main, "run_agent", _fake_run_agent)
+
+    resp2 = client.post(
+        "/v1/ask", json={"question": "What was MSFT revenue?"}, headers={"X-Install-Id": install_id}
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert "client" not in captured  # free tier now, not byo_key -- master client used
+
+
+def test_ask_generic_api_error_does_not_leak_exception_detail(install_ids, monkeypatch):
+    """anthropic.APIError (not the AuthenticationError subclass already covered above)
+    must not have str(e) reach the HTTP response either -- session 10's security
+    hardening fix applies to every handler in this route, not just the auth-specific
+    one."""
+    install_id = _new_install_id(install_ids)
+    marker = "internal-anthropic-error-detail-should-not-leak"
+
+    def _raise_api_error(question, prior_messages=None):
+        raise anthropic.APIError(marker, _httpx_request(), body=None)
+
+    monkeypatch.setattr(app_main, "run_agent", _raise_api_error)
+
+    resp = client.post(
+        "/v1/ask", json={"question": "What was MSFT revenue?"}, headers={"X-Install-Id": install_id}
+    )
+    assert resp.status_code == 502, resp.text
+    assert marker not in resp.text
+    assert resp.json()["detail"] == "Anthropic API error."
+
+
+def test_ask_generic_exception_does_not_leak_exception_detail(install_ids, monkeypatch):
+    """A non-Anthropic failure inside run_agent (a tool-execution bug, a pandas/EDGAR
+    error, etc.) must not have str(e) reach the HTTP response either."""
+    install_id = _new_install_id(install_ids)
+    marker = "internal-tool-failure-detail-should-not-leak"
+
+    def _raise_generic_error(question, prior_messages=None):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(app_main, "run_agent", _raise_generic_error)
+
+    resp = client.post(
+        "/v1/ask", json={"question": "What was MSFT revenue?"}, headers={"X-Install-Id": install_id}
+    )
+    assert resp.status_code == 500, resp.text
+    assert marker not in resp.text
+    assert resp.json()["detail"] == "run_agent failed unexpectedly."

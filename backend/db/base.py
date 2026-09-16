@@ -45,7 +45,12 @@ class Base(DeclarativeBase):
 
 
 def get_engine() -> Engine:
-    return create_engine(get_database_url())
+    # hide_parameters=True (session 10's security hardening pass): an uncaught DB error's
+    # traceback would otherwise include SQLAlchemy's default compiled-SQL-plus-bind-params
+    # rendering, which for a Turn insert means raw question/final_answer text landing in
+    # whatever log sink eventually captures it -- no aggregation is wired up yet, but this
+    # is cheap to set now rather than only once that changes.
+    return create_engine(get_database_url(), hide_parameters=True)
 
 
 def get_session() -> Session:
