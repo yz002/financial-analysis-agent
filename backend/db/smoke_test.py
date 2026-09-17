@@ -16,18 +16,35 @@ from sqlalchemy import inspect, text
 from .base import get_engine
 
 EXPECTED_TABLES = {
-    "installs": {
-        "install_id",
-        "identity_type",
-        "identity_value",
+    "accounts": {
+        "id",
+        "primary_email",
         "byo_key_id",
         "created_at",
         "last_seen_at",
     },
-    "byo_keys": {"id", "install_id", "encrypted_key", "created_at", "last_used_at", "is_active"},
+    "linked_identities": {
+        "id",
+        "account_id",
+        "provider",
+        "provider_subject",
+        "provider_email",
+        "created_at",
+    },
+    "sessions": {
+        "id",
+        "account_id",
+        "token_hash",
+        "created_via_provider",
+        "created_at",
+        "last_used_at",
+        "expires_at",
+        "revoked_at",
+    },
+    "byo_keys": {"id", "account_id", "encrypted_key", "created_at", "last_used_at", "is_active"},
     "subscriptions": {
         "id",
-        "install_id",
+        "account_id",
         "stripe_customer_id",
         "stripe_subscription_id",
         "status",
@@ -40,7 +57,7 @@ EXPECTED_TABLES = {
     "stripe_webhook_events": {"stripe_event_id", "event_type", "processed_at"},
     "csv_statements": {
         "id",
-        "install_id",
+        "account_id",
         "status",
         "filename",
         "uploaded_at",
@@ -57,7 +74,7 @@ EXPECTED_TABLES = {
     },
     "conversations": {
         "id",
-        "install_id",
+        "account_id",
         "title",
         "csv_context_id",
         "created_at",
@@ -76,7 +93,7 @@ EXPECTED_TABLES = {
         "model",
         "created_at",
     },
-    "usage_events": {"id", "install_id", "occurred_at", "turn_id", "outcome"},
+    "usage_events": {"id", "account_id", "occurred_at", "turn_id", "outcome"},
 }
 
 
@@ -87,8 +104,8 @@ def main() -> int:
     with engine.connect() as conn:
         version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         print(f"alembic_version: {version}")
-        if version != "0002_monetization_tiers":
-            failures.append(f"expected alembic_version '0002_monetization_tiers', got {version!r}")
+        if version != "0003_oauth_identity":
+            failures.append(f"expected alembic_version '0003_oauth_identity', got {version!r}")
 
     inspector = inspect(engine)
     actual_tables = set(inspector.get_table_names())
@@ -106,18 +123,18 @@ def main() -> int:
             failures.append(f"{table}: unexpected extra columns {sorted(extra)}")
         print(f"{table}: {len(actual_columns)} columns OK")
 
-    # Confirm both directions of the installs<->byo_keys circular FK resolved.
-    installs_fks = {fk["referred_table"] for fk in inspector.get_foreign_keys("installs")}
+    # Confirm both directions of the accounts<->byo_keys circular FK resolved.
+    accounts_fks = {fk["referred_table"] for fk in inspector.get_foreign_keys("accounts")}
     byo_keys_fks = {fk["referred_table"] for fk in inspector.get_foreign_keys("byo_keys")}
-    if "byo_keys" not in installs_fks:
-        failures.append("installs.byo_key_id -> byo_keys.id FK did not land")
-    if "installs" not in byo_keys_fks:
-        failures.append("byo_keys.install_id -> installs.install_id FK did not land")
+    if "byo_keys" not in accounts_fks:
+        failures.append("accounts.byo_key_id -> byo_keys.id FK did not land")
+    if "accounts" not in byo_keys_fks:
+        failures.append("byo_keys.account_id -> accounts.id FK did not land")
 
     # Confirm the composite usage_events index.
     usage_indexes = {ix["name"] for ix in inspector.get_indexes("usage_events")}
-    if "ix_usage_events_install_id_occurred_at" not in usage_indexes:
-        failures.append("usage_events composite (install_id, occurred_at) index is missing")
+    if "ix_usage_events_account_id_occurred_at" not in usage_indexes:
+        failures.append("usage_events composite (account_id, occurred_at) index is missing")
 
     if failures:
         print("\nFAIL:")

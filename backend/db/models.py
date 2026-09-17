@@ -1,12 +1,20 @@
 """
 ORM models for the Sheets Add-on backend, matching the approved architecture
-design's schema exactly (installs/usage_events/conversations/turns/byo_keys are
+design's schema exactly (usage_events/conversations/turns/byo_keys are
 verbatim from the design doc's SS2.4/SS3.1/SS4; csv_statements is a concrete
 elaboration of the design doc's SS1, which described it only conceptually -- see
 this session's plan for the reasoning behind every column there). subscriptions/
 stripe_webhook_events and the updated usage_event_outcome enum are from the
 monetization amendment's SS7.3 (Phase B session 7a); installs.free_window_started_at,
-from the amendment's superseded two-tier model, is dropped as of that session.
+from the amendment's superseded two-tier model, was dropped as of that session.
+
+accounts/linked_identities/sessions are from the OAuth identity design doc's SS4
+(Phase C session 1), replacing installs entirely: every account is now
+provider-verified by construction, so the old identity_type/identity_value split
+has nothing left to distinguish. Every install_id FK on byo_keys/subscriptions/
+csv_statements/conversations/usage_events is renamed account_id and repointed at
+accounts.id as part of the same session -- a rename-and-repoint, not a redesign of
+those tables.
 
 This module defines Base.metadata (used by Alembic's env.py as the
 autogenerate-comparison target) but the initial migration
@@ -15,8 +23,8 @@ these models, specifically so every column/type/constraint is a deliberate
 choice rather than whatever autogenerate happens to infer. Keep the two in
 sync by hand for now.
 
-installs.byo_key_id and byo_keys.install_id are a circular foreign-key pair --
-each table references the other. use_alter=True on installs.byo_key_id's
+accounts.byo_key_id and byo_keys.account_id are a circular foreign-key pair --
+each table references the other. use_alter=True on accounts.byo_key_id's
 ForeignKey tells SQLAlchemy to defer that constraint to a post-creation ALTER
 TABLE if Base.metadata.create_all() is ever invoked directly (e.g. in a test),
 matching the same two-step ordering the hand-written migration uses.
@@ -42,7 +50,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
-InstallIdentityType = Enum("google_email", "uuid", name="install_identity_type")
 UsageEventOutcome = Enum(
     "answered",
     "hit_iteration_cap",
@@ -54,22 +61,19 @@ UsageEventOutcome = Enum(
 CsvStatementStatus = Enum("unconfirmed", "confirmed", name="csv_statement_status")
 
 
-class Install(Base):
-    __tablename__ = "installs"
-    __table_args__ = (
-        UniqueConstraint("identity_type", "identity_value", name="uq_installs_identity"),
-    )
+class Account(Base):
+    __tablename__ = "accounts"
 
-    install_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    identity_type: Mapped[str] = mapped_column(InstallIdentityType, nullable=False)
-    identity_value: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Informational/Stripe-prefill convenience only, set once at account creation from
+    # whichever provider identity created it -- never a security boundary (sessions/account_id
+    # are), so it's deliberately not kept in sync if a person's provider email later changes.
+    primary_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Circular FK with byo_keys -- see module docstring. Deferred via use_alter in the
     # hand-written migration; use_alter=True here keeps metadata-driven creation consistent.
     byo_key_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("byo_keys.id", use_alter=True, name="fk_installs_byo_key_id"),
+        ForeignKey("byo_keys.id", use_alter=True, name="fk_accounts_byo_key_id"),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -78,16 +82,63 @@ class Install(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     byo_keys: Mapped[list["ByoKey"]] = relationship(
-        back_populates="install", foreign_keys="ByoKey.install_id"
+        back_populates="account", foreign_keys="ByoKey.account_id"
     )
+
+
+class LinkedIdentity(Base):
+    __tablename__ = "linked_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_subject", name="uq_linked_identities_provider_subject"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    # "google"|"microsoft" -- Text, not a native enum, matching subscriptions.status's own
+    # rationale (design doc SS4/SS7.3): kept deliberately loose rather than a Postgres enum.
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    # The provider's own stable per-account identifier (Google's `sub`, Microsoft Graph's
+    # `id`) -- the per-provider anti-duplicate key, since an account's own email is
+    # technically mutable while this isn't (design doc SS3).
+    provider_subject: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_email: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    # SHA-256 of the opaque bearer token, never the plaintext -- mirrors why
+    # byo_keys.encrypted_key isn't stored as plaintext: a DB dump alone shouldn't hand out
+    # live sessions (design doc SS2).
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_via_provider: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Sliding-window expiry: extended on every successful validation, not an absolute cap
+    # (design doc SS2).
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ByoKey(Base):
     __tablename__ = "byo_keys"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    install_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("installs.install_id", ondelete="CASCADE"), nullable=False
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     encrypted_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -96,16 +147,16 @@ class ByoKey(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    install: Mapped["Install"] = relationship(back_populates="byo_keys", foreign_keys=[install_id])
+    account: Mapped["Account"] = relationship(back_populates="byo_keys", foreign_keys=[account_id])
 
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    install_id: Mapped[uuid.UUID] = mapped_column(
+    account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("installs.install_id", ondelete="CASCADE"),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
     )
@@ -143,8 +194,8 @@ class CsvStatement(Base):
     __tablename__ = "csv_statements"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    install_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("installs.install_id", ondelete="CASCADE"), nullable=False
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(CsvStatementStatus, nullable=False, default="unconfirmed")
     filename: Mapped[str] = mapped_column(Text, nullable=False)
@@ -167,8 +218,8 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    install_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("installs.install_id", ondelete="CASCADE"), nullable=False
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     csv_context_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -205,13 +256,13 @@ class UsageEvent(Base):
     __tablename__ = "usage_events"
     __table_args__ = (
         # Composite, not a single-column index on occurred_at alone -- the daily-cap query
-        # (design doc SS2.2) always filters by install_id and a date range together.
-        Index("ix_usage_events_install_id_occurred_at", "install_id", "occurred_at"),
+        # (design doc SS2.2) always filters by account_id and a date range together.
+        Index("ix_usage_events_account_id_occurred_at", "account_id", "occurred_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    install_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("installs.install_id", ondelete="CASCADE"), nullable=False
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     turn_id: Mapped[uuid.UUID | None] = mapped_column(
