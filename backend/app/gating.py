@@ -25,7 +25,7 @@ from typing import Literal
 
 from sqlalchemy import func, select
 
-from db.models import ByoKey, Install, Subscription, UsageEvent
+from db.models import ByoKey, Subscription, UsageEvent
 
 FREE_DAILY_CAP = 5
 PAID_MONTHLY_CAP = 50
@@ -60,7 +60,7 @@ def _count_usage_events(session, install_id, start: datetime, end: datetime | No
     return session.execute(query).scalar_one()
 
 
-def evaluate_ask_gate(session, install: Install, now: datetime) -> AskGateDecision:
+def evaluate_ask_gate(session, install, now: datetime) -> AskGateDecision:
     """
     now must be timezone-aware UTC (datetime.now(timezone.utc)) -- compared directly
     against usage_events.occurred_at/subscriptions.current_period_* (both tz-aware

@@ -13,9 +13,11 @@ with DATABASE_URL, ANTHROPIC_API_KEY, and SEC_USER_AGENT set (backend/.env)
 for /v1/health and /v1/ask to reach Postgres/Anthropic/EDGAR respectively.
 """
 
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,11 +27,21 @@ import anthropic
 import stripe
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from db.base import get_session
-from db.models import ByoKey, Conversation, CsvStatement, Install, StripeWebhookEvent, Turn, UsageEvent
+from db.models import (
+    Account,
+    ByoKey,
+    Conversation,
+    CsvStatement,
+    LinkedIdentity,
+    Session as SessionModel,
+    StripeWebhookEvent,
+    Turn,
+    UsageEvent,
+)
 
 # No logging framework/handler config exists yet in this project -- this module-level
 # logger relies on Python's logging "handler of last resort" (WARNING+ to stderr with no
@@ -66,13 +78,15 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
     rows_to_raw_csv,
 )
 
-from . import billing
+from . import billing, oauth_providers
 from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
 from .gating import evaluate_ask_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
     AskResponse,
+    AuthExchangeRequest,
+    AuthExchangeResponse,
     ByoKeyRequest,
     ByoKeyResponse,
     CheckoutSessionResponse,
@@ -106,7 +120,7 @@ def health(response: Response) -> HealthResponse:
     return HealthResponse(status="ok", db=db_status, commit=os.environ.get("RENDER_GIT_COMMIT"))
 
 
-def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
+def _get_or_create_install(session, install_id: uuid.UUID):
     """
     TEMPORARY shim, still in place after Phase B session 7a. Real identity issuance
     (POST /v1/install actually persisting a row, distinguishing google_email from a
@@ -131,6 +145,52 @@ def _get_or_create_install(session, install_id: uuid.UUID) -> Install:
     else:
         install.last_seen_at = now
     return install
+
+
+def _resolve_account_for_identity(session, identity: oauth_providers.ProviderIdentity, now: datetime) -> Account:
+    """
+    Design doc SS3's 3-step resolution order. Returns the Account to issue a session
+    against, with last_seen_at already set to `now` on every branch. Only adds/mutates
+    ORM objects -- the caller owns the transaction (commit/flush).
+    """
+    linked = session.execute(
+        select(LinkedIdentity).where(
+            LinkedIdentity.provider == identity.provider,
+            LinkedIdentity.provider_subject == identity.subject,
+        )
+    ).scalar_one_or_none()
+    if linked is not None:
+        account = session.get(Account, linked.account_id)
+        account.last_seen_at = now
+        return account
+
+    linked_by_email = session.execute(
+        select(LinkedIdentity).where(LinkedIdentity.provider_email == identity.email)
+    ).scalar_one_or_none()
+    if linked_by_email is not None:
+        account = session.get(Account, linked_by_email.account_id)
+        account.last_seen_at = now
+        session.add(LinkedIdentity(
+            account_id=account.id,
+            provider=identity.provider,
+            provider_subject=identity.subject,
+            provider_email=identity.email,
+        ))
+        return account
+
+    # Explicit id (not a flush-to-learn-the-default) so this branch behaves identically to
+    # the other two: account.id is a concrete value immediately, before LinkedIdentity's FK
+    # needs it. Don't "simplify" this back to relying on Account.id's column default --
+    # LinkedIdentity is added in the same call with no intervening flush.
+    account = Account(id=uuid.uuid4(), primary_email=identity.email, last_seen_at=now)
+    session.add(account)
+    session.add(LinkedIdentity(
+        account_id=account.id,
+        provider=identity.provider,
+        provider_subject=identity.subject,
+        provider_email=identity.email,
+    ))
+    return account
 
 
 def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
@@ -542,6 +602,53 @@ def confirm_mapping(
 @app.post("/v1/install", response_model=InstallResponse)
 def install(request: InstallRequest) -> InstallResponse:
     return InstallResponse(install_id=str(uuid.uuid4()))
+
+
+@app.post("/v1/auth/exchange", response_model=AuthExchangeResponse)
+def auth_exchange(request: AuthExchangeRequest) -> AuthExchangeResponse:
+    """
+    Intentionally unauthenticated, like /v1/health and /v1/billing/webhook -- this route
+    has no way to require a session token, since proving identity to obtain one is exactly
+    what it's for. Verifies the caller's OAuth token directly against the provider
+    (app.oauth_providers), resolves it to an account per design doc SS3, and issues a new
+    opaque session token.
+    """
+    verify = (
+        oauth_providers.verify_google_token
+        if request.provider == "google"
+        else oauth_providers.verify_microsoft_token
+    )
+    try:
+        identity = verify(request.oauth_token)
+    except oauth_providers.InvalidProviderTokenError as e:
+        raise HTTPException(status_code=401, detail="OAuth token could not be verified.") from e
+    except oauth_providers.ProviderEmailUnavailableError as e:
+        raise HTTPException(
+            status_code=422, detail="No usable email address is available for this account."
+        ) from e
+
+    now = datetime.now(timezone.utc)
+    session = get_session()
+    try:
+        account = _resolve_account_for_identity(session, identity, now)
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        expires_at = now + timedelta(days=90)
+        session.add(SessionModel(
+            account_id=account.id,
+            token_hash=token_hash,
+            created_via_provider=identity.provider,
+            last_used_at=now,
+            expires_at=expires_at,
+        ))
+        session.commit()
+        account_id = account.id
+    finally:
+        session.close()
+
+    return AuthExchangeResponse(
+        session_token=raw_token, account_id=str(account_id), expires_at=expires_at
+    )
 
 
 @app.get("/v1/usage", response_model=UsageResponse)

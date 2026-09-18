@@ -118,3 +118,17 @@ class ByoKeyResponse(BaseModel):
     # Deliberately no key material or byo_keys.id echoed back -- the caller already has
     # the plaintext key it just sent, and the row's id has no use on the client side.
     registered: bool
+
+
+class AuthExchangeRequest(BaseModel):
+    provider: Literal["google", "microsoft"]
+    oauth_token: str
+
+
+class AuthExchangeResponse(BaseModel):
+    # session_token is the plaintext opaque bearer token, returned exactly once at exchange
+    # time and never re-derivable server-side afterward -- only its SHA-256 hash is
+    # persisted, in sessions.token_hash. Same "shown once" discipline as ByoKeyResponse.
+    session_token: str
+    account_id: str
+    expires_at: datetime
