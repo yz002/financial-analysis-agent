@@ -25,7 +25,7 @@ from pathlib import Path
 
 import anthropic
 import stripe
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -95,8 +95,6 @@ from .schemas import (
     CsvParseRequest,
     CsvParseResponse,
     HealthResponse,
-    InstallRequest,
-    InstallResponse,
     MappingProposalEntry,
     ProposeMappingResponse,
     UsageResponse,
@@ -120,31 +118,42 @@ def health(response: Response) -> HealthResponse:
     return HealthResponse(status="ok", db=db_status, commit=os.environ.get("RENDER_GIT_COMMIT"))
 
 
-def _get_or_create_install(session, install_id: uuid.UUID):
+def get_current_account(authorization: str = Header(alias="Authorization")) -> Account:
     """
-    TEMPORARY shim, still in place after Phase B session 7a. Real identity issuance
-    (POST /v1/install actually persisting a row, distinguishing google_email from a
-    generated uuid) is still unbuilt -- any X-Install-Id a caller presents is accepted
-    at face value and a minimal row is auto-created for it if one doesn't exist yet,
-    purely so conversations.install_id's FK can be satisfied. Session 7a's three-tier
-    gating logic (app.gating.evaluate_ask_gate) runs against whatever Install row this
-    returns, auto-created or not -- it only needs a byo_key_id/subscriptions/
-    usage_events history to evaluate, not a "real" identity. A later session should
-    replace this with a real lookup-or-404 once /v1/install is implemented.
+    Design doc SS2: parses "Bearer <token>" from Authorization, hashes it (SHA-256, matching
+    /v1/auth/exchange's own hashing), and looks up a live (not revoked, not expired) sessions
+    row. Every miss -- unknown, expired, or revoked -- 401s with the identical detail string,
+    matching this project's anti-enumeration convention for csv_context_id/conversation_id
+    lookups. On a hit, extends expires_at to now + 90 days again (sliding window, not an
+    absolute cap) and returns the associated Account, replacing _get_or_create_install's
+    auto-create-any-UUID shim outright -- an unrecognized token is now refused, not
+    autovivified.
     """
-    install = session.get(Install, install_id)
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+    raw_token = authorization.removeprefix("Bearer ")
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     now = datetime.now(timezone.utc)
-    if install is None:
-        install = Install(
-            install_id=install_id,
-            identity_type="uuid",
-            identity_value=str(install_id),
-            last_seen_at=now,
-        )
-        session.add(install)
-    else:
-        install.last_seen_at = now
-    return install
+    session = get_session()
+    try:
+        session_row = session.execute(
+            select(SessionModel).where(
+                SessionModel.token_hash == token_hash,
+                SessionModel.revoked_at.is_(None),
+                SessionModel.expires_at > now,
+            )
+        ).scalar_one_or_none()
+        if session_row is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+        session_row.last_used_at = now
+        session_row.expires_at = now + timedelta(days=90)
+        account = session.get(Account, session_row.account_id)
+        session.commit()
+        session.refresh(account)  # reload attributes expired by the commit above
+        session.expunge(account)  # detach so callers can read it after session.close()
+        return account
+    finally:
+        session.close()
 
 
 def _resolve_account_for_identity(session, identity: oauth_providers.ProviderIdentity, now: datetime) -> Account:
@@ -193,41 +202,41 @@ def _resolve_account_for_identity(session, identity: oauth_providers.ProviderIde
     return account
 
 
-def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
+def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, account_id: uuid.UUID) -> CsvStatement:
     """
-    Load a csv_statements row scoped to the authenticated caller's install_id -- the design
+    Load a csv_statements row scoped to the authenticated caller's account_id -- the design
     doc's stated highest-value security control. A row that doesn't exist and a row that
-    exists but belongs to a different install are indistinguishable to the caller (both 404),
+    exists but belongs to a different account are indistinguishable to the caller (both 404),
     so a non-owner can't even confirm a csv_context_id exists.
     """
     row = session.get(CsvStatement, csv_context_id)
-    if row is None or row.install_id != install_id:
+    if row is None or row.account_id != account_id:
         raise HTTPException(status_code=404, detail="csv context not found")
     return row
 
 
-def _load_confirmed_csv_statement(session, csv_context_id: uuid.UUID, install_id: uuid.UUID) -> CsvStatement:
+def _load_confirmed_csv_statement(session, csv_context_id: uuid.UUID, account_id: uuid.UUID) -> CsvStatement:
     """
     Like _get_owned_csv_statement, but also requires the row to be confirmed -- an unconfirmed
     or still-in-progress csv_context_id is just as unusable to /v1/ask as one that doesn't exist
     or belongs to someone else, so it gets the same 404 rather than a distinct status a caller
     could use to fish for a context's existence/ownership.
     """
-    row = _get_owned_csv_statement(session, csv_context_id, install_id)
+    row = _get_owned_csv_statement(session, csv_context_id, account_id)
     if row.status != "confirmed":
         raise HTTPException(status_code=404, detail="csv context not found")
     return row
 
 
-def _get_owned_conversation(session, conversation_id: uuid.UUID, install_id: uuid.UUID) -> Conversation:
+def _get_owned_conversation(session, conversation_id: uuid.UUID, account_id: uuid.UUID) -> Conversation:
     """
-    Load a conversations row scoped to the authenticated caller's install_id --
+    Load a conversations row scoped to the authenticated caller's account_id --
     symmetric to _get_owned_csv_statement above, for the same anti-enumeration reason: a
-    nonexistent conversation_id and one owned by a different install are indistinguishable
+    nonexistent conversation_id and one owned by a different account are indistinguishable
     to the caller (both 404).
     """
     row = session.get(Conversation, conversation_id)
-    if row is None or row.install_id != install_id:
+    if row is None or row.account_id != account_id:
         raise HTTPException(status_code=404, detail="conversation not found")
     return row
 
@@ -255,18 +264,16 @@ def _update_usage_event_outcome(usage_event_id: int, turn_id: uuid.UUID | None, 
 @app.post("/v1/ask", response_model=AskResponse)
 def ask(
     request: AskRequest,
-    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+    account: Account = Depends(get_current_account),
 ) -> AskResponse:
     gate_now = datetime.now(timezone.utc)
     session = get_session()
     try:
-        install = _get_or_create_install(session, x_install_id)
-        session.commit()
-        decision = evaluate_ask_gate(session, install, gate_now)
+        decision = evaluate_ask_gate(session, account, gate_now)
         if not decision.allowed:
             session.add(
                 UsageEvent(
-                    install_id=x_install_id,
+                    account_id=account.id,
                     occurred_at=gate_now,
                     turn_id=None,
                     outcome=decision.reject_outcome,
@@ -285,7 +292,7 @@ def ask(
 
         byo_client: anthropic.Anthropic | None = None
         if decision.tier == "byo_key":
-            byo_key = session.get(ByoKey, install.byo_key_id)
+            byo_key = session.get(ByoKey, account.byo_key_id)
             if byo_key is None:
                 # evaluate_ask_gate just confirmed an active row exists -- same session,
                 # no intervening commit could have removed it. Treat as an internal
@@ -321,7 +328,7 @@ def ask(
 
         # Placeholder row, inserted before run_agent runs -- see _update_usage_event_outcome.
         usage_event = UsageEvent(
-            install_id=x_install_id, occurred_at=gate_now, turn_id=None, outcome="answered"
+            account_id=account.id, occurred_at=gate_now, turn_id=None, outcome="answered"
         )
         session.add(usage_event)
         session.commit()
@@ -339,7 +346,7 @@ def ask(
             raise HTTPException(status_code=404, detail="conversation not found") from e
         session = get_session()
         try:
-            _get_owned_conversation(session, conversation_uuid, x_install_id)
+            _get_owned_conversation(session, conversation_uuid, account.id)
             recent_turns = (
                 session.query(Turn)
                 .filter(Turn.conversation_id == conversation_uuid)
@@ -363,7 +370,7 @@ def ask(
             raise HTTPException(status_code=404, detail="csv context not found") from e
         session = get_session()
         try:
-            csv_row = _load_confirmed_csv_statement(session, csv_context_uuid, x_install_id)
+            csv_row = _load_confirmed_csv_statement(session, csv_context_uuid, account.id)
             df = statement_from_records(csv_row.statement_data, csv_row.statement_attrs)
         finally:
             session.close()
@@ -429,7 +436,7 @@ def ask(
             conversation.last_turn_at = now
         else:
             conversation = Conversation(
-                install_id=x_install_id,
+                account_id=account.id,
                 title=request.question[:200],
                 csv_context_id=csv_context_uuid,
                 last_turn_at=now,
@@ -477,7 +484,7 @@ def ask(
 @app.post("/v1/csv/parse", response_model=CsvParseResponse)
 def csv_parse(
     request: CsvParseRequest,
-    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+    account: Account = Depends(get_current_account),
 ) -> CsvParseResponse:
     raw, error = rows_to_raw_csv(request.rows, request.filename)
     if error is not None:
@@ -486,15 +493,8 @@ def csv_parse(
     now = datetime.now(timezone.utc)
     session = get_session()
     try:
-        _get_or_create_install(session, x_install_id)
-        session.commit()
-    finally:
-        session.close()
-
-    session = get_session()
-    try:
         row = CsvStatement(
-            install_id=x_install_id,
+            account_id=account.id,
             status="unconfirmed",
             filename=raw.filename,
             uploaded_at=now,
@@ -518,11 +518,11 @@ def csv_parse(
 @app.post("/v1/csv/{csv_context_id}/propose-mapping", response_model=ProposeMappingResponse)
 def propose_mapping(
     csv_context_id: uuid.UUID,
-    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+    account: Account = Depends(get_current_account),
 ) -> ProposeMappingResponse:
     session = get_session()
     try:
-        row = _get_owned_csv_statement(session, csv_context_id, x_install_id)
+        row = _get_owned_csv_statement(session, csv_context_id, account.id)
         raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
 
         try:
@@ -555,11 +555,11 @@ def propose_mapping(
 def confirm_mapping(
     csv_context_id: uuid.UUID,
     request: ConfirmRequest,
-    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+    account: Account = Depends(get_current_account),
 ) -> ConfirmResponse:
     session = get_session()
     try:
-        row = _get_owned_csv_statement(session, csv_context_id, x_install_id)
+        row = _get_owned_csv_statement(session, csv_context_id, account.id)
         raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
 
         serial_reason = find_period_serial_number_value(raw, request.mapping)
@@ -597,11 +597,6 @@ def confirm_mapping(
         )
     finally:
         session.close()
-
-
-@app.post("/v1/install", response_model=InstallResponse)
-def install(request: InstallRequest) -> InstallResponse:
-    return InstallResponse(install_id=str(uuid.uuid4()))
 
 
 @app.post("/v1/auth/exchange", response_model=AuthExchangeResponse)
@@ -652,17 +647,15 @@ def auth_exchange(request: AuthExchangeRequest) -> AuthExchangeResponse:
 
 
 @app.get("/v1/usage", response_model=UsageResponse)
-def usage(x_install_id: uuid.UUID = Header(alias="X-Install-Id")) -> UsageResponse:
+def usage(account: Account = Depends(get_current_account)) -> UsageResponse:
     session = get_session()
     try:
-        install_row = _get_or_create_install(session, x_install_id)
-        session.commit()
-        decision = evaluate_ask_gate(session, install_row, datetime.now(timezone.utc))
+        decision = evaluate_ask_gate(session, account, datetime.now(timezone.utc))
     finally:
         session.close()
 
     response = UsageResponse(
-        install_id=str(x_install_id),
+        account_id=str(account.id),
         tier=decision.tier,
         byo_key_required=decision.prompt_byo_key,
     )
@@ -678,11 +671,11 @@ def usage(x_install_id: uuid.UUID = Header(alias="X-Install-Id")) -> UsageRespon
 
 @app.post("/v1/byo-key", response_model=ByoKeyResponse)
 def register_byo_key(
-    request: ByoKeyRequest, x_install_id: uuid.UUID = Header(alias="X-Install-Id")
+    request: ByoKeyRequest, account: Account = Depends(get_current_account)
 ) -> ByoKeyResponse:
     """
     Registers (or rotates) the caller's own Anthropic API key. A new key always replaces
-    any currently active one for this install -- soft-deactivating the old byo_keys row
+    any currently active one for this account -- soft-deactivating the old byo_keys row
     rather than rejecting the request -- matching is_active's stated audit-trail purpose
     (design doc SS4) and giving a caller a one-call way to rotate a leaked/expired key,
     since there's no separate removal endpoint (out of scope for Phase B session 8; see
@@ -696,17 +689,17 @@ def register_byo_key(
 
     session = get_session()
     try:
-        install = _get_or_create_install(session, x_install_id)
-        session.flush()
         session.execute(
             update(ByoKey)
-            .where(ByoKey.install_id == install.install_id, ByoKey.is_active.is_(True))
+            .where(ByoKey.account_id == account.id, ByoKey.is_active.is_(True))
             .values(is_active=False)
         )
-        new_key = ByoKey(install_id=install.install_id, encrypted_key=encrypted, is_active=True)
+        new_key = ByoKey(account_id=account.id, encrypted_key=encrypted, is_active=True)
         session.add(new_key)
         session.flush()  # populate new_key.id before repointing the FK below
-        install.byo_key_id = new_key.id
+        session.execute(
+            update(Account).where(Account.id == account.id).values(byo_key_id=new_key.id)
+        )
         session.commit()
     finally:
         session.close()
@@ -740,20 +733,8 @@ def billing_cancel() -> HTMLResponse:
 @app.post("/v1/billing/checkout-session", response_model=CheckoutSessionResponse)
 def create_checkout_session_route(
     request: Request,
-    x_install_id: uuid.UUID = Header(alias="X-Install-Id"),
+    account: Account = Depends(get_current_account),
 ) -> CheckoutSessionResponse:
-    session = get_session()
-    try:
-        install = _get_or_create_install(session, x_install_id)
-        session.commit()
-        # Read the fields billing.create_checkout_session needs while the session is still
-        # open -- session.close() below expires/detaches `install`, and the Stripe API call
-        # after that point shouldn't hold a DB connection open anyway.
-        identity_type = install.identity_type
-        identity_value = install.identity_value
-    finally:
-        session.close()
-
     price_id = os.environ.get("STRIPE_PRICE_ID")
     if not price_id:
         raise HTTPException(status_code=500, detail="STRIPE_PRICE_ID is not configured")
@@ -761,7 +742,7 @@ def create_checkout_session_route(
     success_url = str(request.base_url) + "v1/billing/success"
     cancel_url = str(request.base_url) + "v1/billing/cancel"
     checkout_url = billing.create_checkout_session(
-        x_install_id, identity_type, identity_value, price_id, success_url, cancel_url
+        account.id, account.primary_email, price_id, success_url, cancel_url
     )
     return CheckoutSessionResponse(checkout_url=checkout_url)
 
@@ -769,9 +750,10 @@ def create_checkout_session_route(
 @app.post("/v1/billing/webhook")
 async def stripe_webhook(request: Request) -> dict:
     """
-    The one endpoint besides /v1/health that does NOT require X-Install-Id -- Stripe calls
-    this directly and cannot carry that header (design doc SS1's explicitly-stated
-    exception). Deliberately async def, the one exception to this file's otherwise
+    One of the few endpoints (alongside /v1/health and /v1/auth/exchange) that does NOT
+    require an Authorization: Bearer session token -- Stripe calls this directly and cannot
+    carry one (design doc SS1's explicitly-stated exception). Deliberately async def, the
+    one exception to this file's otherwise
     consistent sync def (threadpool-dispatched) route convention: it needs await
     request.body() to read the raw, unparsed body before FastAPI's normal body-parsing
     machinery touches it -- re-serializing a parsed body breaks Stripe's signature check.

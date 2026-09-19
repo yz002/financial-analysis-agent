@@ -5,9 +5,10 @@ Integration tests for the CSV pipeline endpoints (/v1/csv/parse,
 Unlike src/'s root tests/ suite, these hit a real reachable Postgres via
 DATABASE_URL (backend/.env) -- per the design doc's "paid tier from day one,
 including for this session's own testing" mandate, csv_statements' JSONB
-columns have no sqlite-compatible substitute. Every test creates its own
-install(s) and deletes them (cascading to any csv_statements rows) in
-teardown, so the dev DB isn't left with test debris.
+columns have no sqlite-compatible substitute. Every test authenticates via
+the shared auth_session fixture (conftest.py), which deletes the account(s)
+it creates (cascading to any csv_statements rows) in teardown, so the dev DB
+isn't left with test debris.
 
 The Anthropic call inside propose-mapping is mocked by monkeypatching
 src.data.csv_ingest.anthropic.Anthropic, the same MagicMock-scripted-response
@@ -15,11 +16,9 @@ idiom tests/test_csv_ingest.py already uses -- never a real API call.
 """
 
 import json
-import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -29,30 +28,6 @@ from db.base import get_session
 import src.data.csv_ingest as csv_ingest  # noqa: E402 -- app.main's import sets up sys.path
 
 client = TestClient(app)
-
-
-@pytest.fixture
-def install_ids():
-    """Tracks install_ids created by a test; deletes them (cascading to csv_statements) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(
-            text("DELETE FROM installs WHERE install_id = ANY(:ids)"),
-            {"ids": ids},
-        )
-        session.commit()
-    finally:
-        session.close()
-
-
-def _new_install_id(install_ids: list[str]) -> str:
-    install_id = str(uuid.uuid4())
-    install_ids.append(install_id)
-    return install_id
 
 
 def _text_response(text_body):
@@ -74,21 +49,21 @@ _SAMPLE_ROWS = [
 ]
 
 
-def _parse(install_id: str, rows=None, filename="Sheet1!A1:C3.csv"):
+def _parse(headers: dict, rows=None, filename="Sheet1!A1:C3.csv"):
     return client.post(
         "/v1/csv/parse",
         json={"rows": rows if rows is not None else _SAMPLE_ROWS, "filename": filename},
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
 
 
 # --- full round trip ---------------------------------------------------------------------
 
 
-def test_full_parse_propose_confirm_round_trip(install_ids, monkeypatch):
-    install_id = _new_install_id(install_ids)
+def test_full_parse_propose_confirm_round_trip(auth_session, monkeypatch):
+    _, headers = auth_session()
 
-    resp = _parse(install_id)
+    resp = _parse(headers)
     assert resp.status_code == 200
     body = resp.json()
     assert body["parse_error"] is None
@@ -105,9 +80,7 @@ def test_full_parse_propose_confirm_round_trip(install_ids, monkeypatch):
             {"csv_column": "Net Income", "proposed_role": "net_income", "rationale": "net income"},
         ],
     )
-    resp = client.post(
-        f"/v1/csv/{csv_context_id}/propose-mapping", headers={"X-Install-Id": install_id}
-    )
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
     assert resp.status_code == 200
     proposal = resp.json()
     assert proposal["note"] is None
@@ -128,7 +101,7 @@ def test_full_parse_propose_confirm_round_trip(install_ids, monkeypatch):
             },
             "entity_name": "Test Bakery LLC",
         },
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
     assert resp.status_code == 200
     confirmed = resp.json()
@@ -154,14 +127,14 @@ def test_full_parse_propose_confirm_round_trip(install_ids, monkeypatch):
 # --- Sheets-only date contract -----------------------------------------------------------
 
 
-def test_confirm_rejects_serial_number_in_period_column(install_ids):
-    install_id = _new_install_id(install_ids)
+def test_confirm_rejects_serial_number_in_period_column(auth_session):
+    _, headers = auth_session()
     rows = [
         ["Quarter Ending", "Total Revenue"],
         ["45292", "100000"],
         ["45383", "110000"],
     ]
-    resp = _parse(install_id, rows=rows)
+    resp = _parse(headers, rows=rows)
     assert resp.status_code == 200
     csv_context_id = resp.json()["csv_context_id"]
 
@@ -171,7 +144,7 @@ def test_confirm_rejects_serial_number_in_period_column(install_ids):
             "mapping": {"Quarter Ending": "period_end", "Total Revenue": "revenue"},
             "entity_name": "Test Bakery LLC",
         },
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -188,25 +161,23 @@ def test_confirm_rejects_serial_number_in_period_column(install_ids):
         session.close()
 
 
-# --- cross-install isolation --------------------------------------------------------------
+# --- cross-account isolation --------------------------------------------------------------
 
 
-def test_cross_install_access_is_refused(install_ids):
-    owner_id = _new_install_id(install_ids)
-    other_id = _new_install_id(install_ids)
+def test_cross_account_access_is_refused(auth_session):
+    _, owner_headers = auth_session()
+    _, other_headers = auth_session()
 
-    resp = _parse(owner_id)
+    resp = _parse(owner_headers)
     assert resp.status_code == 200
     csv_context_id = resp.json()["csv_context_id"]
 
-    resp = client.post(
-        f"/v1/csv/{csv_context_id}/propose-mapping", headers={"X-Install-Id": other_id}
-    )
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=other_headers)
     assert resp.status_code == 404
 
     resp = client.post(
         f"/v1/csv/{csv_context_id}/confirm",
         json={"mapping": {"Quarter Ending": "period_end"}, "entity_name": "Nope"},
-        headers={"X-Install-Id": other_id},
+        headers=other_headers,
     )
     assert resp.status_code == 404

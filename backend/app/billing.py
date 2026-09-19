@@ -62,30 +62,30 @@ def verify_webhook_event(payload: bytes, sig_header: str, webhook_secret: str) -
 
 
 def create_checkout_session(
-    install_id: uuid.UUID,
-    identity_type: str,
-    identity_value: str,
+    account_id: uuid.UUID,
+    primary_email: str | None,
     price_id: str,
     success_url: str,
     cancel_url: str,
 ) -> str:
     """
-    Takes plain values, not a db.models.Install row -- the caller (main.py) reads these off
-    the Install while its session is still open and closes that session before making this
-    outbound Stripe call (so a slow network call never holds a DB connection open), which
-    means an ORM object handed in here would already be detached and raise on any attribute
-    access. Returns the Checkout Session's hosted URL.
+    Takes plain values, not a db.models.Account row -- the caller (main.py) reads these off
+    the Account (via get_current_account) before making this outbound Stripe call, so a slow
+    network call never holds a DB connection open. Returns the Checkout Session's hosted URL.
+    primary_email is set unconditionally now (not gated on an identity_type check) -- every
+    account is OAuth-verified by construction (design doc SS4), so there's no longer an
+    unverified-identity case where it would be wrong to prefill Stripe's customer_email.
     """
     _ensure_stripe_configured()
     kwargs = {
         "mode": "subscription",
-        "client_reference_id": str(install_id),
+        "client_reference_id": str(account_id),
         "line_items": [{"price": price_id, "quantity": 1}],
         "success_url": success_url,
         "cancel_url": cancel_url,
     }
-    if identity_type == "google_email":
-        kwargs["customer_email"] = identity_value
+    if primary_email:
+        kwargs["customer_email"] = primary_email
     checkout_session = stripe.checkout.Session.create(**kwargs)
     return checkout_session.url
 
@@ -99,26 +99,26 @@ def _extract_current_period(subscription) -> tuple[datetime, datetime]:
 
 def _handle_checkout_session_completed(session, event) -> None:
     checkout_session = event["data"]["object"]
-    install_id_raw = _get(checkout_session, "client_reference_id")
-    if not install_id_raw:
+    account_id_raw = _get(checkout_session, "client_reference_id")
+    if not account_id_raw:
         return  # not a checkout session we created (shouldn't happen) -- nothing to do
-    install_id = uuid.UUID(install_id_raw)
+    account_id = uuid.UUID(account_id_raw)
 
     _ensure_stripe_configured()
     subscription = stripe.Subscription.retrieve(checkout_session["subscription"])
     period_start, period_end = _extract_current_period(subscription)
     now = datetime.now(timezone.utc)
 
-    # Upsert keyed by install_id, not a blind insert: subscriptions.install_id is UNIQUE
+    # Upsert keyed by account_id, not a blind insert: subscriptions.account_id is UNIQUE
     # (design doc SS7.3), and a user who canceled and is now re-subscribing gets a brand new
     # stripe_subscription_id -- a blind insert would violate that constraint.
     row = session.execute(
-        select(Subscription).where(Subscription.install_id == install_id)
+        select(Subscription).where(Subscription.account_id == account_id)
     ).scalar_one_or_none()
     if row is None:
         session.add(
             Subscription(
-                install_id=install_id,
+                account_id=account_id,
                 stripe_customer_id=checkout_session["customer"],
                 stripe_subscription_id=subscription["id"],
                 status=subscription["status"],

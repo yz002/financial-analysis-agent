@@ -79,15 +79,6 @@ class ConfirmResponse(BaseModel):
     errors: list[str] = []
 
 
-class InstallRequest(BaseModel):
-    identity_type: Literal["google_email", "uuid"]
-    identity_value: str
-
-
-class InstallResponse(BaseModel):
-    install_id: str
-
-
 class UsageResponse(BaseModel):
     """
     Shape per the monetization amendment's SS7.2 (replaces the original free_window_ends_at
@@ -96,7 +87,7 @@ class UsageResponse(BaseModel):
     byo_key -> none of those.
     """
 
-    install_id: str
+    account_id: str
     tier: Literal["byo_key", "paid", "free"]
     questions_today: int | None = None
     daily_cap: int | None = None

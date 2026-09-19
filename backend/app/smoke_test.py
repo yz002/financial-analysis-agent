@@ -11,8 +11,10 @@ reach a live Postgres connection. /v1/ask and /v1/csv/{id}/propose-mapping
 are wired to real Anthropic calls (as of sessions 3 and 4 respectively), so
 running this needs ANTHROPIC_API_KEY and SEC_USER_AGENT set, makes real
 (billed) Anthropic API calls, and writes real conversations/turns/
-csv_statements rows -- /v1/install and /v1/usage are the only endpoints
-still fully stubbed.
+csv_statements rows. Since Phase C session 4, every route below /v1/health
+requires a real session token -- oauth_providers.verify_google_token is
+monkeypatched here (never a real Google call) so /v1/auth/exchange can issue
+one, the same idiom tests/test_auth_exchange.py uses.
 """
 
 import sys
@@ -20,20 +22,34 @@ import uuid
 
 from fastapi.testclient import TestClient
 
+from . import main as app_main
 from .main import app
+from .oauth_providers import ProviderIdentity
 
 client = TestClient(app)
 
 
 def main() -> int:
     failures = []
-    install_id = str(uuid.uuid4())
-    headers = {"X-Install-Id": install_id}
+    identity = ProviderIdentity(
+        provider="google", subject=f"smoke-{uuid.uuid4()}", email=f"smoke-{uuid.uuid4()}@example.com"
+    )
+    app_main.oauth_providers.verify_google_token = lambda oauth_token: identity
 
     resp = client.get("/v1/health")
     print(f"GET /v1/health -> {resp.status_code} {resp.json()}")
     if resp.status_code != 200 or resp.json().get("db") != "ok":
         failures.append(f"/v1/health: expected 200 with db=ok, got {resp.status_code} {resp.json()}")
+
+    resp = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "smoke-token"})
+    print(f"POST /v1/auth/exchange -> {resp.status_code}")
+    if resp.status_code != 200:
+        failures.append(f"/v1/auth/exchange: expected 200, got {resp.status_code} {resp.text}")
+        print("\nFAIL:")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    headers = {"Authorization": f"Bearer {resp.json()['session_token']}"}
 
     resp = client.post(
         "/v1/ask",
@@ -68,15 +84,7 @@ def main() -> int:
     if resp.status_code != 200:
         failures.append(f"/v1/csv/{{id}}/confirm: expected 200, got {resp.status_code} {resp.text}")
 
-    resp = client.post(
-        "/v1/install",
-        json={"identity_type": "uuid", "identity_value": "test-uuid"},
-    )
-    print(f"POST /v1/install -> {resp.status_code}")
-    if resp.status_code != 200:
-        failures.append(f"/v1/install: expected 200, got {resp.status_code} {resp.text}")
-
-    resp = client.get("/v1/usage")
+    resp = client.get("/v1/usage", headers=headers)
     print(f"GET /v1/usage -> {resp.status_code}")
     if resp.status_code != 200:
         failures.append(f"/v1/usage: expected 200, got {resp.status_code} {resp.text}")
@@ -87,7 +95,7 @@ def main() -> int:
             print(f"  - {f}")
         return 1
 
-    print("\nPASS: all 7 endpoints responded with the expected stubbed shape.")
+    print("\nPASS: all endpoints responded with the expected shape.")
     return 0
 
 

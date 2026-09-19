@@ -2,9 +2,9 @@
 Concurrency regression test for the csv_session.py ContextVar reimplementation
 (Phase B session 5; see the design doc's SS1 "Replacing csv_session.py's global registry" and
 SS6 step 5). Before this session, src/agent/csv_session.py held the active CSV-derived statement
-in a single process-global -- under real concurrent /v1/ask requests for two different installs,
-one install's tool calls could read the other's data. This file proves the ContextVar-based fix
-actually closes that race: two /v1/ask calls, for two different installs each with their own
+in a single process-global -- under real concurrent /v1/ask requests for two different accounts,
+one account's tool calls could read the other's data. This file proves the ContextVar-based fix
+actually closes that race: two /v1/ask calls, for two different accounts each with their own
 confirmed CSV, are fired from real threads at the same time and forced (via a threading.Barrier)
 to be simultaneously mid-flight inside run_agent -- a sequential pair of calls would not exercise
 the race this session exists to fix.
@@ -22,38 +22,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
 
 import app.main as app_main
 from app.main import app
-from db.base import get_session
 from src.agent import csv_session
 
 client = TestClient(app)
-
-
-@pytest.fixture
-def install_ids():
-    """Tracks install_ids created by a test; deletes them (cascading to csv_statements) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(
-            text("DELETE FROM installs WHERE install_id = ANY(:ids)"),
-            {"ids": ids},
-        )
-        session.commit()
-    finally:
-        session.close()
-
-
-def _new_install_id(install_ids: list[str]) -> str:
-    install_id = str(uuid.uuid4())
-    install_ids.append(install_id)
-    return install_id
 
 
 def _rows_for(entity_label: str) -> list[list[str]]:
@@ -64,13 +38,13 @@ def _rows_for(entity_label: str) -> list[list[str]]:
     ]
 
 
-def _create_confirmed_csv(install_id: str, entity_name: str) -> str:
+def _create_confirmed_csv(headers: dict, entity_name: str) -> str:
     """Runs the real /v1/csv/parse -> /confirm flow (skipping propose-mapping, which confirm
     doesn't require) and returns the resulting confirmed csv_context_id."""
     resp = client.post(
         "/v1/csv/parse",
         json={"rows": _rows_for(entity_name), "filename": f"{entity_name}.csv"},
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
     assert resp.status_code == 200, resp.text
     csv_context_id = resp.json()["csv_context_id"]
@@ -82,7 +56,7 @@ def _create_confirmed_csv(install_id: str, entity_name: str) -> str:
             "mapping": {"Quarter Ending": "period_end", "Total Revenue": "revenue"},
             "entity_name": entity_name,
         },
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -90,22 +64,22 @@ def _create_confirmed_csv(install_id: str, entity_name: str) -> str:
     return csv_context_id
 
 
-def _ask(install_id: str, csv_context_id: str, question: str = "How is revenue trending?"):
+def _ask(headers: dict, csv_context_id: str, question: str = "How is revenue trending?"):
     return client.post(
         "/v1/ask",
         json={"question": question, "csv_context_id": csv_context_id},
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
 
 
 # --- the concurrency regression test ------------------------------------------------------
 
 
-def test_concurrent_ask_calls_never_cross_installs_csv_data(install_ids, monkeypatch):
-    install_a = _new_install_id(install_ids)
-    install_b = _new_install_id(install_ids)
-    csv_a = _create_confirmed_csv(install_a, "Alpha Bakery LLC")
-    csv_b = _create_confirmed_csv(install_b, "Beta Hardware Co")
+def test_concurrent_ask_calls_never_cross_accounts_csv_data(auth_session, monkeypatch):
+    _, headers_a = auth_session()
+    _, headers_b = auth_session()
+    csv_a = _create_confirmed_csv(headers_a, "Alpha Bakery LLC")
+    csv_b = _create_confirmed_csv(headers_b, "Beta Hardware Co")
 
     barrier = threading.Barrier(2, timeout=10)
 
@@ -136,8 +110,8 @@ def test_concurrent_ask_calls_never_cross_installs_csv_data(install_ids, monkeyp
     monkeypatch.setattr(app_main, "run_agent", fake_run_agent)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        future_a = pool.submit(_ask, install_a, csv_a)
-        future_b = pool.submit(_ask, install_b, csv_b)
+        future_a = pool.submit(_ask, headers_a, csv_a)
+        future_b = pool.submit(_ask, headers_b, csv_b)
         resp_a = future_a.result(timeout=15)
         resp_b = future_b.result(timeout=15)
 
@@ -147,8 +121,8 @@ def test_concurrent_ask_calls_never_cross_installs_csv_data(install_ids, monkeyp
     answer_a = resp_a.json()["final_answer"]
     answer_b = resp_b.json()["final_answer"]
 
-    # Each request's context saw only its own install's entity name, both before and after the
-    # barrier -- never the other install's, even though both requests were provably overlapping
+    # Each request's context saw only its own account's entity name, both before and after the
+    # barrier -- never the other account's, even though both requests were provably overlapping
     # inside run_agent at the same time.
     assert answer_a == "before=Alpha Bakery LLC after=Alpha Bakery LLC", answer_a
     assert answer_b == "before=Beta Hardware Co after=Beta Hardware Co", answer_b
@@ -157,12 +131,12 @@ def test_concurrent_ask_calls_never_cross_installs_csv_data(install_ids, monkeyp
 # --- non-concurrent refusal paths (design doc item 3) --------------------------------------
 
 
-def test_ask_with_unconfirmed_csv_context_id_is_refused(install_ids, monkeypatch):
-    install_id = _new_install_id(install_ids)
+def test_ask_with_unconfirmed_csv_context_id_is_refused(auth_session, monkeypatch):
+    _, headers = auth_session()
     resp = client.post(
         "/v1/csv/parse",
         json={"rows": _rows_for("Gamma Consulting"), "filename": "gamma.csv"},
-        headers={"X-Install-Id": install_id},
+        headers=headers,
     )
     assert resp.status_code == 200
     csv_context_id = resp.json()["csv_context_id"]  # never confirmed
@@ -173,14 +147,14 @@ def test_ask_with_unconfirmed_csv_context_id_is_refused(install_ids, monkeypatch
         lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
-    resp = _ask(install_id, csv_context_id)
+    resp = _ask(headers, csv_context_id)
     assert resp.status_code == 404, resp.text
 
 
-def test_ask_with_foreign_csv_context_id_is_refused(install_ids, monkeypatch):
-    owner_id = _new_install_id(install_ids)
-    other_id = _new_install_id(install_ids)
-    csv_context_id = _create_confirmed_csv(owner_id, "Delta Retail")
+def test_ask_with_foreign_csv_context_id_is_refused(auth_session, monkeypatch):
+    _, owner_headers = auth_session()
+    _, other_headers = auth_session()
+    csv_context_id = _create_confirmed_csv(owner_headers, "Delta Retail")
 
     monkeypatch.setattr(
         app_main,
@@ -188,12 +162,12 @@ def test_ask_with_foreign_csv_context_id_is_refused(install_ids, monkeypatch):
         lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
-    resp = _ask(other_id, csv_context_id)
+    resp = _ask(other_headers, csv_context_id)
     assert resp.status_code == 404, resp.text
 
 
-def test_ask_with_nonexistent_csv_context_id_is_refused(install_ids, monkeypatch):
-    install_id = _new_install_id(install_ids)
+def test_ask_with_nonexistent_csv_context_id_is_refused(auth_session, monkeypatch):
+    _, headers = auth_session()
 
     monkeypatch.setattr(
         app_main,
@@ -201,5 +175,5 @@ def test_ask_with_nonexistent_csv_context_id_is_refused(install_ids, monkeypatch
         lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
-    resp = _ask(install_id, str(uuid.uuid4()))
+    resp = _ask(headers, str(uuid.uuid4()))
     assert resp.status_code == 404, resp.text

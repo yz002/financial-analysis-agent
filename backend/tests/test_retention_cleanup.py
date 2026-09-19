@@ -20,56 +20,32 @@ such stale expectation and just reports "not found" normally.
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
 
 from db.base import get_session
-from db.models import ByoKey, Conversation, CsvStatement, Install, Turn, UsageEvent
+from db.models import Account, ByoKey, Conversation, CsvStatement, Turn, UsageEvent
 from scripts.retention_cleanup import purge_expired_csv_statements, purge_inactive_conversations
 
 NOW = datetime.now(timezone.utc)
 
 
-@pytest.fixture
-def install_ids():
-    """Tracks install_ids created by a test; deletes them (cascading to everything) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(
-            text("DELETE FROM installs WHERE install_id = ANY(:ids)"),
-            {"ids": ids},
-        )
-        session.commit()
-    finally:
-        session.close()
+def _new_account_id(account_ids: list[str]) -> str:
+    account_id = str(uuid.uuid4())
+    account_ids.append(account_id)
+    return account_id
 
 
-def _new_install_id(install_ids: list[str]) -> str:
-    install_id = str(uuid.uuid4())
-    install_ids.append(install_id)
-    return install_id
-
-
-def _seed_install(session, install_id: str) -> Install:
-    install = Install(
-        install_id=uuid.UUID(install_id),
-        identity_type="uuid",
-        identity_value=install_id,
-        last_seen_at=NOW,
-    )
-    session.add(install)
+def _seed_account(session, account_id: str) -> Account:
+    account = Account(id=uuid.UUID(account_id), last_seen_at=NOW)
+    session.add(account)
     session.flush()
-    return install
+    return account
 
 
-def _seed_conversation_with_turn(session, install: Install, last_turn_at: datetime) -> uuid.UUID:
+def _seed_conversation_with_turn(session, account: Account, last_turn_at: datetime) -> uuid.UUID:
     conversation = Conversation(
-        install_id=install.install_id,
+        account_id=account.id,
         title="test conversation",
         last_turn_at=last_turn_at,
     )
@@ -92,9 +68,9 @@ def _seed_conversation_with_turn(session, install: Install, last_turn_at: dateti
     return conversation.id
 
 
-def _seed_csv_statement(session, install: Install, status: str, expires_at: datetime | None) -> uuid.UUID:
+def _seed_csv_statement(session, account: Account, status: str, expires_at: datetime | None) -> uuid.UUID:
     row = CsvStatement(
-        install_id=install.install_id,
+        account_id=account.id,
         status=status,
         filename="test.csv",
         uploaded_at=NOW,
@@ -108,16 +84,16 @@ def _seed_csv_statement(session, install: Install, status: str, expires_at: date
 # --- purge_inactive_conversations: boundary -------------------------------------------------
 
 
-def test_purge_inactive_conversations_respects_boundary(install_ids):
-    recent_id = _new_install_id(install_ids)
-    boundary_id = _new_install_id(install_ids)
-    dormant_id = _new_install_id(install_ids)
+def test_purge_inactive_conversations_respects_boundary(account_ids):
+    recent_id = _new_account_id(account_ids)
+    boundary_id = _new_account_id(account_ids)
+    dormant_id = _new_account_id(account_ids)
 
     session = get_session()
     try:
-        recent = _seed_install(session, recent_id)
-        boundary = _seed_install(session, boundary_id)
-        dormant = _seed_install(session, dormant_id)
+        recent = _seed_account(session, recent_id)
+        boundary = _seed_account(session, boundary_id)
+        dormant = _seed_account(session, dormant_id)
         recent_conv_id = _seed_conversation_with_turn(session, recent, NOW - relativedelta(months=11))
         boundary_conv_id = _seed_conversation_with_turn(session, boundary, NOW - relativedelta(months=12))
         dormant_conv_id = _seed_conversation_with_turn(session, dormant, NOW - relativedelta(months=13))
@@ -151,14 +127,14 @@ def test_purge_inactive_conversations_respects_boundary(install_ids):
         session.close()
 
 
-def test_purge_inactive_conversations_evaluates_whole_install_not_per_conversation(install_ids):
-    install_id = _new_install_id(install_ids)
+def test_purge_inactive_conversations_evaluates_whole_account_not_per_conversation(account_ids):
+    account_id = _new_account_id(account_ids)
 
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        stale_conv_id = _seed_conversation_with_turn(session, install, NOW - relativedelta(months=14))
-        recent_conv_id = _seed_conversation_with_turn(session, install, NOW - relativedelta(months=1))
+        account = _seed_account(session, account_id)
+        stale_conv_id = _seed_conversation_with_turn(session, account, NOW - relativedelta(months=14))
+        recent_conv_id = _seed_conversation_with_turn(session, account, NOW - relativedelta(months=1))
         session.commit()
     finally:
         session.close()
@@ -170,7 +146,7 @@ def test_purge_inactive_conversations_evaluates_whole_install_not_per_conversati
     finally:
         session.close()
 
-    # The install's most recent activity is 1 month ago -- not dormant -- so
+    # The account's most recent activity is 1 month ago -- not dormant -- so
     # neither conversation is purged, even the individually-stale one.
     assert conversations_deleted == 0
     assert turns_deleted == 0
@@ -183,13 +159,13 @@ def test_purge_inactive_conversations_evaluates_whole_install_not_per_conversati
         session.close()
 
 
-def test_purge_inactive_conversations_idempotent_on_repeated_run(install_ids):
-    install_id = _new_install_id(install_ids)
+def test_purge_inactive_conversations_idempotent_on_repeated_run(account_ids):
+    account_id = _new_account_id(account_ids)
 
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_conversation_with_turn(session, install, NOW - relativedelta(months=13))
+        account = _seed_account(session, account_id)
+        _seed_conversation_with_turn(session, account, NOW - relativedelta(months=13))
         session.commit()
     finally:
         session.close()
@@ -212,17 +188,17 @@ def test_purge_inactive_conversations_idempotent_on_repeated_run(install_ids):
     assert second == (0, 0)
 
 
-def test_purge_does_not_delete_install_row_or_unrelated_tables(install_ids):
-    install_id = _new_install_id(install_ids)
+def test_purge_does_not_delete_account_row_or_unrelated_tables(account_ids):
+    account_id = _new_account_id(account_ids)
 
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_conversation_with_turn(session, install, NOW - relativedelta(months=13))
+        account = _seed_account(session, account_id)
+        _seed_conversation_with_turn(session, account, NOW - relativedelta(months=13))
         session.add(
-            UsageEvent(install_id=install.install_id, occurred_at=NOW - relativedelta(months=13), outcome="answered")
+            UsageEvent(account_id=account.id, occurred_at=NOW - relativedelta(months=13), outcome="answered")
         )
-        session.add(ByoKey(install_id=install.install_id, encrypted_key=b"not-real", is_active=True))
+        session.add(ByoKey(account_id=account.id, encrypted_key=b"not-real", is_active=True))
         session.commit()
     finally:
         session.close()
@@ -236,18 +212,18 @@ def test_purge_does_not_delete_install_row_or_unrelated_tables(install_ids):
 
     session = get_session()
     try:
-        assert session.get(Install, uuid.UUID(install_id)) is not None
+        assert session.get(Account, uuid.UUID(account_id)) is not None
         assert (
             session.execute(
-                text("SELECT COUNT(*) FROM usage_events WHERE install_id = :id"),
-                {"id": install_id},
+                text("SELECT COUNT(*) FROM usage_events WHERE account_id = :id"),
+                {"id": account_id},
             ).scalar()
             == 1
         )
         assert (
             session.execute(
-                text("SELECT COUNT(*) FROM byo_keys WHERE install_id = :id"),
-                {"id": install_id},
+                text("SELECT COUNT(*) FROM byo_keys WHERE account_id = :id"),
+                {"id": account_id},
             ).scalar()
             == 1
         )
@@ -258,15 +234,15 @@ def test_purge_does_not_delete_install_row_or_unrelated_tables(install_ids):
 # --- purge_expired_csv_statements -----------------------------------------------------------
 
 
-def test_purge_expired_csv_statements(install_ids):
-    install_id = _new_install_id(install_ids)
+def test_purge_expired_csv_statements(account_ids):
+    account_id = _new_account_id(account_ids)
 
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        expired_id = _seed_csv_statement(session, install, "unconfirmed", NOW - timedelta(hours=1))
-        not_yet_expired_id = _seed_csv_statement(session, install, "unconfirmed", NOW + timedelta(hours=1))
-        confirmed_id = _seed_csv_statement(session, install, "confirmed", None)
+        account = _seed_account(session, account_id)
+        expired_id = _seed_csv_statement(session, account, "unconfirmed", NOW - timedelta(hours=1))
+        not_yet_expired_id = _seed_csv_statement(session, account, "unconfirmed", NOW + timedelta(hours=1))
+        confirmed_id = _seed_csv_statement(session, account, "confirmed", None)
         session.commit()
     finally:
         session.close()

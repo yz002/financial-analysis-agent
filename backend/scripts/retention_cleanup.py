@@ -10,13 +10,13 @@ over HTTP (see this session's plan for why). Run from inside backend/:
 with DATABASE_URL set (backend/.env) so it reaches the same Postgres instance
 as the web service.
 
-Activity signal for the 12-month purge is each install's own conversation/turn
-activity (MAX(conversations.last_turn_at)), not installs.last_seen_at --
+Activity signal for the 12-month purge is each account's own conversation/turn
+activity (MAX(conversations.last_turn_at)), not accounts.last_seen_at --
 last_seen_at is touched by every authenticated endpoint, including read-only
-ones like GET /v1/usage, so it would keep a dormant install's stale
+ones like GET /v1/usage, so it would keep a dormant account's stale
 conversation content alive indefinitely just because the sidebar still pings
 that endpoint. See this session's plan for the full reasoning, including why
-the installs row itself (and byo_keys/subscriptions/usage_events/
+the accounts row itself (and byo_keys/subscriptions/usage_events/
 csv_statements) are deliberately left untouched by this task -- SS3.4 scopes
 the purge to "Conversations (and their turns)" only.
 
@@ -52,35 +52,35 @@ INACTIVITY_MONTHS = 12
 def purge_inactive_conversations(session, now: datetime) -> tuple[int, int]:
     """
     Hard-deletes conversations (and, via turns.conversation_id's existing
-    ON DELETE CASCADE, their turns) for every install whose most recent
+    ON DELETE CASCADE, their turns) for every account whose most recent
     conversation activity is more than INACTIVITY_MONTHS months old.
-    Evaluated per install, not per conversation -- an install with one stale
-    and one recent conversation keeps both, since the install itself isn't
+    Evaluated per account, not per conversation -- an account with one stale
+    and one recent conversation keeps both, since the account itself isn't
     dormant. Returns (conversations_deleted, turns_deleted).
     """
     cutoff = now - relativedelta(months=INACTIVITY_MONTHS)
 
-    dormant_install_ids = (
+    dormant_account_ids = (
         session.execute(
-            select(Conversation.install_id)
-            .group_by(Conversation.install_id)
+            select(Conversation.account_id)
+            .group_by(Conversation.account_id)
             .having(func.max(Conversation.last_turn_at) < cutoff)
         )
         .scalars()
         .all()
     )
-    if not dormant_install_ids:
+    if not dormant_account_ids:
         return 0, 0
 
     turns_deleted = session.execute(
         select(func.count())
         .select_from(Turn)
         .join(Conversation, Turn.conversation_id == Conversation.id)
-        .where(Conversation.install_id.in_(dormant_install_ids))
+        .where(Conversation.account_id.in_(dormant_account_ids))
     ).scalar_one()
 
     result = session.execute(
-        delete(Conversation).where(Conversation.install_id.in_(dormant_install_ids))
+        delete(Conversation).where(Conversation.account_id.in_(dormant_account_ids))
     )
     return result.rowcount, turns_deleted
 

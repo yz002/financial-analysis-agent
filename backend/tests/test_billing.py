@@ -17,8 +17,8 @@ checkout-session creation be confirmed against the real sandbox account for at l
 request.
 
 Event ids and Stripe object ids used in test payloads are randomized per test run (never a
-literal fixed string) since stripe_webhook_events has no FK to installs and so isn't cleaned
-up by the install_ids fixture's cascading delete -- a fixed id would collide with a leftover
+literal fixed string) since stripe_webhook_events has no FK to accounts and so isn't cleaned
+up by the account_ids fixture's cascading delete -- a fixed id would collide with a leftover
 row from a prior run and silently trigger the idempotency short-circuit, invalidating the
 test. webhook_event_ids below handles cleanup explicitly instead.
 """
@@ -38,7 +38,7 @@ import app.billing as app_billing
 from app.gating import evaluate_ask_gate
 from app.main import app
 from db.base import get_session
-from db.models import Install, StripeWebhookEvent, Subscription
+from db.models import Account, StripeWebhookEvent, Subscription
 
 client = TestClient(app)
 
@@ -46,27 +46,9 @@ _TEST_WEBHOOK_SECRET = "whsec_test_secret_for_pytest"
 
 
 @pytest.fixture
-def install_ids():
-    """Tracks install_ids created by a test; deletes them (cascading to subscriptions) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(
-            text("DELETE FROM installs WHERE install_id = ANY(:ids)"),
-            {"ids": ids},
-        )
-        session.commit()
-    finally:
-        session.close()
-
-
-@pytest.fixture
 def webhook_event_ids():
     """Tracks stripe_event_ids created by a test; deletes them after (stripe_webhook_events
-    has no FK to installs, so install_ids' cascade doesn't cover it)."""
+    has no FK to accounts, so account_ids' cascade doesn't cover it)."""
     ids: list[str] = []
     yield ids
     if not ids:
@@ -82,34 +64,30 @@ def webhook_event_ids():
         session.close()
 
 
-def _new_install_id(install_ids: list[str]) -> str:
-    install_id = str(uuid.uuid4())
-    install_ids.append(install_id)
-    return install_id
-
-
 def _new_event_id(webhook_event_ids: list[str], prefix: str) -> str:
     event_id = f"{prefix}_{uuid.uuid4()}"
     webhook_event_ids.append(event_id)
     return event_id
 
 
-def _seed_install(session, install_id: str) -> Install:
-    install = Install(
-        install_id=uuid.UUID(install_id),
-        identity_type="uuid",
-        identity_value=install_id,
-        last_seen_at=datetime.now(timezone.utc),
-    )
-    session.add(install)
-    session.flush()
-    return install
+def _new_account_id(account_ids: list[str]) -> str:
+    """Seeds a bare accounts row directly (webhook tests never authenticate -- /v1/billing/webhook
+    stays unauthenticated -- so there's no /v1/auth/exchange call to create the account here)."""
+    account_id = uuid.uuid4()
+    session = get_session()
+    try:
+        session.add(Account(id=account_id, last_seen_at=datetime.now(timezone.utc)))
+        session.commit()
+    finally:
+        session.close()
+    account_ids.append(str(account_id))
+    return str(account_id)
 
 
-def _seed_subscription(session, install: Install, status: str, stripe_subscription_id: str) -> Subscription:
+def _seed_subscription(session, account_id: str, status: str, stripe_subscription_id: str) -> Subscription:
     now = datetime.now(timezone.utc)
     subscription = Subscription(
-        install_id=install.install_id,
+        account_id=uuid.UUID(account_id),
         stripe_customer_id="cus_existing",
         stripe_subscription_id=stripe_subscription_id,
         status=status,
@@ -187,14 +165,13 @@ def test_webhook_rejects_invalid_signature(monkeypatch, webhook_event_ids):
         session.close()
 
 
-def test_webhook_accepts_validly_signed_event(monkeypatch, install_ids, webhook_event_ids):
+def test_webhook_accepts_validly_signed_event(monkeypatch, account_ids, webhook_event_ids):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     sub_id = f"sub_accept_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "active", sub_id)
+        _seed_subscription(session, account_id, "active", sub_id)
         session.commit()
     finally:
         session.close()
@@ -209,14 +186,13 @@ def test_webhook_accepts_validly_signed_event(monkeypatch, install_ids, webhook_
 # --- idempotency ------------------------------------------------------------------------------
 
 
-def test_webhook_idempotent_on_duplicate_event_id(monkeypatch, install_ids, webhook_event_ids):
+def test_webhook_idempotent_on_duplicate_event_id(monkeypatch, account_ids, webhook_event_ids):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     sub_id = f"sub_idempotent_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "active", sub_id)
+        _seed_subscription(session, account_id, "active", sub_id)
         session.commit()
     finally:
         session.close()
@@ -251,15 +227,9 @@ def test_webhook_idempotent_on_duplicate_event_id(monkeypatch, install_ids, webh
 # --- checkout.session.completed ----------------------------------------------------------------
 
 
-def test_checkout_session_completed_creates_subscription(monkeypatch, install_ids, webhook_event_ids):
+def test_checkout_session_completed_creates_subscription(monkeypatch, account_ids, webhook_event_ids):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
-    session = get_session()
-    try:
-        _seed_install(session, install_id)
-        session.commit()
-    finally:
-        session.close()
+    account_id = _new_account_id(account_ids)
 
     sub_id = f"sub_new_{uuid.uuid4()}"
     now = int(time.time())
@@ -273,7 +243,7 @@ def test_checkout_session_completed_creates_subscription(monkeypatch, install_id
 
     obj = {
         "id": f"cs_{uuid.uuid4()}",
-        "client_reference_id": install_id,
+        "client_reference_id": account_id,
         "customer": "cus_new",
         "subscription": sub_id,
     }
@@ -285,13 +255,13 @@ def test_checkout_session_completed_creates_subscription(monkeypatch, install_id
     try:
         row = session.execute(
             text(
-                "SELECT install_id, status, stripe_subscription_id FROM subscriptions "
-                "WHERE install_id = :id"
+                "SELECT account_id, status, stripe_subscription_id FROM subscriptions "
+                "WHERE account_id = :id"
             ),
-            {"id": install_id},
+            {"id": account_id},
         ).fetchone()
         assert row is not None
-        assert str(row.install_id) == install_id
+        assert str(row.account_id) == account_id
         assert row.status == "active"
         assert row.stripe_subscription_id == sub_id
     finally:
@@ -299,15 +269,14 @@ def test_checkout_session_completed_creates_subscription(monkeypatch, install_id
 
 
 def test_checkout_session_completed_upserts_existing_canceled_subscription(
-    monkeypatch, install_ids, webhook_event_ids
+    monkeypatch, account_ids, webhook_event_ids
 ):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     old_sub_id = f"sub_old_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "canceled", old_sub_id)
+        _seed_subscription(session, account_id, "canceled", old_sub_id)
         session.commit()
     finally:
         session.close()
@@ -324,7 +293,7 @@ def test_checkout_session_completed_upserts_existing_canceled_subscription(
 
     obj = {
         "id": f"cs_{uuid.uuid4()}",
-        "client_reference_id": install_id,
+        "client_reference_id": account_id,
         "customer": "cus_resub",
         "subscription": new_sub_id,
     }
@@ -335,10 +304,10 @@ def test_checkout_session_completed_upserts_existing_canceled_subscription(
     session = get_session()
     try:
         rows = session.execute(
-            text("SELECT stripe_subscription_id, status FROM subscriptions WHERE install_id = :id"),
-            {"id": install_id},
+            text("SELECT stripe_subscription_id, status FROM subscriptions WHERE account_id = :id"),
+            {"id": account_id},
         ).fetchall()
-        # Upsert, not a second row -- subscriptions.install_id is UNIQUE, so a blind insert
+        # Upsert, not a second row -- subscriptions.account_id is UNIQUE, so a blind insert
         # here would have raised instead.
         assert len(rows) == 1
         assert rows[0].stripe_subscription_id == new_sub_id
@@ -351,15 +320,14 @@ def test_checkout_session_completed_upserts_existing_canceled_subscription(
 
 
 def test_subscription_updated_syncs_status_and_period_and_gate_agrees(
-    monkeypatch, install_ids, webhook_event_ids
+    monkeypatch, account_ids, webhook_event_ids
 ):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     sub_id = f"sub_update_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "active", sub_id)
+        _seed_subscription(session, account_id, "active", sub_id)
         session.commit()
     finally:
         session.close()
@@ -387,8 +355,8 @@ def test_subscription_updated_syncs_status_and_period_and_gate_agrees(
         assert row.current_period_start.timestamp() == pytest.approx(period_start_ts, abs=1)
         assert row.current_period_end.timestamp() == pytest.approx(period_end_ts, abs=1)
 
-        install = session.get(Install, uuid.UUID(install_id))
-        decision = evaluate_ask_gate(session, install, datetime.now(timezone.utc))
+        account = session.get(Account, uuid.UUID(account_id))
+        decision = evaluate_ask_gate(session, account, datetime.now(timezone.utc))
         assert decision.tier == "paid"
         assert decision.allowed is True
     finally:
@@ -408,15 +376,14 @@ def test_subscription_updated_noops_when_no_local_row_matches(monkeypatch, webho
 
 
 def test_subscription_deleted_sets_canceled_without_deleting_row(
-    monkeypatch, install_ids, webhook_event_ids
+    monkeypatch, account_ids, webhook_event_ids
 ):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     sub_id = f"sub_delete_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "active", sub_id)
+        _seed_subscription(session, account_id, "active", sub_id)
         session.commit()
     finally:
         session.close()
@@ -442,15 +409,14 @@ def test_subscription_deleted_sets_canceled_without_deleting_row(
 
 
 def test_invoice_payment_failed_is_recorded_but_does_not_touch_subscriptions(
-    monkeypatch, install_ids, webhook_event_ids
+    monkeypatch, account_ids, webhook_event_ids
 ):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
-    install_id = _new_install_id(install_ids)
+    account_id = _new_account_id(account_ids)
     sub_id = f"sub_invoice_{uuid.uuid4()}"
     session = get_session()
     try:
-        install = _seed_install(session, install_id)
-        _seed_subscription(session, install, "active", sub_id)
+        _seed_subscription(session, account_id, "active", sub_id)
         session.commit()
     finally:
         session.close()
@@ -478,9 +444,9 @@ def test_invoice_payment_failed_is_recorded_but_does_not_touch_subscriptions(
 # --- real checkout-session creation (deliberately unmocked) ----------------------------------
 
 
-def test_checkout_session_creation_hits_real_sandbox(install_ids):
-    install_id = _new_install_id(install_ids)
-    resp = client.post("/v1/billing/checkout-session", headers={"X-Install-Id": install_id})
+def test_checkout_session_creation_hits_real_sandbox(auth_session):
+    _, headers = auth_session()
+    resp = client.post("/v1/billing/checkout-session", headers=headers)
     assert resp.status_code == 200, resp.text
     checkout_url = resp.json()["checkout_url"]
     assert checkout_url.startswith("https://checkout.stripe.com/")

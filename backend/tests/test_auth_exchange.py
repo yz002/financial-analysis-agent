@@ -11,7 +11,6 @@ DATABASE_URL (backend/.env) -- not a mocked DB.
 import hashlib
 import uuid
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -26,21 +25,8 @@ from db.base import get_session
 
 client = TestClient(app)
 
-
-@pytest.fixture
-def account_ids():
-    """Tracks account_ids created by a test; deletes them (cascading to
-    linked_identities/sessions via ondelete=CASCADE) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(text("DELETE FROM accounts WHERE id = ANY(:ids)"), {"ids": ids})
-        session.commit()
-    finally:
-        session.close()
+# account_ids fixture now lives in conftest.py (Phase C session 4), shared across every test
+# file that authenticates through a real /v1/auth/exchange call.
 
 
 def _fake_verify(identity: ProviderIdentity):

@@ -27,35 +27,11 @@ from db.models import Turn
 client = TestClient(app)
 
 
-@pytest.fixture
-def install_ids():
-    """Tracks install_ids created by a test; deletes them (cascading to conversations/turns) after."""
-    ids: list[str] = []
-    yield ids
-    if not ids:
-        return
-    session = get_session()
-    try:
-        session.execute(
-            text("DELETE FROM installs WHERE install_id = ANY(:ids)"),
-            {"ids": ids},
-        )
-        session.commit()
-    finally:
-        session.close()
-
-
-def _new_install_id(install_ids: list[str]) -> str:
-    install_id = str(uuid.uuid4())
-    install_ids.append(install_id)
-    return install_id
-
-
-def _ask(install_id: str, question: str, conversation_id: str | None = None):
+def _ask(headers: dict, question: str, conversation_id: str | None = None):
     body = {"question": question}
     if conversation_id is not None:
         body["conversation_id"] = conversation_id
-    return client.post("/v1/ask", json=body, headers={"X-Install-Id": install_id})
+    return client.post("/v1/ask", json=body, headers=headers)
 
 
 def _fake_result(question: str, final_answer: str, tool_calls: list[dict] | None = None) -> dict:
@@ -188,15 +164,15 @@ def test_build_prior_messages_round_trip_fidelity():
 # --- /v1/ask integration: seeding, conversation continuation, 404s -------------------------
 
 
-def test_ask_with_conversation_id_uses_seeded_history(install_ids, monkeypatch):
-    install_id = _new_install_id(install_ids)
+def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch):
+    _, headers = auth_session()
 
     monkeypatch.setattr(
         app_main,
         "run_agent",
         lambda question, prior_messages=None: _fake_result(question, "MSFT revenue was $61.9 billion."),
     )
-    resp_1 = _ask(install_id, "What was MSFT revenue last quarter?")
+    resp_1 = _ask(headers, "What was MSFT revenue last quarter?")
     assert resp_1.status_code == 200, resp_1.text
     conversation_id = resp_1.json()["conversation_id"]
     assert conversation_id
@@ -208,7 +184,7 @@ def test_ask_with_conversation_id_uses_seeded_history(install_ids, monkeypatch):
         return _fake_result(question, "It grew 12% YoY.")
 
     monkeypatch.setattr(app_main, "run_agent", fake_run_agent_2)
-    resp_2 = _ask(install_id, "How did that compare YoY?", conversation_id=conversation_id)
+    resp_2 = _ask(headers, "How did that compare YoY?", conversation_id=conversation_id)
     assert resp_2.status_code == 200, resp_2.text
 
     prior_messages = captured["prior_messages"]
@@ -235,8 +211,8 @@ def test_ask_with_conversation_id_uses_seeded_history(install_ids, monkeypatch):
         session.close()
 
 
-def test_ask_with_invalid_conversation_id_404s(install_ids, monkeypatch):
-    install_id = _new_install_id(install_ids)
+def test_ask_with_invalid_conversation_id_404s(auth_session, monkeypatch):
+    _, headers = auth_session()
     monkeypatch.setattr(
         app_main,
         "run_agent",
@@ -245,23 +221,23 @@ def test_ask_with_invalid_conversation_id_404s(install_ids, monkeypatch):
         ),
     )
 
-    resp = _ask(install_id, "Anything.", conversation_id="not-a-uuid")
+    resp = _ask(headers, "Anything.", conversation_id="not-a-uuid")
     assert resp.status_code == 404, resp.text
 
-    resp = _ask(install_id, "Anything.", conversation_id=str(uuid.uuid4()))
+    resp = _ask(headers, "Anything.", conversation_id=str(uuid.uuid4()))
     assert resp.status_code == 404, resp.text
 
 
-def test_ask_with_foreign_conversation_id_404s(install_ids, monkeypatch):
-    owner_id = _new_install_id(install_ids)
-    other_id = _new_install_id(install_ids)
+def test_ask_with_foreign_conversation_id_404s(auth_session, monkeypatch):
+    _, owner_headers = auth_session()
+    _, other_headers = auth_session()
 
     monkeypatch.setattr(
         app_main,
         "run_agent",
         lambda question, prior_messages=None: _fake_result(question, "Answer."),
     )
-    resp = _ask(owner_id, "What was MSFT revenue last quarter?")
+    resp = _ask(owner_headers, "What was MSFT revenue last quarter?")
     assert resp.status_code == 200, resp.text
     conversation_id = resp.json()["conversation_id"]
 
@@ -272,5 +248,5 @@ def test_ask_with_foreign_conversation_id_404s(install_ids, monkeypatch):
             "run_agent must not be called for a foreign conversation_id"
         ),
     )
-    resp = _ask(other_id, "Follow-up.", conversation_id=conversation_id)
+    resp = _ask(other_headers, "Follow-up.", conversation_id=conversation_id)
     assert resp.status_code == 404, resp.text

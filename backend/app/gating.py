@@ -49,9 +49,9 @@ class AskGateDecision:
     prompt_upgrade: bool
 
 
-def _count_usage_events(session, install_id, start: datetime, end: datetime | None) -> int:
+def _count_usage_events(session, account_id, start: datetime, end: datetime | None) -> int:
     query = select(func.count()).select_from(UsageEvent).where(
-        UsageEvent.install_id == install_id,
+        UsageEvent.account_id == account_id,
         UsageEvent.occurred_at >= start,
         UsageEvent.outcome.in_(_COUNTED_OUTCOMES),
     )
@@ -60,15 +60,15 @@ def _count_usage_events(session, install_id, start: datetime, end: datetime | No
     return session.execute(query).scalar_one()
 
 
-def evaluate_ask_gate(session, install, now: datetime) -> AskGateDecision:
+def evaluate_ask_gate(session, account, now: datetime) -> AskGateDecision:
     """
     now must be timezone-aware UTC (datetime.now(timezone.utc)) -- compared directly
     against usage_events.occurred_at/subscriptions.current_period_* (both tz-aware
     DateTime columns) and used to derive the free tier's UTC-calendar-day boundary.
     """
-    if install.byo_key_id is not None:
-        byo_key = session.get(ByoKey, install.byo_key_id)
-        # is_active isn't spelled out verbatim in SS7.2's "install.byo_key_id IS NOT
+    if account.byo_key_id is not None:
+        byo_key = session.get(ByoKey, account.byo_key_id)
+        # is_active isn't spelled out verbatim in SS7.2's "account.byo_key_id IS NOT
         # NULL" phrasing, but byo_keys.is_active exists precisely to let a revoked key
         # stop granting access without deleting the audit row -- checking it here closes
         # that gap rather than treating a revoked key as still-unlimited access.
@@ -86,13 +86,13 @@ def evaluate_ask_gate(session, install, now: datetime) -> AskGateDecision:
             )
 
     subscription = session.execute(
-        select(Subscription).where(Subscription.install_id == install.install_id)
+        select(Subscription).where(Subscription.account_id == account.id)
     ).scalar_one_or_none()
 
     if subscription is not None and subscription.status in ("active", "trialing"):
         used = _count_usage_events(
             session,
-            install.install_id,
+            account.id,
             subscription.current_period_start,
             subscription.current_period_end,
         )
@@ -113,7 +113,7 @@ def evaluate_ask_gate(session, install, now: datetime) -> AskGateDecision:
     # subscription row at all), which fall through here rather than being hard-blocked.
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     next_midnight = today_start + timedelta(days=1)
-    used = _count_usage_events(session, install.install_id, today_start, None)
+    used = _count_usage_events(session, account.id, today_start, None)
     allowed = used < FREE_DAILY_CAP
     return AskGateDecision(
         tier="free",
