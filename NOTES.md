@@ -864,3 +864,26 @@
   forward, rather than re-diagnosed as a new concern each session: if a full-suite run shows a
   handful of failures with this exact error signature, re-run just the affected file(s) before
   assuming a real regression.
+  **Update, Phase C session 4: the above diagnosis was half right (a real remote-DB
+  characteristic, genuinely not a logic bug) but missed the actual mechanism, because there
+  never was a connection pool talking to Render's Postgres in the first place.**
+  `backend/db/base.py`'s `get_engine()` built a brand-new `Engine` — and so a brand-new,
+  unpooled TCP/TLS connection — on every single call, and `get_session()` called it on every
+  call; nothing in this codebase, tests included, was ever reusing a connection. A "1-3
+  failures deep into a 10+ minute run" pattern is exactly what that produces: hundreds of
+  independent fresh handshakes to a remote host, each with its own independent chance of a
+  transient network hiccup, with the odds of at least one hitting rising with run length —
+  not 1-3 real bugs, but also not really "the pool," since none existed. Confirmed directly
+  this session: under degraded local network conditions, a single fresh connection took
+  ~5-6s; reusing one cached `Engine` (SQLAlchemy's standard one-`Engine`-per-process pattern)
+  dropped every subsequent call to ~1.1-1.6s, and a full `pytest` run that had been failing
+  with this exact signature (and had taken up to 54 minutes under the same degraded
+  conditions) went to **80 passed, 0 failed in 9m23s**. Fixed by caching the `Engine` at
+  module scope in `get_engine()` (lazily, still on first real call, not at import time — see
+  `db/base.py`'s docstring for the full reasoning, including why a plain module-level global
+  was chosen over `functools.lru_cache`) and adding `pool_pre_ping=True`, now that a
+  connection can actually go stale in the pool between calls. The paragraph above stays as a
+  record of what multiple sessions actually observed and how it was (incompletely) explained
+  at the time — the "re-run the affected file if you see this" workaround is no longer
+  expected to be necessary, but isn't deleted, since a real transient network blip is still
+  possible even with pooling and the advice is still sound if one occurs.
