@@ -450,3 +450,60 @@ def test_checkout_session_creation_hits_real_sandbox(auth_session):
     assert resp.status_code == 200, resp.text
     checkout_url = resp.json()["checkout_url"]
     assert checkout_url.startswith("https://checkout.stripe.com/")
+
+
+# --- checkout-session field prefill (mocked -- verifies what the sandbox test can't) ---------
+# Phase C session 5: the sandbox test above only confirms an HTTP 200 and a checkout.stripe.com
+# URL, never that account_id/primary_email actually reached Stripe. These mock
+# stripe.checkout.Session.create (the same idiom used above for stripe.Subscription.retrieve) to
+# assert on the exact kwargs create_checkout_session builds.
+
+
+def test_checkout_session_creation_sets_client_reference_id_and_customer_email(
+    monkeypatch, auth_session
+):
+    account_id, headers = auth_session(email="prefill-check@example.com")
+    captured = {}
+
+    class _FakeSession:
+        url = "https://checkout.stripe.com/fake-session"
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeSession()
+
+    monkeypatch.setattr(app_billing.stripe.checkout.Session, "create", _fake_create)
+
+    resp = client.post("/v1/billing/checkout-session", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["checkout_url"] == "https://checkout.stripe.com/fake-session"
+    assert captured["client_reference_id"] == account_id
+    assert captured["customer_email"] == "prefill-check@example.com"
+
+
+def test_checkout_session_creation_omits_customer_email_when_primary_email_none(monkeypatch):
+    """create_checkout_session is a pure function taking primary_email directly, so the
+    nullable-primary_email path (design doc SS4's schema marks it nullable) is exercised
+    directly rather than via auth_session, which always derives a non-null email."""
+    captured = {}
+
+    class _FakeSession:
+        url = "https://checkout.stripe.com/fake-no-email"
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return _FakeSession()
+
+    monkeypatch.setattr(app_billing.stripe.checkout.Session, "create", _fake_create)
+
+    account_id = uuid.uuid4()
+    url = app_billing.create_checkout_session(
+        account_id,
+        None,
+        "price_test_123",
+        "https://example.com/success",
+        "https://example.com/cancel",
+    )
+    assert url == "https://checkout.stripe.com/fake-no-email"
+    assert captured["client_reference_id"] == str(account_id)
+    assert "customer_email" not in captured
