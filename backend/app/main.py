@@ -540,9 +540,15 @@ def propose_mapping(
         try:
             result = generate_mapping_proposal(raw, roles=MAPPABLE_ROLES)
         except anthropic.APIError as e:
-            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}") from e
+            # str(e) deliberately kept out of the response -- same session-10 hardening
+            # rule already applied to /v1/ask's equivalent handler below. The full
+            # exception, including any embedded request/response detail, is still
+            # captured server-side via logger.exception.
+            logger.exception("Anthropic API error in propose_mapping")
+            raise HTTPException(status_code=502, detail="Anthropic API error.") from e
         except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare traceback
-            raise HTTPException(status_code=500, detail=f"propose_mapping failed unexpectedly: {e}") from e
+            logger.exception("generate_mapping_proposal failed unexpectedly")
+            raise HTTPException(status_code=500, detail="propose_mapping failed unexpectedly.") from e
 
         row.proposed_mapping = [
             {"csv_column": c.csv_column, "proposed_role": c.proposed_role, "rationale": c.rationale}

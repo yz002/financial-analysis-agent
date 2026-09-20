@@ -19,9 +19,12 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anthropic
+import httpx2 as httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+import app.main as app_main
 from app.main import app
 from db.base import get_session
 
@@ -181,3 +184,59 @@ def test_cross_account_access_is_refused(auth_session):
         headers=other_headers,
     )
     assert resp.status_code == 404
+
+
+# --- propose-mapping error responses must not leak exception detail ----------------------
+#
+# Session 10's security hardening pass fixed this leak for /v1/ask's equivalent
+# anthropic.APIError and generic-exception handlers (see test_byo_key.py's
+# test_ask_generic_api_error_does_not_leak_exception_detail /
+# test_ask_generic_exception_does_not_leak_exception_detail) but never checked
+# propose-mapping's own two handlers, which EXTENSION_INTEGRATION.md's writeup surfaced
+# as still doing `detail=f"...: {e}"`. Fixed alongside that document; these tests are the
+# regression check.
+
+
+def _httpx_request():
+    # anthropic's exception constructors type-hint request/response as httpx2, not httpx --
+    # use the real type (matching test_byo_key.py's own idiom) rather than relying on the
+    # hint going unenforced.
+    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+def test_propose_mapping_api_error_does_not_leak_exception_detail(auth_session, monkeypatch):
+    _, headers = auth_session()
+    resp = _parse(headers)
+    assert resp.status_code == 200
+    csv_context_id = resp.json()["csv_context_id"]
+
+    marker = "internal-anthropic-error-detail-should-not-leak"
+
+    def _raise_api_error(raw, roles):
+        raise anthropic.APIError(marker, _httpx_request(), body=None)
+
+    monkeypatch.setattr(app_main, "generate_mapping_proposal", _raise_api_error)
+
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    assert resp.status_code == 502, resp.text
+    assert marker not in resp.text
+    assert resp.json()["detail"] == "Anthropic API error."
+
+
+def test_propose_mapping_generic_exception_does_not_leak_exception_detail(auth_session, monkeypatch):
+    _, headers = auth_session()
+    resp = _parse(headers)
+    assert resp.status_code == 200
+    csv_context_id = resp.json()["csv_context_id"]
+
+    marker = "internal-mapping-failure-detail-should-not-leak"
+
+    def _raise_generic_error(raw, roles):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(app_main, "generate_mapping_proposal", _raise_generic_error)
+
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    assert resp.status_code == 500, resp.text
+    assert marker not in resp.text
+    assert resp.json()["detail"] == "propose_mapping failed unexpectedly."
