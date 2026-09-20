@@ -887,3 +887,72 @@
   at the time — the "re-run the affected file if you see this" workaround is no longer
   expected to be necessary, but isn't deleted, since a real transient network blip is still
   possible even with pooling and the advice is still sound if one occurs.
+
+- **Phase C (sessions 1–7): replaced `X-Install-Id`'s no-real-authentication identity model
+  with OAuth-verified sign-in and revocable session tokens, closing `backend/SECURITY.md`'s
+  highest-priority finding (§2, opened during the Phase B session 10 hardening pass).** That
+  finding: `_get_or_create_install` accepted any client-presented UUID at face value and
+  silently auto-created a row for it — an `install_id` was a bearer credential in every sense
+  that mattered (read a conversation history, spend a BYO Anthropic key, consume a paid Stripe
+  subscription's quota) with no rotation or revocation path for the real owner, and
+  `SECURITY.md` explicitly named it a hard blocker on starting the Chrome extension's frontend
+  work. Closed across seven sessions, each independently reviewable: session 1 replaced
+  `installs` with a three-table schema — `accounts` (the old `identity_type`/`identity_value`
+  split is genuinely dropped, confirmed directly in `db/models.py`, since every account is now
+  provider-verified by construction), `linked_identities` (`UNIQUE(provider, provider_subject)`
+  — a provider's own stable subject/`sub`/Graph `id`, not the technically-mutable email, is the
+  anti-duplicate key), and `sessions` (`token_hash` — SHA-256 of an opaque
+  `secrets.token_urlsafe(32)` token, never the plaintext — plus `expires_at`/`revoked_at`);
+  session 2 added `backend/app/oauth_providers.py`, pure functions verifying a caller's OAuth
+  token directly against the provider (`GET https://openidconnect.googleapis.com/v1/userinfo`
+  for Google — deliberately not `oauth2.googleapis.com/tokeninfo`, which Google's own docs call
+  unsuitable for production; `GET https://graph.microsoft.com/v1.0/me` for Microsoft, since a
+  Graph-audience token is proprietary/opaque and can't be validated locally by a third party)
+  rather than attempting any local token validation; session 3 wired `POST /v1/auth/exchange`,
+  including the three-step cross-provider identity resolution (match on `(provider,
+  provider_subject)`, then on `provider_email` across any provider, then create new) that lets
+  the same verified email resolve to one account regardless of which provider a person signs in
+  with on a given device; session 4 replaced `_get_or_create_install` with `get_current_account`,
+  retrofitted onto every authenticated route, which 401s identically (same detail string) on a
+  missing header, an unknown token, an expired one, or a revoked one — deliberately
+  indistinguishable, this project's existing anti-enumeration convention extended to session
+  validation; session 5 was the mechanical `install_id`→`account_id` rename through
+  `gating.py`/`billing.py`, confirmed to touch no actual tier/decision logic; session 6 added
+  `POST /v1/auth/logout` (revokes only the presented token's own session row) and `POST
+  /v1/auth/sessions/revoke-all` (revokes every session on the account, including the one making
+  the call — the compromised-token-of-unknown-device case), both covered by dedicated
+  cross-account and same-account-different-session isolation tests; session 7 wrote
+  `backend/EXTENSION_INTEGRATION.md`, the contract document the extension's frontend build
+  needs, re-verifying every claim against the real code rather than transcribing the original
+  design doc's stated intent — which is how it found the leak documented below.
+  `backend/SECURITY.md` §2 carries the authoritative resolution note (dated 2026-09-20,
+  Phase C sessions 3–6); this entry is consistent with it.
+
+  An incidental infrastructure bug surfaced along the way, already fully documented in this
+  file's immediately preceding entry: session 4's work exposed that `db/base.py`'s
+  `get_engine()` was building a brand-new, unpooled `Engine` — and so a brand-new TCP/TLS
+  handshake to Render's remote Postgres — on every single call, which was the real cause of
+  test flakiness previously (mis-)diagnosed across multiple earlier Phase B sessions as an
+  intermittent Render connection drop. Fixed by caching the `Engine` at module scope with
+  `pool_pre_ping=True`; see that entry above for the full before/after numbers (80 passed in
+  9m23s vs. up to 54 minutes under degraded network conditions before the fix).
+
+  Writing session 7's extension-integration contract also surfaced a second, unrelated gap,
+  fixed the same session (commit `8c548b9`): `POST
+  /v1/csv/{csv_context_id}/propose-mapping`'s `anthropic.APIError` and generic-exception
+  handlers still built their `HTTPException` detail as `f"...: {e}"`, echoing raw exception text
+  into the HTTP response — the exact class of leak session 10's security hardening pass (see
+  above) closed for `/v1/ask`'s equivalent handlers, but that pass never actually checked this
+  route. Fixed the same way: `logger.exception` captures the full exception server-side, the
+  HTTP response gets a static message (`"Anthropic API error."` / `"propose_mapping failed
+  unexpectedly."`), and two new regression tests
+  (`test_propose_mapping_api_error_does_not_leak_exception_detail`,
+  `test_propose_mapping_generic_exception_does_not_leak_exception_detail` in
+  `backend/tests/test_csv_endpoints.py`) assert a distinctive marker string never reaches the
+  response body, mirroring `test_byo_key.py`'s existing `/v1/ask` coverage exactly. Full suite:
+  89 passed (87 baseline + these 2), 0 failed. `EXTENSION_INTEGRATION.md`'s own propose-mapping
+  error section was updated in lockstep so the document and the code never diverge on this
+  point. Worth naming as a general lesson, not just a one-off: session 10's hardening pass
+  audited every `logger.*`/`print(` call across the codebase *at the time*, but a route added
+  or modified afterward isn't automatically covered by an audit that already happened — this
+  fix closes the one instance of that gap found so far, not a guarantee no others exist.
