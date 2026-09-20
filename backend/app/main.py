@@ -95,8 +95,10 @@ from .schemas import (
     CsvParseRequest,
     CsvParseResponse,
     HealthResponse,
+    LogoutResponse,
     MappingProposalEntry,
     ProposeMappingResponse,
+    RevokeAllSessionsResponse,
     UsageResponse,
 )
 
@@ -118,7 +120,9 @@ def health(response: Response) -> HealthResponse:
     return HealthResponse(status="ok", db=db_status, commit=os.environ.get("RENDER_GIT_COMMIT"))
 
 
-def get_current_account(authorization: str = Header(alias="Authorization")) -> Account:
+def get_current_account(
+    request: Request, authorization: str = Header(alias="Authorization")
+) -> Account:
     """
     Design doc SS2: parses "Bearer <token>" from Authorization, hashes it (SHA-256, matching
     /v1/auth/exchange's own hashing), and looks up a live (not revoked, not expired) sessions
@@ -128,6 +132,12 @@ def get_current_account(authorization: str = Header(alias="Authorization")) -> A
     absolute cap) and returns the associated Account, replacing _get_or_create_install's
     auto-create-any-UUID shim outright -- an unrecognized token is now refused, not
     autovivified.
+
+    Also stashes the resolved session row's id on request.state.session_id (design doc SS2's
+    "Revocation" subsection) so /v1/auth/logout can revoke the exact row this request's token
+    validated against without re-deriving the token hash or re-querying sessions a second time.
+    Only the plain UUID is stashed, never the ORM row itself -- session_row would be detached/
+    expired the moment this function's own short-lived session closes below.
     """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid or expired session token.")
@@ -145,12 +155,14 @@ def get_current_account(authorization: str = Header(alias="Authorization")) -> A
         ).scalar_one_or_none()
         if session_row is None:
             raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+        session_id = session_row.id
         session_row.last_used_at = now
         session_row.expires_at = now + timedelta(days=90)
         account = session.get(Account, session_row.account_id)
         session.commit()
         session.refresh(account)  # reload attributes expired by the commit above
         session.expunge(account)  # detach so callers can read it after session.close()
+        request.state.session_id = session_id
         return account
     finally:
         session.close()
@@ -644,6 +656,59 @@ def auth_exchange(request: AuthExchangeRequest) -> AuthExchangeResponse:
     return AuthExchangeResponse(
         session_token=raw_token, account_id=str(account_id), expires_at=expires_at
     )
+
+
+@app.post("/v1/auth/logout", response_model=LogoutResponse)
+def logout(
+    request: Request, account: Account = Depends(get_current_account)
+) -> LogoutResponse:
+    """
+    Design doc SS2's "Revocation" subsection: revokes only the sessions row the presented
+    token validated against (request.state.session_id, set by get_current_account) -- other
+    devices' sessions for the same account are left untouched, so logging out on one device
+    never signs the account out everywhere.
+    """
+    now = datetime.now(timezone.utc)
+    session = get_session()
+    try:
+        session.execute(
+            update(SessionModel)
+            .where(
+                SessionModel.id == request.state.session_id,
+                SessionModel.account_id == account.id,
+            )
+            .values(revoked_at=now)
+        )
+        session.commit()
+    finally:
+        session.close()
+    return LogoutResponse(revoked=True)
+
+
+@app.post("/v1/auth/sessions/revoke-all", response_model=RevokeAllSessionsResponse)
+def revoke_all_sessions(
+    account: Account = Depends(get_current_account),
+) -> RevokeAllSessionsResponse:
+    """
+    Design doc SS2's compromised-token path: revokes every sessions row for the caller's
+    account_id, including the one making this very request, forcing a fresh
+    /v1/auth/exchange on every device.
+    """
+    now = datetime.now(timezone.utc)
+    session = get_session()
+    try:
+        session.execute(
+            update(SessionModel)
+            .where(
+                SessionModel.account_id == account.id,
+                SessionModel.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        session.commit()
+    finally:
+        session.close()
+    return RevokeAllSessionsResponse(revoked=True)
 
 
 @app.get("/v1/usage", response_model=UsageResponse)

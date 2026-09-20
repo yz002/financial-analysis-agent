@@ -3,14 +3,16 @@
 This document is the output of Phase B's final session: a real audit (not a
 rubber-stamp) of the design doc's §4 ("Security posture") against what the
 code actually does, plus the rotation runbooks §4/§6 step 10 call for. It's
-organized as: the cross-install isolation audit, the one open finding that is
-**not** resolved, the three rotation runbooks, the log-content review, and
-what's checkable about Postgres network access from this repo alone.
+organized as: the cross-install (now cross-account) isolation audit, this
+project's highest-priority finding — open at the time this file was first
+written, **resolved as of 2026-09-20, see §2** — the three rotation runbooks,
+the log-content review, and what's checkable about Postgres network access
+from this repo alone.
 
-Findings here are honest by design — including the one below that isn't
-fixed. Treat this file as a living record: update it whenever a rotation
-actually happens (who, when, why) and whenever the open finding's status
-changes.
+Findings here are honest by design — including status changes recorded
+plainly rather than glossed over. Treat this file as a living record: update
+it whenever a rotation actually happens (who, when, why) and whenever a
+finding's status changes.
 
 ---
 
@@ -41,6 +43,20 @@ Every query in `backend/app/main.py`, `gating.py`, `billing.py`, and
   `X-Install-Id`. A caller cannot inject an arbitrary `install_id` into a
   subscription via the webhook.
 
+**Confirmed correct, added Phase C session 6:** `POST /v1/auth/logout` and `POST
+/v1/auth/sessions/revoke-all` (`backend/app/main.py`) both accept no client-supplied account or
+session identifier at all — the only inputs are the `Authorization: Bearer` token itself and
+`get_current_account`'s resolution of it. `revoke-all` scopes its `UPDATE` solely to
+`sessions.account_id == account.id`, where `account` comes only from `get_current_account`, so it
+cannot be made to touch another account's sessions. `logout` scopes to
+`sessions.id == request.state.session_id` (itself set only by `get_current_account`, from the
+exact row the presented token validated against — never read from the request body, a header, or
+a path parameter) with `account_id == account.id` as a redundant second check, so it can only ever
+revoke the row belonging to the token that authenticated the request. Verified directly in
+`backend/tests/test_auth_logout.py::test_revoke_all_does_not_touch_other_accounts` (cross-account
+isolation) and `::test_logout_revokes_only_presented_session` (same-account, different-session
+isolation).
+
 **Worth a defensive tightening (not urgent — not exploitable today):**
 - `main.py`'s `ask()` has two queries that rely on an ownership check
   performed earlier in the *same* function rather than re-verifying
@@ -56,10 +72,11 @@ Every query in `backend/app/main.py`, `gating.py`, `billing.py`, and
 
 ---
 
-## 2. OPEN FINDING — `X-Install-Id` has no real authentication
+## 2. `X-Install-Id` had no real authentication
 
-**Status: unresolved. Not an accepted trade-off — a real gap that must be
-closed before further product surface is built on top of it.**
+**Status: RESOLVED (2026-09-20, Phase C sessions 3–6).** The rest of this section is left as
+written at the time the finding was opened, since this file is a living record, not a rewritten
+history — see the resolution note at the end of this section for what actually closed it.
 
 The design doc (§1) describes the auth mechanism as "`X-Install-Id` + ...
 session-token pairing." No session-token mechanism exists anywhere in this
@@ -100,6 +117,29 @@ begins, since that frontend's credential-storage design (where the token
 lives client-side, how it survives a browser restart, what happens on
 logout) depends on this decision. Do not schedule that frontend work ahead
 of this session.
+
+**Resolution (2026-09-20, Phase C sessions 3–6):** real session-token authentication now exists
+end to end. `POST /v1/auth/exchange` (session 3) verifies the caller's OAuth token directly
+against Google/Microsoft and issues a fresh opaque bearer token (`secrets.token_urlsafe(32)`),
+persisted only as its SHA-256 hash in a new `sessions` table — the plaintext token is never
+stored and is returned to the caller exactly once. `get_current_account` (session 4, retrofitted
+onto every authenticated route: `/v1/ask`, `/v1/csv/parse`, `/v1/csv/{id}/propose-mapping`,
+`/v1/csv/{id}/confirm`, `/v1/usage`, `/v1/byo-key`, `/v1/billing/checkout-session`) validates that
+hash against a live, non-expired, non-revoked `sessions` row on every single request and 401s
+identically on any miss (unknown, expired, or revoked token) — `_get_or_create_install`'s
+auto-create-any-UUID shim, the actual root cause of this finding, is deleted outright, not
+hardened. A working revocation path — the piece this finding always said was required before it
+could be called closed — now exists too (session 6): `POST /v1/auth/logout` revokes the exact
+session the presented token belongs to (other devices untouched), and `POST
+/v1/auth/sessions/revoke-all` revokes every session on the caller's account at once, including
+the one making the request, for the compromised-token case where the affected device is unknown.
+Both are covered end to end in `backend/tests/test_auth_logout.py` and in
+`backend/app/smoke_test.py`'s live walkthrough (issue a token, confirm it works, log out, confirm
+the same token now 401s). The original vulnerability this finding described — whoever holds an
+install's UUID can impersonate it indefinitely, with no rotation or revocation path available to
+the real owner — is closed: an account identifier alone is no longer sufficient to act as that
+account, and a leaked token can now be revoked by the real owner instead of remaining valid
+indefinitely.
 
 ---
 

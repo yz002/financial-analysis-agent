@@ -89,6 +89,18 @@ def main() -> int:
     if resp.status_code != 200:
         failures.append(f"/v1/usage: expected 200, got {resp.status_code} {resp.text}")
 
+    resp = client.post("/v1/auth/logout", headers=headers)
+    print(f"POST /v1/auth/logout -> {resp.status_code} {resp.json() if resp.status_code == 200 else resp.text}")
+    if resp.status_code != 200:
+        failures.append(f"/v1/auth/logout: expected 200, got {resp.status_code} {resp.text}")
+
+    resp = client.get("/v1/usage", headers=headers)
+    print(f"GET /v1/usage (after logout) -> {resp.status_code}")
+    if resp.status_code != 401:
+        failures.append(
+            f"/v1/usage after logout: expected 401 (token revoked), got {resp.status_code} {resp.text}"
+        )
+
     if failures:
         print("\nFAIL:")
         for f in failures:

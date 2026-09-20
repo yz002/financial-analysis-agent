@@ -123,3 +123,11 @@ class AuthExchangeResponse(BaseModel):
     session_token: str
     account_id: str
     expires_at: datetime
+
+
+class LogoutResponse(BaseModel):
+    revoked: bool
+
+
+class RevokeAllSessionsResponse(BaseModel):
+    revoked: bool
