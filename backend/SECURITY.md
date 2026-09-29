@@ -318,10 +318,9 @@ configured in production lives only in Render's dashboard.
 
 ## 7. Cross-provider account linking by email (nOAuth-class account takeover)
 
-**Status: FIXED IN CODE (2026-09-29), NOT YET DEPLOYED.** The fix is in the working tree only.
-Production on Render still runs the vulnerable resolution logic until the fix is committed and
-pushed, since a push to `main` auto-deploys the backend. Update this line with the deploy date
-when that happens.
+**Status: FIXED AND DEPLOYED 2026-09-29 ~19:08 UTC (commit 7d9a1c1).** The exposure window
+(2026-09-18 → 2026-09-29 ~19:08 UTC) is closed, with no evidence of exploitation. See the audit
+record under residual item 1 below.
 
 **Finding.** `POST /v1/auth/exchange` resolved a verified provider identity to an account in
 three steps (`_resolve_account_for_identity`, `backend/app/main.py`): (a) an exact
@@ -384,6 +383,21 @@ are amended to match.
    identities from 2026-09-29's live sign-in testing. Each multi-row account needs a human
    review: whose identities are these, and was the later link expected? Never delete rows
    automatically based on this query. Record the review's outcome here.
+
+   The query is packaged as `backend/scripts/audit_linked_identities.py`. It runs inside a
+   `SET TRANSACTION READ ONLY` transaction that is always rolled back.
+
+   **Audit record, 2026-09-29**, run by the owner against production (database
+   `fin_agent_db`) after the fix was deployed:
+   - Exactly 1 account had more than one linked identity:
+     `36f87f76-1ff4-4a13-809d-2d54d23b5745`, with google (created 2026-09-23 09:56 UTC) and
+     microsoft (created 2026-09-29 18:29 UTC).
+   - Both identities are the owner's own, from live sign-in testing.
+   - Owner-reviewed as legitimate. No action needed.
+   - No other multi-identity account exists. This is a snapshot of current rows, not a history
+     log, but nothing in this codebase deletes `accounts` or `linked_identities` rows except
+     the test suite's own cleanup, so an email-based link made during the exposure window
+     would still show up here. There's no evidence the vulnerability was exploited.
 2. **Microsoft subject isn't tenant-qualified.** The stored Microsoft subject is Graph `/me`
    `id` (the user's object ID) without the tenant ID. Object IDs are globally unique GUIDs, so
    this isn't a practical collision risk, but Microsoft's guidance is to key on `oid`+`tid`.
