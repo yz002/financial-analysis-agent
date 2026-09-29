@@ -24,12 +24,14 @@ Neither call is cached -- every /v1/auth/exchange re-verifies with the provider,
 grant is caught at the next sign-in.
 """
 
+import os
 import re
 from dataclasses import dataclass
 
 import requests
 
 GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 MICROSOFT_GRAPH_ME_URL = "https://graph.microsoft.com/v1.0/me"
 
 # A basic email-format check for Microsoft's userPrincipalName fallback -- not full RFC 5322
@@ -55,11 +57,64 @@ class ProviderEmailUnavailableError(OAuthProviderError):
     account. Maps to a 422 at the route layer (session 3)."""
 
 
+class OAuthProviderConfigError(OAuthProviderError):
+    """A required server-side OAuth config value (e.g. GOOGLE_CLIENT_SECRET) is missing.
+    A server misconfiguration, not a caller fault -- maps to a 500 at the route layer,
+    same class of error as /v1/billing/checkout-session's missing STRIPE_PRICE_ID."""
+
+
 @dataclass
 class ProviderIdentity:
     provider: str
     subject: str
     email: str
+
+
+def exchange_google_code_for_token(code: str, code_verifier: str, redirect_uri: str) -> str:
+    """
+    Google's "Web application" client type -- the only one compatible with
+    launchWebAuthFlow's https redirect requirement (confirmed this session against
+    Chrome's own developer docs: the dedicated "Chrome Extension" client type has no
+    redirect-URI field and only works with chrome.identity.getAuthToken) -- is itself
+    documented by Google as a confidential client: "a web server application does need a
+    secret." PKCE does not substitute for client_secret at its token endpoint, unlike
+    Microsoft's Azure "Single-page application" platform type, which is a genuine
+    no-secret public client (confirmed via Google's current OAuth 2.0 docs, Phase D
+    session 2 -- see EXTENSION_INTEGRATION.md SS1). So, unlike Microsoft's exchange (done
+    client-side by the extension), this one happens here, where GOOGLE_CLIENT_SECRET can
+    stay confidential.
+
+    Raises OAuthProviderConfigError if GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET aren't set
+    (a server misconfiguration), InvalidProviderTokenError on a non-200 response or a
+    response missing access_token (an invalid/expired code, a code_verifier/redirect_uri
+    mismatch, etc. -- Google doesn't distinguish these to callers, so neither do we).
+    """
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise OAuthProviderConfigError("GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET is not configured.")
+
+    response = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "code_verifier": code_verifier,
+            "redirect_uri": redirect_uri,
+        },
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code != 200:
+        raise InvalidProviderTokenError(
+            f"Google token exchange failed with status {response.status_code}."
+        )
+
+    access_token = response.json().get("access_token")
+    if not access_token:
+        raise InvalidProviderTokenError("Google token exchange response did not include an access token.")
+    return access_token
 
 
 def verify_google_token(oauth_token: str) -> ProviderIdentity:

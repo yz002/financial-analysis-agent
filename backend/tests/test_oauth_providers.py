@@ -12,7 +12,9 @@ import pytest
 import app.oauth_providers as oauth_providers
 from app.oauth_providers import (
     InvalidProviderTokenError,
+    OAuthProviderConfigError,
     ProviderEmailUnavailableError,
+    exchange_google_code_for_token,
     verify_google_token,
     verify_microsoft_token,
 )
@@ -29,6 +31,89 @@ class _FakeResponse:
 
 def _mock_get(monkeypatch, response: _FakeResponse):
     monkeypatch.setattr(oauth_providers.requests, "get", lambda *args, **kwargs: response)
+
+
+def _mock_post(monkeypatch, response: _FakeResponse):
+    monkeypatch.setattr(oauth_providers.requests, "post", lambda *args, **kwargs: response)
+
+
+def _set_google_env(monkeypatch, client_id="fake-client-id", client_secret="fake-client-secret"):
+    if client_id is None:
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+    else:
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", client_id)
+    if client_secret is None:
+        monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", client_secret)
+
+
+# --- exchange_google_code_for_token (Phase D session 2 -- Google's Web application client
+# type requires a client_secret at its token endpoint; this backend performs that exchange
+# server-side instead of the extension doing it client-side) -------------------------------
+
+
+def test_exchange_google_code_for_token_success(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(200, {"access_token": "real-access-token"}))
+
+    token = exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+    assert token == "real-access-token"
+
+
+def test_exchange_google_code_for_token_sends_client_secret_and_pkce_fields(monkeypatch):
+    _set_google_env(monkeypatch, client_id="cid-123", client_secret="csecret-456")
+    captured = {}
+
+    def _fake_post(url, data=None, timeout=None):
+        captured["url"] = url
+        captured["data"] = data
+        return _FakeResponse(200, {"access_token": "tok"})
+
+    monkeypatch.setattr(oauth_providers.requests, "post", _fake_post)
+
+    exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+    assert captured["url"] == oauth_providers.GOOGLE_TOKEN_URL
+    assert captured["data"] == {
+        "grant_type": "authorization_code",
+        "client_id": "cid-123",
+        "client_secret": "csecret-456",
+        "code": "code-1",
+        "code_verifier": "verifier-1",
+        "redirect_uri": "https://ext.chromiumapp.org/",
+    }
+
+
+def test_exchange_google_code_for_token_refuses_on_non_200(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(400, {"error": "invalid_grant"}))
+
+    with pytest.raises(InvalidProviderTokenError):
+        exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+def test_exchange_google_code_for_token_refuses_when_access_token_missing(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(200, {"token_type": "Bearer"}))
+
+    with pytest.raises(InvalidProviderTokenError):
+        exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+def test_exchange_google_code_for_token_refuses_when_client_id_missing(monkeypatch):
+    _set_google_env(monkeypatch, client_id=None)
+
+    with pytest.raises(OAuthProviderConfigError):
+        exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+def test_exchange_google_code_for_token_refuses_when_client_secret_missing(monkeypatch):
+    _set_google_env(monkeypatch, client_secret=None)
+
+    with pytest.raises(OAuthProviderConfigError):
+        exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
 
 
 # --- verify_google_token -----------------------------------------------------------------

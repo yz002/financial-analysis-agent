@@ -113,7 +113,20 @@ class ByoKeyResponse(BaseModel):
 
 class AuthExchangeRequest(BaseModel):
     provider: Literal["google", "microsoft"]
-    oauth_token: str
+    # Microsoft: a pre-exchanged OAuth access token -- Azure's "Single-page application"
+    # platform type is a genuine no-secret public client, so the extension completes the
+    # code-for-token exchange itself and sends the result straight here.
+    oauth_token: str | None = None
+    # Google: the raw authorization code + PKCE verifier + redirect_uri instead of a
+    # pre-exchanged token. Google's OAuth client types compatible with
+    # launchWebAuthFlow's https redirect requirement ("Web application") are documented
+    # by Google itself as confidential clients -- PKCE does not substitute for
+    # client_secret at their token endpoint, unlike Microsoft's platform type above. So
+    # this backend performs Google's code-for-token exchange server-side (Phase D
+    # session 2 amendment; see app/oauth_providers.py's exchange_google_code_for_token).
+    code: str | None = None
+    code_verifier: str | None = None
+    redirect_uri: str | None = None
 
 
 class AuthExchangeResponse(BaseModel):

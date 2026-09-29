@@ -55,7 +55,26 @@ def auth_session(monkeypatch, account_ids):
         verify_attr = "verify_google_token" if provider == "google" else "verify_microsoft_token"
         monkeypatch.setattr(app_main.oauth_providers, verify_attr, lambda oauth_token: identity)
 
-        resp = client.post("/v1/auth/exchange", json={"provider": provider, "oauth_token": "t"})
+        if provider == "google":
+            # Phase D session 2: Google's code-for-token exchange now happens
+            # server-side (app/oauth_providers.py's exchange_google_code_for_token) --
+            # mock it too, at the same boundary as verify_<provider>_token above, and
+            # send the new request shape.
+            monkeypatch.setattr(
+                app_main.oauth_providers,
+                "exchange_google_code_for_token",
+                lambda code, code_verifier, redirect_uri: "fake-oauth-token",
+            )
+            payload = {
+                "provider": provider,
+                "code": "fake-code",
+                "code_verifier": "fake-verifier",
+                "redirect_uri": "https://fake-extension-id.chromiumapp.org/",
+            }
+        else:
+            payload = {"provider": provider, "oauth_token": "t"}
+
+        resp = client.post("/v1/auth/exchange", json=payload)
         assert resp.status_code == 200, resp.text
         body = resp.json()
         account_ids.append(body["account_id"])

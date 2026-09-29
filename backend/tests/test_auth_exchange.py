@@ -18,6 +18,7 @@ import app.main as app_main
 from app.main import app
 from app.oauth_providers import (
     InvalidProviderTokenError,
+    OAuthProviderConfigError,
     ProviderEmailUnavailableError,
     ProviderIdentity,
 )
@@ -28,9 +29,24 @@ client = TestClient(app)
 # account_ids fixture now lives in conftest.py (Phase C session 4), shared across every test
 # file that authenticates through a real /v1/auth/exchange call.
 
+# Phase D session 2: Google's code-for-token exchange now happens server-side
+# (app/oauth_providers.py's exchange_google_code_for_token), so every test that signs in via
+# Google mocks it too, at the same boundary as _fake_verify below, and posts the new
+# code/code_verifier/redirect_uri request shape instead of a pre-exchanged oauth_token.
+_GOOGLE_CODE_BODY = {
+    "provider": "google",
+    "code": "fake-code",
+    "code_verifier": "fake-verifier",
+    "redirect_uri": "https://fake-extension-id.chromiumapp.org/",
+}
+
 
 def _fake_verify(identity: ProviderIdentity):
     return lambda oauth_token: identity
+
+
+def _fake_exchange(oauth_token: str = "fake-oauth-token"):
+    return lambda code, code_verifier, redirect_uri: oauth_token
 
 
 def _count(session, table: str, **where) -> int:
@@ -47,8 +63,9 @@ def _count(session, table: str, **where) -> int:
 def test_new_identity_creates_account_linked_identity_and_session(monkeypatch, account_ids):
     identity = ProviderIdentity(provider="google", subject="g-sub-1", email="new@example.com")
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(identity))
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
 
-    resp = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t"})
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     account_ids.append(body["account_id"])
@@ -85,9 +102,10 @@ def test_new_identity_creates_account_linked_identity_and_session(monkeypatch, a
 def test_repeat_exchange_same_provider_subject_reuses_account(monkeypatch, account_ids):
     identity = ProviderIdentity(provider="google", subject="g-sub-2", email="repeat@example.com")
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(identity))
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
 
-    first = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t1"})
-    second = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t2"})
+    first = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
+    second = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
     account_ids.append(first.json()["account_id"])
@@ -112,8 +130,9 @@ def test_second_provider_same_email_merges_into_existing_account(monkeypatch, ac
     ms_identity = ProviderIdentity(provider="microsoft", subject="ms-sub-3", email="cross@example.com")
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(google_identity))
     monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(ms_identity))
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
 
-    first = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t"})
+    first = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     second = client.post("/v1/auth/exchange", json={"provider": "microsoft", "oauth_token": "t"})
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
@@ -142,8 +161,9 @@ def test_different_email_different_provider_creates_separate_accounts(monkeypatc
     ms_identity = ProviderIdentity(provider="microsoft", subject="ms-sub-4", email="b4@example.com")
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(google_identity))
     monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(ms_identity))
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
 
-    first = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t"})
+    first = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     second = client.post("/v1/auth/exchange", json={"provider": "microsoft", "oauth_token": "t"})
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
@@ -159,6 +179,9 @@ def test_invalid_token_returns_401_and_creates_no_rows(monkeypatch):
     def _raise(oauth_token):
         raise InvalidProviderTokenError("bad token")
 
+    # exchange_google_code_for_token must succeed for verify_google_token (which raises,
+    # below) to even be reached -- mock it to a fixed fake token.
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _raise)
 
     session = get_session()
@@ -167,7 +190,7 @@ def test_invalid_token_returns_401_and_creates_no_rows(monkeypatch):
     finally:
         session.close()
 
-    resp = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "bad"})
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     assert resp.status_code == 401, resp.text
 
     session = get_session()
@@ -201,6 +224,58 @@ def test_unavailable_email_returns_422_and_creates_no_rows(monkeypatch):
     assert after == before
 
 
+# --- Phase D session 2: request-shape validation and the Google code-exchange leg ----------
+
+
+def test_google_missing_code_fields_returns_422():
+    # Old-shape request (pre-session-2 oauth_token) sent for provider "google" -- this is
+    # a client bug, not an account condition, per backend/EXTENSION_INTEGRATION.md SS1.
+    resp = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t"})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "Google sign-in requires code, code_verifier, and redirect_uri."
+
+
+def test_microsoft_missing_oauth_token_returns_422():
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY | {"provider": "microsoft"})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "Microsoft sign-in requires oauth_token."
+
+
+def test_google_code_exchange_failure_returns_401_and_creates_no_rows(monkeypatch):
+    def _raise(code, code_verifier, redirect_uri):
+        raise InvalidProviderTokenError("bad code")
+
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _raise)
+
+    session = get_session()
+    try:
+        before = _count(session, "accounts")
+    finally:
+        session.close()
+
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["detail"] == "OAuth token could not be verified."
+
+    session = get_session()
+    try:
+        after = _count(session, "accounts")
+    finally:
+        session.close()
+    assert after == before
+
+
+def test_google_oauth_not_configured_returns_500(monkeypatch):
+    def _raise(code, code_verifier, redirect_uri):
+        raise OAuthProviderConfigError("GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET is not configured.")
+
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _raise)
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"] == "Google OAuth is not configured."
+
+
 # --- session_token hash discipline ----------------------------------------------------------
 
 
@@ -209,8 +284,9 @@ def test_session_token_hash_matches_stored_token_hash_and_plaintext_not_persiste
 ):
     identity = ProviderIdentity(provider="google", subject="g-sub-5", email="hash@example.com")
     monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(identity))
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
 
-    resp = client.post("/v1/auth/exchange", json={"provider": "google", "oauth_token": "t"})
+    resp = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     account_ids.append(body["account_id"])

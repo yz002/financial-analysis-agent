@@ -626,13 +626,34 @@ def auth_exchange(request: AuthExchangeRequest) -> AuthExchangeResponse:
     (app.oauth_providers), resolves it to an account per design doc SS3, and issues a new
     opaque session token.
     """
-    verify = (
-        oauth_providers.verify_google_token
-        if request.provider == "google"
-        else oauth_providers.verify_microsoft_token
-    )
+    if request.provider == "google":
+        # Google's "Web application" client type is a confidential client -- PKCE alone
+        # doesn't satisfy its token endpoint, unlike Microsoft's Azure SPA platform type
+        # below -- so the extension sends the raw code/verifier/redirect_uri instead of
+        # a pre-exchanged token, and this exchange happens here (Phase D session 2
+        # amendment; see app/oauth_providers.py's exchange_google_code_for_token).
+        if not (request.code and request.code_verifier and request.redirect_uri):
+            raise HTTPException(
+                status_code=422,
+                detail="Google sign-in requires code, code_verifier, and redirect_uri.",
+            )
+        try:
+            oauth_token = oauth_providers.exchange_google_code_for_token(
+                request.code, request.code_verifier, request.redirect_uri
+            )
+        except oauth_providers.InvalidProviderTokenError as e:
+            raise HTTPException(status_code=401, detail="OAuth token could not be verified.") from e
+        except oauth_providers.OAuthProviderConfigError as e:
+            raise HTTPException(status_code=500, detail="Google OAuth is not configured.") from e
+        verify = oauth_providers.verify_google_token
+    else:
+        if not request.oauth_token:
+            raise HTTPException(status_code=422, detail="Microsoft sign-in requires oauth_token.")
+        oauth_token = request.oauth_token
+        verify = oauth_providers.verify_microsoft_token
+
     try:
-        identity = verify(request.oauth_token)
+        identity = verify(oauth_token)
     except oauth_providers.InvalidProviderTokenError as e:
         raise HTTPException(status_code=401, detail="OAuth token could not be verified.") from e
     except oauth_providers.ProviderEmailUnavailableError as e:
