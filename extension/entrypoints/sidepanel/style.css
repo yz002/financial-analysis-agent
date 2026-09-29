@@ -5,6 +5,14 @@ body {
   color: var(--color-ink);
 }
 
+/* Any element hidden via the `hidden` attribute must stay hidden regardless of a later
+   `display` rule (e.g. #signed-out-view/#signed-in-view's `display: flex` below) --
+   author-stylesheet rules otherwise override the UA stylesheet's [hidden] { display:
+   none }, since author styles beat UA styles independent of specificity. */
+[hidden] {
+  display: none !important;
+}
+
 #app {
   display: flex;
   flex-direction: column;
@@ -28,6 +36,26 @@ h1 {
   line-height: var(--text-body-line-height);
   letter-spacing: var(--text-body-letter-spacing);
   color: var(--color-ink-secondary);
+}
+
+#signed-out-view,
+#signed-in-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+#status-message {
+  font-size: var(--text-meta-size);
+  font-weight: var(--text-meta-weight);
+  line-height: var(--text-meta-line-height);
+  letter-spacing: var(--text-meta-letter-spacing);
+  color: var(--color-ink-mute);
+  min-height: 1em;
+}
+
+#status-message.status-message--error {
+  color: var(--color-error);
 }
 
 button {
@@ -56,12 +84,16 @@ button:focus-visible {
   background: var(--color-primary-press);
 }
 
-#signin-microsoft {
+#signin-microsoft,
+#signout,
+#revoke-all {
   background: var(--color-canvas);
   color: var(--color-primary);
   border-color: var(--color-hairline-input);
 }
 
-#signin-microsoft:hover {
+#signin-microsoft:hover,
+#signout:hover,
+#revoke-all:hover {
   background: var(--color-canvas-soft);
 }

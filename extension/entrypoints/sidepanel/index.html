@@ -10,9 +10,20 @@
   <body>
     <div id="app">
       <h1>Financial Analysis Agent</h1>
-      <p>Sign in to connect your spreadsheet.</p>
-      <button id="signin-google" type="button">Sign in with Google</button>
-      <button id="signin-microsoft" type="button">Sign in with Microsoft</button>
+
+      <div id="status-message" role="status" aria-live="polite"></div>
+
+      <div id="signed-out-view">
+        <p>Sign in to connect your spreadsheet.</p>
+        <button id="signin-google" type="button">Sign in with Google</button>
+        <button id="signin-microsoft" type="button">Sign in with Microsoft</button>
+      </div>
+
+      <div id="signed-in-view" hidden>
+        <p id="account-info"></p>
+        <button id="signout" type="button">Sign out</button>
+        <button id="revoke-all" type="button">Sign out everywhere</button>
+      </div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

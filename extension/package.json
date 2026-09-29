@@ -12,11 +12,15 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "jsdom": "^25.0.1",
     "typescript": "^5.9.3",
     "vite": "^8.1.5",
+    "vitest": "^5.0.1",
     "web-ext": "^10.5.0",
     "wxt": "^0.21.3"
   }

@@ -18,6 +18,9 @@
   --color-on-primary: #ffffff;
   --color-hairline: #e3e8ee;
   --color-hairline-input: #a8c3de;
+  /* Status/error accent -- DESIGN.md's "ruby", documented there as a non-button
+     status accent, never a button fill. */
+  --color-error: #ea2261;
 
   /* Focus ring -- unchanged from the source system; accessibility-critical
      sizing doesn't compress just because the panel is narrow. */

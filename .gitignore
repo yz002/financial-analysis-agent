@@ -15,6 +15,11 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The bare `lib/` pattern above (Python venv boilerplate) matches at any depth and was
+# silently gitignoring extension/lib/ (the Chrome extension's OAuth modules, Phase D
+# session 2) -- exempted here rather than removing the Python pattern outright, since
+# .venv/ is already separately ignored and this project has no top-level Python lib/.
+!extension/lib/
 lib64/
 parts/
 sdist/
