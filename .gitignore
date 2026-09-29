@@ -224,3 +224,7 @@ data/raw/
 *.db
 .DS_Store
 evals/results/
+
+# Third-party design-system reference repo (VoltAgent/awesome-design-md, MIT), cloned locally
+# for browsing -- the one file used is copied into extension/DESIGN.md with its license.
+awesome-design-md/
