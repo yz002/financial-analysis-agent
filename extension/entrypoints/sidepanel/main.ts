@@ -7,7 +7,19 @@ import {
   onStoredSessionChanged,
   type StoredSession,
 } from '../../lib/sessionStorage';
-import type { AuthProvider } from '../../lib/authConfig';
+import { BACKEND_BASE_URL, type AuthProvider } from '../../lib/authConfig';
+
+// Every build mode loads from the same unpacked folder (see wxt.config.ts's
+// outDirTemplate), so which backend a loaded build talks to isn't otherwise visible.
+console.info('[sidepanel] Backend:', BACKEND_BASE_URL);
+// Non-production builds also show it in the panel itself; production renders nothing
+// extra. MODE is replaced at build time, so a production bundle drops this block.
+if (import.meta.env.MODE !== 'production') {
+  const backendInfo = document.createElement('p');
+  backendInfo.id = 'backend-info';
+  backendInfo.textContent = `Backend: ${BACKEND_BASE_URL}`;
+  document.querySelector('#app')?.append(backendInfo);
+}
 
 const signedOutView = document.querySelector<HTMLElement>('#signed-out-view');
 const signedInView = document.querySelector<HTMLElement>('#signed-in-view');

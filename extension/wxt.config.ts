@@ -1,8 +1,18 @@
 import { defineConfig } from 'wxt';
+import { hostPermissionFor, resolveBackendBaseUrl } from './lib/backendUrl';
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
-  manifest: {
+  // Every mode builds into the same .output/chrome-mv3 folder (WXT's default template
+  // appends "-dev" for development mode). The unpacked extension's ID is derived from
+  // its folder path -- there's no manifest `key` -- and the Google/Azure OAuth redirect
+  // URIs (https://<id>.chromiumapp.org/) are registered for that ID, so a mode-specific
+  // folder would silently break sign-in with a redirect-URI mismatch. Switching modes
+  // therefore overwrites the previous build; reload the extension afterward.
+  outDirTemplate: '{{browser}}-mv{{manifestVersion}}',
+  // A function so it runs after WXT has loaded .env.[mode] into process.env (the object
+  // form is evaluated when this file is imported, before that happens).
+  manifest: () => ({
     name: 'Financial Analysis Agent',
     permissions: ['identity', 'storage', 'tabs'],
     host_permissions: [
@@ -19,12 +29,13 @@ export default defineConfig({
       'https://login.microsoftonline.com/*',
       // Not called yet this session -- pre-declared for a later session's Graph calls.
       'https://graph.microsoft.com/*',
-      // TODO(human): this codebase has no fixed deployed backend origin yet. Add it
-      // here once known (must match lib/authConfig.ts's BACKEND_BASE_URL). Local dev
-      // origin included for this session's manual verification.
-      'http://127.0.0.1:8000/*',
+      // This build's backend only -- Render for production, 127.0.0.1:8000 for
+      // development -- from the same env var and validator as lib/authConfig.ts's
+      // BACKEND_BASE_URL. Load-bearing: the backend sends no CORS headers, and this
+      // permission is what exempts the side panel's fetch() from CORS.
+      hostPermissionFor(resolveBackendBaseUrl(process.env.WXT_BACKEND_BASE_URL)),
     ],
-  },
+  }),
   hooks: {
     // WXT unconditionally sets manifest.side_panel.default_path whenever a
     // `sidepanel` entrypoint exists, which makes every tab side-panel-enabled

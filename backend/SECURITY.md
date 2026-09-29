@@ -309,10 +309,12 @@ configured in production lives only in Render's dashboard.
    must stay enabled for some external tool (e.g. a local `psql` session
    during development) — restricted to a known, minimal IP allow-list
    rather than left open to `0.0.0.0/0`.
-3. Note the Postgres plan tier in use for production (separately from the
-   dev/test instance, which `NOTES.md` already documents as free/starter
-   tier) and confirm it matches the "paid tier from day one" requirement
-   stated in the design doc's §6 session 1.
+3. Note the Postgres plan tier in use for production and confirm it
+   matches the "paid tier from day one" requirement stated in the design
+   doc's §6 session 1. There is no separate dev/test instance: one
+   instance (`fin_agent_db`) serves local dev, the test suite and
+   production (see `DEPLOYMENT.md`), and `NOTES.md` documents that instance
+   as free/starter tier, so this check may well fail today.
 
 ---
 

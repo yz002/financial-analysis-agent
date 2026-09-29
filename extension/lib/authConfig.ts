@@ -1,3 +1,5 @@
+import { resolveBackendBaseUrl } from './backendUrl';
+
 export type AuthProvider = 'google' | 'microsoft';
 
 export interface ProviderConfig {
@@ -36,9 +38,8 @@ export const PROVIDER_CONFIG: Record<AuthProvider, ProviderConfig> = {
   },
 };
 
-// TODO(human): this codebase does not yet fix the deployed backend's base URL anywhere
-// (no extension/.env, nothing in backend/.env.example, no deploy config found). Point
-// this at a local dev server for initial manual testing, or the real deployed origin
-// once one exists. Keep this in sync with the matching host_permissions entry in
-// wxt.config.ts.
-export const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
+// Selected at build time by WXT's mode: .env.production (the Render origin, the default
+// for `npm run build`/`npm run zip`) or .env.development (127.0.0.1:8000, for
+// `npm run build:local`/`npm run dev`). wxt.config.ts derives the matching
+// host_permissions entry from the same variable through the same validator.
+export const BACKEND_BASE_URL = resolveBackendBaseUrl(import.meta.env.WXT_BACKEND_BASE_URL);

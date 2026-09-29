@@ -852,7 +852,8 @@
   (663/706), matching this file exactly — no new eval run was needed, since this file already
   held the authoritative, current number.
 
-- **The dev/test Render Postgres instance (`backend/tests/`, via `DATABASE_URL`) has
+- **The single Render Postgres instance (`fin_agent_db`), shared by local dev, the test suite
+  (`backend/tests/`, via `DATABASE_URL`) and production (see `backend/DEPLOYMENT.md`), has
   intermittently dropped connections under sustained sequential test-suite load, across
   multiple Phase B sessions now** — `psycopg.OperationalError: connection failed: ... SSL
   connection has been closed unexpectedly`, surfacing as 1-3 unrelated test failures deep into

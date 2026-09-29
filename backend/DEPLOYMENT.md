@@ -76,7 +76,6 @@ the **production** database (`fin_agent_db`). As a result:
 - Every local `pytest` run creates and deletes accounts, sessions, usage events and other rows
   in production. A run that crashes before its cleanup leaves test rows behind.
 - Local manual testing, and any local script, reads and writes real production data.
-- `NOTES.md` still describes this instance as the "dev/test Render Postgres instance".
 
 A separate dev/test database, with its own `DATABASE_URL` and `BYO_KEY_ENCRYPTION_KEY` in
 `backend/.env`, is needed **before real users**.

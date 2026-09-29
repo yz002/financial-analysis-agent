@@ -24,3 +24,6 @@ web-ext.config.ts
 *.njsproj
 *.sln
 *.sw?
+
+# Personal env overrides (.env.local, .env.production.local, ...) -- never commit.
+.env*.local

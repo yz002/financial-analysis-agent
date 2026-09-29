@@ -58,6 +58,15 @@ h1 {
   color: var(--color-error);
 }
 
+/* Non-production builds only (main.ts): which backend this build talks to. */
+#backend-info {
+  font-size: var(--text-meta-size);
+  font-weight: var(--text-meta-weight);
+  line-height: var(--text-meta-line-height);
+  letter-spacing: var(--text-meta-letter-spacing);
+  color: var(--color-ink-mute);
+}
+
 button {
   font-family: var(--font-family);
   font-size: var(--text-button-size);

@@ -292,3 +292,38 @@ describe('bug 3: old session revoked only after a successful new sign-in', () =>
     expect(isHidden('#signed-out-view')).toBe(true);
   });
 });
+
+// import.meta.env.MODE is a build-time constant in real builds; under Vitest it's a
+// runtime value vi.stubEnv can change, and loadSidepanel() re-imports main.ts fresh each
+// time (vi.resetModules), so each test sees its own mode.
+describe('backend label (non-production builds only)', () => {
+  let consoleInfo: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    consoleInfo.mockRestore();
+  });
+
+  it('development mode shows "Backend: <origin>" and logs it', async () => {
+    vi.stubEnv('MODE', 'development');
+    await loadSidepanel();
+
+    expect(document.querySelector('#backend-info')?.textContent).toBe(
+      'Backend: https://backend.invalid',
+    );
+    expect(consoleInfo).toHaveBeenCalledWith('[sidepanel] Backend:', 'https://backend.invalid');
+  });
+
+  it('production mode renders no label but still logs the backend', async () => {
+    vi.stubEnv('MODE', 'production');
+    await loadSidepanel();
+
+    expect(document.querySelector('#backend-info')).toBeNull();
+    expect(document.body.textContent).not.toContain('Backend:');
+    expect(consoleInfo).toHaveBeenCalledWith('[sidepanel] Backend:', 'https://backend.invalid');
+  });
+});
