@@ -7,7 +7,8 @@ organized as: the cross-install (now cross-account) isolation audit, this
 project's highest-priority finding — open at the time this file was first
 written, **resolved as of 2026-09-20, see §2** — the three rotation runbooks,
 the log-content review, and what's checkable about Postgres network access
-from this repo alone.
+from this repo alone. §7 (added 2026-09-29) records an nOAuth-class account
+takeover in `/v1/auth/exchange`'s email-based account linking, and its fix.
 
 Findings here are honest by design — including status changes recorded
 plainly rather than glossed over. Treat this file as a living record: update
@@ -312,3 +313,90 @@ configured in production lives only in Render's dashboard.
    dev/test instance, which `NOTES.md` already documents as free/starter
    tier) and confirm it matches the "paid tier from day one" requirement
    stated in the design doc's §6 session 1.
+
+---
+
+## 7. Cross-provider account linking by email (nOAuth-class account takeover)
+
+**Status: FIXED IN CODE (2026-09-29), NOT YET DEPLOYED.** The fix is in the working tree only.
+Production on Render still runs the vulnerable resolution logic until the fix is committed and
+pushed, since a push to `main` auto-deploys the backend. Update this line with the deploy date
+when that happens.
+
+**Finding.** `POST /v1/auth/exchange` resolved a verified provider identity to an account in
+three steps (`_resolve_account_for_identity`, `backend/app/main.py`): (a) an exact
+`(provider, provider_subject)` match; (b) otherwise, *any* `linked_identities` row with the
+same `provider_email`, in which case the new identity was attached to that existing account;
+(c) otherwise, a new account. Step (b) had no provider filter and trusted an email string that
+nothing verified on the Microsoft side:
+
+- The Azure app registration accepts any Entra tenant. Microsoft's `mail` and
+  `userPrincipalName` (read in `oauth_providers.verify_microsoft_token`) are tenant-controlled
+  attributes with no proof of ownership. An attacker can create their own tenant, set a user's
+  `mail` to a victim's address, sign in with Microsoft, and be attached to the victim's
+  account, with full access to its conversations, BYO key, and paid quota.
+- **Reverse direction:** the attacker signs in first with a spoofed email, creating the
+  account. The real owner's later Google sign-in (whose email *is* verified) lands in the
+  attacker's account.
+- **Same provider:** because (b) had no provider filter, a second Microsoft identity from the
+  attacker's tenant also linked straight into a victim's Microsoft-created account.
+- Google's `email_verified` check (`verify_google_token`) doesn't mitigate any of these, since
+  it only covers the Google side of a match.
+- Microsoft's own guidance is to identify users by `sub`/`oid`, never by email or UPN.
+- There was also a latent 500: (b)'s `scalar_one_or_none()` raised `MultipleResultsFound` once
+  two rows shared an email, which happens after any merge.
+
+**Exposure window:** step (b) shipped in `8ecc27e` (Phase C session 3, 2026-09-18) and has been
+live on Render since Phase C.
+
+**Fix.** Step (b) is removed entirely, in both directions. Resolution is now (a) an exact
+`(provider, provider_subject)` match, else (c) a new account. Email is still stored
+(`accounts.primary_email`, `linked_identities.provider_email`) for display and Stripe
+`customer_email` prefill only, and never selects an account. No schema change was needed:
+neither email column carries a unique constraint (checked against `db/models.py` and all three
+Alembic migrations), so two accounts can legitimately share an email. The non-unique
+`ix_linked_identities_provider_email` index is now unused but left in place.
+`tests/test_auth_exchange.py` covers:
+- a Microsoft sign-in whose email matches a Google account gets a new account, and so does the
+  reverse;
+- two Microsoft subjects with the same email get different accounts;
+- exact provider+subject still resolves to the original account after a same-email identity
+  has signed in.
+
+The design doc (`docs/oauth-identity-session-design.md` §3) and `EXTENSION_INTEGRATION.md` §1
+are amended to match.
+
+**Residual items, not fixed by this change:**
+
+1. **Existing links are untouched.** Any identity that step (b) already attached to an account
+   keeps working through step (a). The fix doesn't modify `linked_identities` rows. Step (c)
+   always creates exactly one row per account, so every account with more than one row was
+   produced by step (b). Run this read-only query against production to list them:
+
+   ```sql
+   SELECT account_id, count(*),
+          array_agg(provider || ':' || provider_email || ' @ ' || created_at ORDER BY created_at)
+   FROM linked_identities GROUP BY account_id HAVING count(*) > 1;
+   ```
+
+   **Read the results with care; a match isn't automatically an attack.** Legitimate links from
+   the owner's own testing will appear, for example one account with both google and microsoft
+   identities from 2026-09-29's live sign-in testing. Each multi-row account needs a human
+   review: whose identities are these, and was the later link expected? Never delete rows
+   automatically based on this query. Record the review's outcome here.
+2. **Microsoft subject isn't tenant-qualified.** The stored Microsoft subject is Graph `/me`
+   `id` (the user's object ID) without the tenant ID. Object IDs are globally unique GUIDs, so
+   this isn't a practical collision risk, but Microsoft's guidance is to key on `oid`+`tid`.
+   Changing the subject format means rewriting existing rows, so it's a follow-up.
+3. **The Microsoft no-usable-email 422 is kept for now (open question).** Sign-in is refused
+   when Microsoft returns neither `mail` nor an email-shaped `userPrincipalName`. That gate was
+   designed while email still fed account resolution. Now that it doesn't, email only matters
+   for display and Stripe prefill, and Stripe Checkout can collect an email itself. Whether to
+   relax the gate is undecided.
+4. **A spoofed Microsoft email still reaches Stripe prefill.** Someone who signs in with a
+   spoofed `mail` now only gets their own new account. If they start a checkout, Stripe's
+   `customer_email` is prefilled with an address they don't own, so receipts could go to that
+   address. Low severity, and noted only.
+5. **Future work, not built:** deliberately linking a second provider through an explicit "link
+   another provider" action taken while signed in, requiring an authenticated session plus a
+   fresh sign-in with the second provider, and never keyed on email.

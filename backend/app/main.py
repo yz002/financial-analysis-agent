@@ -170,9 +170,17 @@ def get_current_account(
 
 def _resolve_account_for_identity(session, identity: oauth_providers.ProviderIdentity, now: datetime) -> Account:
     """
-    Design doc SS3's 3-step resolution order. Returns the Account to issue a session
-    against, with last_seen_at already set to `now` on every branch. Only adds/mutates
-    ORM objects -- the caller owns the transaction (commit/flush).
+    Design doc SS3's resolution order (amended 2026-09-29): (a) an exact
+    (provider, provider_subject) match resolves to its existing account; otherwise (c) a new
+    account is created. Email never selects an account -- the former step (b), which
+    attached a new identity to whichever account already had a matching provider_email,
+    was an nOAuth-class takeover: Microsoft's `mail`/`userPrincipalName` are tenant-
+    controlled and unverified, so anyone could create a tenant user carrying a victim's
+    address. See SECURITY.md SS7. Email is still stored, for display and billing only.
+
+    Returns the Account to issue a session against, with last_seen_at already set to `now`
+    on both branches. Only adds/mutates ORM objects -- the caller owns the transaction
+    (commit/flush).
     """
     linked = session.execute(
         select(LinkedIdentity).where(
@@ -185,24 +193,10 @@ def _resolve_account_for_identity(session, identity: oauth_providers.ProviderIde
         account.last_seen_at = now
         return account
 
-    linked_by_email = session.execute(
-        select(LinkedIdentity).where(LinkedIdentity.provider_email == identity.email)
-    ).scalar_one_or_none()
-    if linked_by_email is not None:
-        account = session.get(Account, linked_by_email.account_id)
-        account.last_seen_at = now
-        session.add(LinkedIdentity(
-            account_id=account.id,
-            provider=identity.provider,
-            provider_subject=identity.subject,
-            provider_email=identity.email,
-        ))
-        return account
-
-    # Explicit id (not a flush-to-learn-the-default) so this branch behaves identically to
-    # the other two: account.id is a concrete value immediately, before LinkedIdentity's FK
-    # needs it. Don't "simplify" this back to relying on Account.id's column default --
-    # LinkedIdentity is added in the same call with no intervening flush.
+    # Explicit id (not a flush-to-learn-the-default) so account.id is a concrete value
+    # immediately, before LinkedIdentity's FK needs it. Don't "simplify" this back to
+    # relying on Account.id's column default -- LinkedIdentity is added in the same call
+    # with no intervening flush.
     account = Account(id=uuid.uuid4(), primary_email=identity.email, last_seen_at=now)
     session.add(account)
     session.add(LinkedIdentity(

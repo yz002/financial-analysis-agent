@@ -161,6 +161,22 @@ explicit uninstall webhook exists or is needed).
 
 ## 3. Cross-provider identity resolution
 
+> **Amended 2026-09-29 (security fix, `backend/SECURITY.md` §7): step 2 below is removed, and
+> email never selects an account.** Resolution is now: (1) an exact `(provider,
+> provider_subject)` match resolves to its existing account; otherwise (3) a new account is
+> created. Each provider identity is its own account, even when two identities (from different
+> providers, or two different Microsoft accounts) share an email. Reason: step 2 was an
+> nOAuth-class account takeover. The Azure app accepts any Entra tenant, and Microsoft's `mail`
+> and `userPrincipalName` are tenant-controlled attributes with no proof of ownership. An
+> attacker could create their own tenant, set a user's `mail` to a victim's address, sign in
+> with Microsoft, and be attached to the victim's account. It also worked in reverse, with the
+> attacker creating the account first so the real owner's later sign-in landed in it. Google's
+> `email_verified` check didn't help, since it only covered the Google side of a match.
+> Microsoft's own guidance is to identify users by `sub`/`oid`, never by email or UPN. Email is
+> still stored (`accounts.primary_email`, `linked_identities.provider_email`) for display and
+> Stripe prefill only. Deliberate linking of a second provider is future work (§6). The
+> original policy text is kept below for the record.
+
 **Default policy (confirmed with the user, not re-litigated here): same verified email across
 providers = same account; different emails = separate accounts, full stop, for Phase C.** No
 manual "link my Google and Microsoft accounts" flow is built this session — deferred explicitly
@@ -203,7 +219,9 @@ a verified email from an unverified UUID has nothing left to distinguish.
 **`linked_identities`** (new):
 `id (PK, UUID)` · `account_id (FK → accounts.id, ondelete=CASCADE)` ·
 `provider (text: "google"|"microsoft")` · `provider_subject (text)` ·
-`provider_email (text, indexed — drives §3 step 2's lookup)` · `created_at`.
+`provider_email (text, indexed — drove §3 step 2's lookup, which was removed 2026-09-29; the
+now-unused, non-unique index is left in place since dropping it needs a migration and it's
+harmless)` · `created_at`.
 `UNIQUE(provider, provider_subject)` — a given provider account can only ever resolve to one
 `account_id`.
 
@@ -247,7 +265,15 @@ Named plainly, matching this project's existing design-doc convention:
   where in its own UI a "sign in with Google/Microsoft" affordance lives.
 - Manual account-linking for the differing-email case (§3) — someone who wants their
   Google-identity account and Microsoft-identity account merged despite different emails has no
-  self-service path this design builds.
+  self-service path this design builds. (Amended 2026-09-29: since automatic same-email linking
+  was removed, this now applies to *every* pair of identities, whatever their emails. The
+  future-work shape is an explicit "link another provider" action taken while already signed
+  in: it needs an authenticated session plus a fresh sign-in with the second provider, and
+  never keys on email. Not built.)
+- Whether the Microsoft no-usable-email 422 (§1) should be relaxed — open question, added
+  2026-09-29. It was designed while email still fed account resolution (§3 step 2). Now that
+  email no longer selects an account, it's only needed for display and Stripe prefill, and
+  Stripe Checkout can collect an email itself. Left unchanged for now.
 - Any Chrome Web Store submission/review process content.
 - Automated compromised-session *detection* (anomalous IP/device alerts, etc.) — only the manual
   revoke path (§2) is built; nothing watches for suspicious use on its own.

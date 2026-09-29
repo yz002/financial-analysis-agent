@@ -133,9 +133,14 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
      unavailable" message, same class as `/v1/billing/checkout-session`'s missing
      `STRIPE_PRICE_ID`.
 
-   Cross-provider identity note: signing in with the same verified email from a different
-   provider (e.g. Google today, Microsoft tomorrow) resolves to the *same* `account_id` — this
-   is automatic server-side behavior the extension doesn't need to do anything for.
+   Cross-provider identity note (amended 2026-09-29, see `SECURITY.md` §7): each provider
+   identity is its own account. Signing in with a different provider, or a different Microsoft
+   account, gets a separate `account_id` **even when the email is the same**. Email is never
+   used to select an account. The earlier automatic same-email merge was removed as an
+   account-takeover risk. The same provider account always resolves to the same `account_id`
+   across devices and sign-ins. The extension doesn't need to do anything for this, but it
+   shouldn't tell people that signing in with "the same email" elsewhere reaches the same
+   account.
 
 3. **Store `session_token` in `chrome.storage.local`, never `chrome.storage.sync`.**
    `.sync` piggybacks on Chrome's own browser-account sync, which is a different (and
@@ -426,6 +431,6 @@ implicit:
 - Conversation history listing/browsing and full tool-call-trace-on-demand endpoints — described
   in the original design doc but not implemented (see `/v1/ask`'s note in §6).
 - A `/v1/byo-key` removal endpoint — only registration/rotation exists today (see §6).
-- Manual account-linking for a person whose Google and Microsoft accounts use different email
-  addresses — cross-provider resolution only merges accounts on a matching verified email; there
-  is no self-service linking flow for the differing-email case.
+- Account linking of any kind — a person's Google and Microsoft identities are always separate
+  accounts, whatever their emails (§1's cross-provider note). An explicit "link another
+  provider" action while signed in is future work, not built.

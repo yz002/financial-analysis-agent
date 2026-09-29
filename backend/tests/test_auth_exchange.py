@@ -2,7 +2,8 @@
 Tests for Phase C session 3: POST /v1/auth/exchange -- provider-token verification
 (mocked at the app.oauth_providers call site, matching test_oauth_providers.py's own
 scope boundary, since session 2 already tested the underlying HTTP calls), design doc
-SS3's 3-step account-resolution order, and opaque session-token issuance/hashing.
+SS3's account-resolution order (provider+subject match, else a new account -- email never
+selects one, per the 2026-09-29 amendment), and opaque session-token issuance/hashing.
 
 Like the other backend integration tests, these hit a real reachable Postgres via
 DATABASE_URL (backend/.env) -- not a mocked DB.
@@ -122,35 +123,104 @@ def test_repeat_exchange_same_provider_subject_reuses_account(monkeypatch, accou
         session.close()
 
 
-# --- cross-provider merge via same email ---------------------------------------------------
+# --- email never selects an account (SECURITY.md SS7) --------------------------------------
+#
+# The former resolution step (b) attached any new identity to whichever account already had a
+# matching provider_email -- an nOAuth-class takeover, since Microsoft's mail/UPN are
+# tenant-controlled and unverified. Each test uses a fresh uuid-suffixed email so a shared
+# address can't collide with rows from any other test.
 
 
-def test_second_provider_same_email_merges_into_existing_account(monkeypatch, account_ids):
-    google_identity = ProviderIdentity(provider="google", subject="g-sub-3", email="cross@example.com")
-    ms_identity = ProviderIdentity(provider="microsoft", subject="ms-sub-3", email="cross@example.com")
-    monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(google_identity))
-    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(ms_identity))
-    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
+def _sign_in(provider: str):
+    body = _GOOGLE_CODE_BODY if provider == "google" else {"provider": "microsoft", "oauth_token": "t"}
+    resp = client.post("/v1/auth/exchange", json=body)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["account_id"]
 
-    first = client.post("/v1/auth/exchange", json=_GOOGLE_CODE_BODY)
-    second = client.post("/v1/auth/exchange", json={"provider": "microsoft", "oauth_token": "t"})
-    assert first.status_code == 200, first.text
-    assert second.status_code == 200, second.text
-    account_ids.append(first.json()["account_id"])
 
-    assert first.json()["account_id"] == second.json()["account_id"]
-
+def _linked_providers(account_id: str) -> list[str]:
     session = get_session()
     try:
-        assert _count(session, "accounts", id=first.json()["account_id"]) == 1
-        assert _count(session, "linked_identities", account_id=first.json()["account_id"]) == 2
-        providers = session.execute(
+        return session.execute(
             text("SELECT provider FROM linked_identities WHERE account_id = :id ORDER BY provider"),
-            {"id": first.json()["account_id"]},
+            {"id": account_id},
         ).scalars().all()
-        assert providers == ["google", "microsoft"]
     finally:
         session.close()
+
+
+def test_microsoft_sign_in_matching_google_account_email_creates_new_account(monkeypatch, account_ids):
+    email = f"victim-{uuid.uuid4()}@example.com"
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
+    monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(
+        ProviderIdentity(provider="google", subject=f"g-{uuid.uuid4()}", email=email)))
+    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(
+        ProviderIdentity(provider="microsoft", subject=f"ms-{uuid.uuid4()}", email=email)))
+
+    google_account = _sign_in("google")
+    account_ids.append(google_account)
+    microsoft_account = _sign_in("microsoft")
+    account_ids.append(microsoft_account)
+
+    assert microsoft_account != google_account
+    assert _linked_providers(google_account) == ["google"]
+    assert _linked_providers(microsoft_account) == ["microsoft"]
+
+
+def test_google_sign_in_matching_microsoft_account_email_creates_new_account(monkeypatch, account_ids):
+    email = f"victim-{uuid.uuid4()}@example.com"
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
+    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(
+        ProviderIdentity(provider="microsoft", subject=f"ms-{uuid.uuid4()}", email=email)))
+    monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(
+        ProviderIdentity(provider="google", subject=f"g-{uuid.uuid4()}", email=email)))
+
+    microsoft_account = _sign_in("microsoft")
+    account_ids.append(microsoft_account)
+    google_account = _sign_in("google")
+    account_ids.append(google_account)
+
+    assert google_account != microsoft_account
+    assert _linked_providers(microsoft_account) == ["microsoft"]
+    assert _linked_providers(google_account) == ["google"]
+
+
+def test_two_microsoft_subjects_with_same_email_get_different_accounts(monkeypatch, account_ids):
+    # The same-provider variant: an attacker's own Entra tenant user whose `mail` is set to
+    # the victim's address, signing in after the victim's real Microsoft account.
+    email = f"victim-{uuid.uuid4()}@example.com"
+    victim = ProviderIdentity(provider="microsoft", subject=f"ms-{uuid.uuid4()}", email=email)
+    attacker = ProviderIdentity(provider="microsoft", subject=f"ms-{uuid.uuid4()}", email=email)
+
+    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(victim))
+    victim_account = _sign_in("microsoft")
+    account_ids.append(victim_account)
+    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(attacker))
+    attacker_account = _sign_in("microsoft")
+    account_ids.append(attacker_account)
+
+    assert attacker_account != victim_account
+    assert _linked_providers(victim_account) == ["microsoft"]
+
+
+def test_exact_provider_subject_still_resolves_after_same_email_identity_signs_in(
+    monkeypatch, account_ids
+):
+    email = f"owner-{uuid.uuid4()}@example.com"
+    monkeypatch.setattr(app_main.oauth_providers, "exchange_google_code_for_token", _fake_exchange())
+    monkeypatch.setattr(app_main.oauth_providers, "verify_google_token", _fake_verify(
+        ProviderIdentity(provider="google", subject=f"g-{uuid.uuid4()}", email=email)))
+    monkeypatch.setattr(app_main.oauth_providers, "verify_microsoft_token", _fake_verify(
+        ProviderIdentity(provider="microsoft", subject=f"ms-{uuid.uuid4()}", email=email)))
+
+    original = _sign_in("google")
+    account_ids.append(original)
+    other = _sign_in("microsoft")
+    account_ids.append(other)
+
+    assert _sign_in("google") == original
+    assert _sign_in("microsoft") == other
+    assert _linked_providers(original) == ["google"]
 
 
 # --- different email + different provider => separate accounts -----------------------------
