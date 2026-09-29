@@ -20,15 +20,38 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
 
 ## 1. Sign-in flow
 
-1. **Obtain an OAuth access token from Google or Microsoft**, client-side, via whatever
-   mechanism the extension uses (`chrome.identity.getAuthToken` for Google; the equivalent
-   Microsoft identity flow). The token must carry, at minimum:
-   - **Google:** the `openid` and `email` scopes. This backend verifies the token by calling
-     `GET https://openidconnect.googleapis.com/v1/userinfo` with it — that call only returns a
-     usable `email`/`email_verified` pair when those two scopes were granted.
+1. **Obtain OAuth credentials from Google or Microsoft**, client-side, via
+   `chrome.identity.launchWebAuthFlow` (Authorization Code + PKCE, for both providers —
+   see the extension's own design doc for why `getAuthToken` isn't used for Google
+   either). **What gets sent onward in step 2 differs by provider — this is new as of
+   Phase D session 2, and the reason is load-bearing, not incidental:**
+
+   - **Google:** send the raw authorization `code`, the PKCE `code_verifier`, and the
+     `redirect_uri` used in the authorization request — **not** a pre-exchanged access
+     token. Confirmed against Google's own current OAuth 2.0 documentation: the "Web
+     application" client type — the only Google client type compatible with
+     `launchWebAuthFlow`'s `https://<extension-id>.chromiumapp.org/` redirect
+     requirement — is documented by Google itself as a **confidential client**
+     ("a web server application does need a secret"). PKCE does not substitute for
+     `client_secret` at its token endpoint. Since a client secret can't be kept
+     confidential inside extension code (any unpacked/installed extension can be
+     decompiled), **this backend performs the code-for-token exchange itself**,
+     server-side, where `GOOGLE_CLIENT_SECRET` can stay confidential (see
+     `app/oauth_providers.py`'s `exchange_google_code_for_token`).
+   - **Microsoft:** obtain a genuine OAuth access token client-side and send it
+     directly, as before. Azure's **"Single-page application"** platform type is a
+     genuine no-secret public client — PKCE alone is sufficient there, so the extension
+     completes the full exchange itself and never needs a Microsoft client secret
+     anywhere.
+
+   Required scopes, either way, at minimum:
+   - **Google:** the `openid` and `email` scopes. This backend verifies the resulting
+     access token by calling `GET https://openidconnect.googleapis.com/v1/userinfo`
+     with it — that call only returns a usable `email`/`email_verified` pair when those
+     two scopes were granted.
    - **Microsoft:** the `User.Read` scope. This backend verifies the token by calling
-     `GET https://graph.microsoft.com/v1.0/me` with it — `User.Read` is required for that call
-     to return the `mail` field this backend reads.
+     `GET https://graph.microsoft.com/v1.0/me` with it — `User.Read` is required for
+     that call to return the `mail` field this backend reads.
 
    **Not covered here, and not determined by anything in this codebase:** whatever additional
    scope is needed for the extension to actually read/write the person's Sheet or Excel file
@@ -40,20 +63,32 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
    `chrome.identity` flow. The extension team owns determining and requesting that data-access
    scope; this backend never sees or checks it — it only ever verifies the identity scopes above.
 
-2. **Exchange that token for a session token:**
+2. **Exchange for a session token:**
 
    `POST /v1/auth/exchange` — **no authentication required** (this is the one route a caller
    hits before having a session token at all).
 
-   Request body:
+   Request body — **shape depends on `provider`:**
    ```json
+   // provider: "google"
    {
-     "provider": "google",       // or "microsoft" -- exactly one of these two strings
+     "provider": "google",
+     "code": "<the authorization code from launchWebAuthFlow's redirect>",
+     "code_verifier": "<the PKCE code_verifier used to build the authorization URL>",
+     "redirect_uri": "<the exact redirect_uri used in the authorization request>"
+   }
+   ```
+   ```json
+   // provider: "microsoft"
+   {
+     "provider": "microsoft",
      "oauth_token": "<the OAuth access token obtained in step 1>"
    }
    ```
+   Sending `oauth_token` for `"google"`, or `code`/`code_verifier`/`redirect_uri` for
+   `"microsoft"`, is a request-shape error — see the two distinct `422` cases below.
 
-   Response body (200):
+   Response body (200) — **identical for both providers:**
    ```json
    {
      "session_token": "<opaque bearer token, shown exactly once>",
@@ -67,13 +102,36 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
    its SHA-256 hash. There is no way to look it up or recover it later; if it's lost, the only
    remedy is to run this exchange again.
 
-   Error responses:
+   Error responses — **two genuinely different situations both happen to return `422`; treat
+   them as two distinct, named cases, not one:**
+
    - `401` — `{"detail": "OAuth token could not be verified."}` — the provider rejected the
-     token (invalid, expired, wrong audience), or, for Google specifically, the account's email
-     isn't verified.
-   - `422` — `{"detail": "No usable email address is available for this account."}` —
-     Microsoft-only case: the account has no `mail` and its `userPrincipalName` isn't
-     syntactically an email address either.
+     credential: an invalid/expired/wrong-audience Microsoft access token, an unverified Google
+     account email, **or now also a failed Google code-for-token exchange** (invalid/expired
+     `code`, a `code_verifier`/`redirect_uri` mismatch, etc.) — Google doesn't distinguish these
+     causes to callers, so this backend doesn't either, same anti-enumeration convention as
+     everywhere else in this contract. **Client handling: identical to any other 401 — discard
+     any stored state and re-run sign-in from step 1 (§3 below applies the same way here).**
+   - `422`, case **"missing email"** — `{"detail": "No usable email address is available for
+     this account."}` — **Microsoft-only**, unchanged from before this session: the account has
+     no `mail` and its `userPrincipalName` isn't syntactically an email address either. This is
+     a real, expected account-state outcome, not a bug — **client handling: relay it to the
+     person as-is (e.g. "this Microsoft account has no usable email"); retrying or re-running
+     sign-in will not resolve it, since it's a property of the account itself.**
+   - `422`, case **"wrong fields for provider"** — `{"detail": "Google sign-in requires code,
+     code_verifier, and redirect_uri."}` or `{"detail": "Microsoft sign-in requires
+     oauth_token."}` — the request body didn't carry the fields this provider's branch expects
+     (new as of Phase D session 2). This should never happen from a correctly-implemented
+     client — it means the caller's own code has a bug (sent the wrong shape for the
+     `provider` value it also sent). **Client handling: this is a bug in the extension's own
+     code to fix, not something a retry or re-sign-in would ever resolve, unlike a real 401 —
+     do not show it to the person as an account problem, and do not retry the exchange
+     automatically.**
+   - `500` — `{"detail": "Google OAuth is not configured."}` — `GOOGLE_CLIENT_ID`/
+     `GOOGLE_CLIENT_SECRET` aren't set server-side. A deployment misconfiguration, not
+     something the extension can act on beyond surfacing a generic "sign-in is currently
+     unavailable" message, same class as `/v1/billing/checkout-session`'s missing
+     `STRIPE_PRICE_ID`.
 
    Cross-provider identity note: signing in with the same verified email from a different
    provider (e.g. Google today, Microsoft tomorrow) resolves to the *same* `account_id` — this
@@ -119,9 +177,17 @@ explicitly revoked (via logout or revoke-all, §4).
 
 This is intentional — this backend's anti-enumeration convention never lets a caller learn *why*
 a credential failed. **The correct client behavior is the same in every case: discard the stored
-token and re-run the sign-in flow from §1.** Do not attempt to distinguish "expired" from
-"revoked" from "never valid" — there is no signal available to do so, and no future version of
-this backend is expected to add one.
+token and show the signed-out UI (the same sign-in buttons a fresh load shows).** Do not attempt
+to distinguish "expired" from "revoked" from "never valid" — there is no signal available to do
+so, and no future version of this backend is expected to add one.
+
+**"Show the signed-out UI" is not "start a new sign-in."** The extension must never call its
+`launchWebAuthFlow`-based auth flow in response to a `401` (or from `/v1/auth/logout`/
+`/v1/auth/sessions/revoke-all`, §4) — a 401 clears local state and waits for an explicit sign-in
+button click, exactly like a person opening the panel for the first time. Phase D session 2's
+implementation briefly had `revoke-all` auto-relaunch sign-in; live testing showed this produces
+a surprise OAuth popup with no user action, so it was removed (Phase D session 3) — sign-in
+begins only from a direct click, with no exception for any error-handling path.
 
 ---
 
