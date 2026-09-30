@@ -63,6 +63,19 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
    `chrome.identity` flow. The extension team owns determining and requesting that data-access
    scope; this backend never sees or checks it — it only ever verifies the identity scopes above.
 
+   (Amended Phase D session 3a (spike-verified): **the token or code sent to `/v1/auth/exchange` now carries identity scopes only**:
+   Google `openid email`, Microsoft `User.Read`. Sign-in no longer asks for
+   `spreadsheets.readonly` or `Files.ReadWrite`. Data access is a separate grant made later,
+   when the user clicks to read a spreadsheet (`docs/chrome-extension-design.md` §2
+   "Data-access tokens"):
+   - Microsoft's data grant (`Files.Read`) is exchanged client-side and never reaches this
+     backend.
+   - Google's data grant (`openid email spreadsheets.readonly`) can't be exchanged client-side,
+     for the same confidential-client reason as step 2 below. It goes through the one new
+     route, `POST /v1/google/data-token` (§1a).
+
+   Spike results: `docs/spikes/session3a-auth-file-access.md`.)
+
 2. **Exchange for a session token:**
 
    `POST /v1/auth/exchange` — **no authentication required** (this is the one route a caller
@@ -155,6 +168,88 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
 
 ---
 
+## 1a. Google data-access token — `POST /v1/google/data-token` (Amended Phase D session 3a (spike-verified))
+
+**Status: specified, not yet implemented.** Phase D session 3a builds it. Until then this route
+doesn't exist in `backend/app/main.py`. This is the only exception to the header's
+"verified against the code" rule, and it's labelled as one. It's the single contract addition
+that `docs/chrome-extension-design.md` §8 explicitly allows.
+
+**Purpose:** exchange a Google data-access authorization code for a short-lived access token
+that the extension uses to call the Google Sheets API itself. Google's "Web application" client
+is confidential (see §1 step 1), so this exchange needs `GOOGLE_CLIENT_SECRET` and has to happen
+here. **This backend never reads spreadsheet data with the token.** It only exchanges the code
+and hands the token back.
+
+**Auth required:** `Authorization: Bearer <session_token>`, the same as every §6 route.
+
+Request body:
+```json
+{
+  "code": "<authorization code from the data-grant launchWebAuthFlow redirect>",
+  "code_verifier": "<the PKCE code_verifier for that authorization request>",
+  "redirect_uri": "<the exact redirect_uri used in that authorization request>"
+}
+```
+The authorization request that produced `code` must ask for
+`openid email https://www.googleapis.com/auth/spreadsheets.readonly` with
+`include_granted_scopes=true`. `openid email` lets this backend return the data account's
+`email`, which the extension uses as `login_hint` for later silent re-auth.
+
+**The data account may differ from the sign-in identity, on purpose.** The Google account this
+code was granted for doesn't have to be one of the caller's linked identities. A
+Microsoft-signed-in session can read a Google Sheet, and a Google-signed-in person can read a
+Sheet owned by a different Google account. This route doesn't compare them
+(`docs/chrome-extension-design.md` §2, "Data account vs sign-in identity"). Such a check would
+add almost no security: the code is PKCE-bound to this extension and was obtained through
+Google's own consent, so even a stolen session can only mint tokens for Google accounts the
+holder already controls.
+
+Server behavior, all of which is required:
+1. Exchange the code at Google's token endpoint with `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`.
+   **Never send `access_type=offline`.** If a `refresh_token` appears in the response anyway,
+   discard it.
+2. Call `userinfo` with the resulting access token and read `email`, the data account's email.
+   Don't compare the account against the caller's `LinkedIdentity` rows (see above).
+3. Return the token. **Store nothing**: no DB row, no cache. **Log nothing** about it, not the
+   token, not the code. Send `Cache-Control: no-store`.
+
+Response (200):
+```json
+{
+  "access_token": "<Google access token, ~1h lifetime>",
+  "expires_in": 3599,
+  "scope": "<space-separated scopes Google actually granted>",
+  "email": "<the data account's email, from userinfo>"
+}
+```
+The extension keeps `access_token` and `email` only in `chrome.storage.session`. Google's granular consent
+lets the user untick the Sheets scope, so the extension must check `scope` for
+`https://www.googleapis.com/auth/spreadsheets.readonly` and show a named "Sheets access wasn't
+granted" message if it's missing.
+
+Errors:
+- `401` — `{"detail": "Invalid or expired session token."}`: the *session token* failed. This
+  is §3's rule, handled exactly as §3 says: discard the session and show the signed-out UI.
+- `400` — `{"detail": "Google authorization could not be exchanged."}`: Google rejected the
+  code exchange (invalid or expired `code`, a `code_verifier`/`redirect_uri` mismatch) or the
+  `userinfo` call. **This is deliberately not a `401`.** On this authenticated route a `401`
+  would trigger §3's discard-the-session handling for what is only a failed data grant. Client
+  handling: keep the session and offer the read action again.
+- `422` — `{"detail": "code, code_verifier, and redirect_uri are required."}`: a request-shape
+  bug in the extension, the same class as §1's "wrong fields for provider". Don't retry.
+- `500` — `{"detail": "Google OAuth is not configured."}`: the same server misconfiguration as
+  `/v1/auth/exchange`'s.
+
+The session requirement stays, for authentication and abuse control: without it, this
+backend's confidential client would be a free code-exchange service. *Future consideration, not
+built:* per-account rate limiting on this route.
+
+There's **no Microsoft equivalent**. Microsoft data tokens are exchanged client-side (a public
+SPA client) and never reach this backend.
+
+---
+
 ## 2. Authenticated request contract
 
 Every route in §6 below (all of them except the ones in §1 and §4, which have their own rules)
@@ -194,6 +289,12 @@ implementation briefly had `revoke-all` auto-relaunch sign-in; live testing show
 a surprise OAuth popup with no user action, so it was removed (Phase D session 3) — sign-in
 begins only from a direct click, with no exception for any error-handling path.
 
+(Amended Phase D session 3a (spike-verified): the same rule covers the data grants in §1a and `docs/chrome-extension-design.md` §2
+"Data-access tokens". No `launchWebAuthFlow` call, silent (`prompt=none`) or interactive, starts
+except inside the handler for a direct user click. Silent data-token attempts are part of a
+user-initiated read, never a background refresh. A `401` also clears any data tokens held in
+`chrome.storage.session`.)
+
 ---
 
 ## 4. Logout and revoke-all
@@ -229,6 +330,9 @@ every route.
 ---
 
 ## 6. Full route reference
+
+(Amended Phase D session 3a (spike-verified): `POST /v1/google/data-token` is specified in §1a. It's planned for session 3a and not
+implemented yet.)
 
 ### `POST /v1/csv/parse`
 Auth required. Parses spreadsheet cell data into a structured CSV context for later mapping.
@@ -426,8 +530,13 @@ implicit:
 - Chrome Web Store submission, listing, and review-process requirements.
 - The not-yet-built Excel/OneDrive Graph API data adapter — nothing beyond the `User.Read`
   identity scope confirmed in §1 is specified anywhere in this codebase for that integration.
+  (Amended Phase D session 3a (spike-verified): now specified client-side in `docs/chrome-extension-design.md` §4. It uses `Files.Read`,
+  `/shares` resolution, and a file download parsed in the extension. None of it touches this
+  backend except the resulting rows posted to `/v1/csv/parse`.)
 - The Sheets/Drive data-access OAuth scope needed to actually read/write a Sheet — not named
   anywhere in this codebase (§1); the extension team owns determining it.
+  (Amended Phase D session 3a (spike-verified): now named, `spreadsheets.readonly`, requested only by the separate data grant. This
+  backend's only involvement is §1a's code exchange.)
 - Conversation history listing/browsing and full tool-call-trace-on-demand endpoints — described
   in the original design doc but not implemented (see `/v1/ask`'s note in §6).
 - A `/v1/byo-key` removal endpoint — only registration/rotation exists today (see §6).

@@ -76,6 +76,15 @@ something this design controls. `*.sharepoint.com` covers OneDrive-for-Business/
 (tenant subdomain varies per organization); `onedrive.live.com` covers personal Microsoft
 accounts. Google Sheets has one stable host.
 
+(Amended Phase D session 3a (spike-verified): the list above holds the *page* hosts the side panel is enabled on. Extension code also
+`fetch()`es these API hosts, which need their own `host_permissions` entries:
+`https://graph.microsoft.com/*`, the backend's own origin, and
+`https://my.microsoftpersonalcontent.com/*`, which is the host `@microsoft.graph.downloadUrl`
+pointed to for a personal-OneDrive `.xlsx` in the spike (§4). Download hosts for work/school
+OneDrive and SharePoint weren't observed. They're expected under `*.sharepoint.com`, which is
+already listed, but that's unverified. `https://oauth2.googleapis.com/*` is no longer needed,
+because since session 2 the extension never calls Google's token endpoint. See `docs/spikes/session3a-auth-file-access.md`.)
+
 ---
 
 ## 2. OAuth token acquisition — two different mechanisms, not one
@@ -133,6 +142,103 @@ Both flows funnel into one client-side module, `launchAuthFlow(provider)`, then 
 or `code` + `code_verifier` + `redirect_uri` for Google (per the amendment above). Nothing new to design there — this section only had to resolve *how
 the extension gets the token in the first place*, not what to do with it afterward.
 
+### Data-access tokens: separate from sign-in (Amended Phase D session 3a (spike-verified))
+
+The investigation before the spike found that **no provider token outlives sign-in**. The
+backend uses Google's access token once for `userinfo` and drops it. The Microsoft token is sent
+to `/v1/auth/exchange` and dropped, and nothing asks for a refresh token. This section's earlier
+text never said how the extension gets a token to read a spreadsheet hours or days into a
+90-day session. It gets one this way, verified live in `docs/spikes/session3a-auth-file-access.md`:
+
+1. **Sign-in asks for identity scopes only** (§3): Google `openid email`, Microsoft
+   `User.Read`. `/v1/auth/exchange` and the backend never receive a token that can read data.
+2. **Data tokens are obtained only when the user clicks something** that reads a spreadsheet,
+   by one module, `getDataToken(provider)`:
+   - **First, the cache.** Return a token from `chrome.storage.session` if one is there and not
+     expired, with a safety margin.
+   - **Otherwise, silent.** `launchWebAuthFlow({interactive: false,
+     abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: …})` with `prompt=none`,
+     the data scopes (Google also sends `include_granted_scopes=true`), and `login_hint` set to
+     the **data account's** email. That's the account the last data grant for this provider was
+     made with, which may not be the sign-in identity (see "Data account vs sign-in identity"
+     below). The extension keeps it per provider in `chrome.storage.session`:
+     - Google: the backend returns it as `email` from `/v1/google/data-token`.
+     - Microsoft: the extension reads `mail`, falling back to `userPrincipalName`, from Graph
+       `/me` with the data token.
+
+     If no data email is stored for the provider (no grant yet, or the browser has restarted
+     since), skip silent and go straight to interactive.
+     - Spike-verified: Google returns a code with no UI after a real grant, including after a
+       full Chrome restart and with two Google accounts signed in, when `login_hint` names the
+       granted account.
+     - Microsoft returns a code with no UI right after an interactive grant. Surviving a restart
+       is inferred: after a restart with consent revoked, Microsoft answered `consent_required`,
+       not `login_required`.
+     - One consequence of keeping the data email only in `chrome.storage.session`: the first
+       read after a browser restart shows the provider's account chooser once, even though a
+       silent grant would otherwise have worked. That's accepted in exchange for not persisting
+       the data account.
+   - **If silent fails, interactive**, in the same click, with `prompt=select_account` so the
+     person picks which account's files to read.
+   - **The first data grant for each provider is always interactive and must complete a real
+     code exchange.** Spike-verified: Google's `prompt=none` returned `interaction_required`
+     after an authorize step whose code was never redeemed, and succeeded once a code had
+     actually been exchanged.
+3. **Exchange:**
+   - **Google:** the extension sends `code` + `code_verifier` + `redirect_uri` to the new
+     authenticated endpoint **`POST /v1/google/data-token`** (`EXTENSION_INTEGRATION.md` §1a).
+     The backend exchanges the code with `GOOGLE_CLIENT_SECRET`, never sends
+     `access_type=offline`, reads the data account's `email` from `userinfo`, and returns only
+     `access_token`, `expires_in`, `scope` and `email`. It stores nothing. **It does not check
+     that the Google account matches the sign-in identity** (see below). The Google data grant
+     asks for `openid email spreadsheets.readonly`, since `email` is what fills `login_hint`
+     for later silent re-auth.
+   - **Microsoft:** the exchange stays client-side (a public SPA client), the same as sign-in,
+     with scopes `User.Read Files.Read`. **Spike-verified: Microsoft returns a `refresh_token`
+     even though `offline_access` isn't requested. The extension must throw it away and never
+     store it.**
+4. **Where data tokens live:** `chrome.storage.session` only, as `{access_token, expires_at,
+   data_email}` per provider. Never `.local`, never `.sync`. Spike-verified: it survives closing and
+   reopening the side panel and is cleared by a Chrome restart. No refresh token is kept
+   anywhere, extension or backend.
+5. **If Google's granular consent drops the Sheets scope:** the user can untick individual
+   scopes on Google's consent screen. The extension checks the returned `scope` and shows a
+   named "Sheets access wasn't granted" message rather than failing later on a 403.
+
+**Data account vs sign-in identity: allowed to differ, on purpose.** The Google or Microsoft
+account a data token is granted for **may differ from the identity the person signed in with**,
+and that's intended. Examples:
+- A Microsoft-signed-in person reading a Google Sheet.
+- A Google-signed-in person whose Sheet is owned by a different Google account, e.g. a work
+  Sheet opened from a personal sign-in.
+
+That second case is exactly the account-mismatch problem that ruled out `getAuthToken` above.
+Binding data tokens to the sign-in identity would bring it back. So neither provider checks the
+data account:
+- `/v1/google/data-token` doesn't compare the Google `sub` to the caller's linked identities.
+- The extension doesn't compare a Microsoft data token's `/me` to the signed-in Microsoft
+  identity. This closes the open question the first draft of this amendment raised, for the
+  same reason.
+
+Account resolution for sessions, billing and usage stays tied to the sign-in identity
+(`oauth-identity-session-design.md` §3). The data account only decides which files can be read.
+
+**Threat model:**
+- **Why an identity check wouldn't add security.** `/v1/google/data-token` only exchanges a code
+  the caller already obtained through Google's own consent screen. The code is PKCE-bound to
+  this extension's authorization request and `redirect_uri`. Someone holding a stolen session
+  token can therefore only mint Sheets tokens for Google accounts they can themselves consent
+  for, i.e. accounts they already control. A `sub` check would block legitimate use and prevent
+  essentially no attack.
+- **Why the session requirement stays.** It's for authentication and abuse control: an
+  anonymous caller can't use this backend's confidential client as a free code-exchange
+  service. *Future consideration, not built:* per-account rate limiting on the endpoint.
+- **An extension compromise** exposes at most one hour-long read token per provider, plus the
+  data account's email.
+- **A backend compromise** exposes only Google tokens in flight during a data-token exchange.
+  The backend never sees a Microsoft data token or any spreadsheet file, only the rows posted to
+  `/v1/csv/parse`. No refresh token exists anywhere.
+
 ---
 
 ## 3. OAuth scopes — resolving `EXTENSION_INTEGRATION.md`'s named gap
@@ -140,6 +246,9 @@ the extension gets the token in the first place*, not what to do with it afterwa
 ### Google
 
 - Identity scopes (already fixed by the backend, §1 of the contract): `openid`, `email`.
+- (Amended Phase D session 3a (spike-verified): **sign-in no longer asks for the data scope.** It's asked for only by the separate data
+  grant in §2 "Data-access tokens", together with `openid email` and
+  `include_granted_scopes=true`.)
 - Data-access scope: **`https://www.googleapis.com/auth/spreadsheets.readonly`** — confirmed
   sufficient for both metadata (`spreadsheets.get`) and cell reads (`spreadsheets.values.get`);
   a Sheets API scope covers every read operation on spreadsheet files, not one scope per method.
@@ -155,7 +264,18 @@ the extension gets the token in the first place*, not what to do with it afterwa
 ### Microsoft
 
 - Identity scope (already fixed by the backend): `User.Read`.
-- Data-access scope: **`Files.ReadWrite` (delegated)** — **not** `Files.Read`. This is the
+- **Amended Phase D session 3a (spike-verified): the data-access scope is now `Files.Read`, not `Files.ReadWrite`, and it's asked
+  for only by the separate data grant in §2 "Data-access tokens". Microsoft sign-in asks for
+  `User.Read` only.** The spike ran on a personal account with a token whose granted scope
+  was `User.Read Files.Read` and nothing more. With it, `/shares/{encoded-url}/driveItem`,
+  item metadata including `@microsoft.graph.downloadUrl`, and the file download all
+  succeeded. `driveitem-get-content` documents `Files.Read` as least-privileged. The
+  `shares-get` table says `Files.ReadWrite`, but the live result contradicts it. The
+  finding below was about the workbook API, which B2 (§4) no longer uses. It's kept for the
+  record: the spike found the workbook API *also* works with `Files.Read` on a personal
+  account, contradicting these same tables. **Unverified:** `Files.Read` on work/school
+  accounts, since there's no business tenant to test on.
+- *(Superseded by the amendment above.)* Data-access scope: **`Files.ReadWrite` (delegated)** — **not** `Files.Read`. This is the
   single most important, non-obvious finding of this section, confirmed against Microsoft's own
   Graph API reference tables for both Graph calls this design actually needs (the `/shares`
   file-resolution call in §4, and the `workbook/worksheets/{}/range` read call itself): **both
@@ -173,13 +293,26 @@ the extension gets the token in the first place*, not what to do with it afterwa
   sites/drives directly, and `/shares` itself lists `Files.ReadWrite` as sufficient — with
   `Sites.ReadWrite.All` appearing only as a *higher*-privileged alternative, never a requirement.
   So the same single scope covers personal OneDrive, OneDrive for Business, and SharePoint-hosted
-  files alike.
+  files alike. (Amended Phase D session 3a (spike-verified): that single scope is now `Files.Read`. It's verified for personal OneDrive
+  only, and unverified for OneDrive for Business and SharePoint.)
 
 ---
 
 ## 4. File/range identification per platform
 
 ### Google Sheets
+
+(Amended Phase D session 3a (spike-verified): the steps below stand, with four changes.
+- **Step 1:** the spike verified that `gid` updates live in both the query string and the hash
+  when the user switches sheet tabs, with no reload. And "Get link to this range" puts
+  `range=A3:G7` in the hash. **When `range=` is present, it pre-fills the range field.**
+- **Steps 2–3** use a data token from `getDataToken('google')` (§2 "Data-access tokens").
+  Nothing in sign-in provides one.
+- **Step 4's escape hatch is now a range field in the read panel**, next to a sheet selector
+  filled from `spreadsheets.get`'s sheet titles, not typed into chat. Chat doesn't exist until
+  session 5, and the default whole-used-range read fails on typical financial layouts: title
+  rows, blank rows and footnotes break `rows_to_raw_csv`'s header-row checks.
+- **Freshness of Sheets data wasn't tested.** The Sheets API reads the live document.)
 
 1. Read the active tab's URL (`chrome.tabs.query({active:true,currentWindow:true})`). Extract
    `spreadsheetId` (the path segment after `/d/`) and `gid` (the `#gid=N` fragment — Sheets'
@@ -206,6 +339,14 @@ given account even lands on depends on Microsoft's still-in-progress `cloud.micr
 (§1a). Hand-parsing three different query-string shapes per host is fragile and exactly the kind
 of thing this brief warned against assuming.
 
+**Amended Phase D session 3a (spike-verified): file resolution (steps 1–3 below) was verified on a personal account. Reading the data
+(steps 4–5) is replaced by "download + parse" (B2), described right after step 5.** The
+spike's personal edit URL looked like
+`onedrive.live.com/personal/<cid>/_layouts/15/doc.aspx?sourcedoc={GUID}&action=edit`: no
+`resid`, and the file GUID in `sourcedoc`. `/shares` resolved it with `Files.Read` alone
+(200, `driveType: "personal"`). **There's no verified fallback** if `/shares` fails for some
+other URL shape, and work/school URLs are unverified.
+
 Instead: use Graph's own **`/shares/{shareIdOrEncodedSharingUrl}/driveItem`** endpoint, which
 Microsoft documents specifically for resolving an arbitrary access URL to a `DriveItem` — this
 sidesteps needing separate parsing logic per host entirely:
@@ -230,6 +371,30 @@ sidesteps needing separate parsing logic per host entirely:
    parameter — confirmed this returns the entire used range, the same "sensible default" as the
    Sheets path.
 
+**Replacement for steps 4–5: download + parse (B2) (Amended Phase D session 3a (spike-verified)).** The Graph workbook API isn't used.
+Microsoft documents that it doesn't support workbooks on consumer OneDrive (Q&A answers from
+2024 and 2026 say the same). In the spike it *did* work on a personal account, even with
+`Files.Read`. But being officially unsupported makes it unsafe to depend on, and it has **no
+freshness advantage**: after an edit, the workbook API and the downloaded file were both stale
+on the first read and both fresh at +90s. The workbook API reads the saved file, not the live
+editing session. Instead:
+1. `GET /drives/{driveId}/items/{itemId}?select=id,name,size,lastModifiedDateTime,eTag,@microsoft.graph.downloadUrl`
+   with the `Files.Read` data token.
+2. `fetch(downloadUrl)` with **no** `Authorization` header. It's a preauthenticated URL. Treat
+   it as a credential: never log or store it. Graph's `/content` endpoint responds with a 302,
+   which fails CORS preflight from JS, so this is the documented way for JS clients. For a
+   personal account the host was `my.microsoftpersonalcontent.com` (§1a). Refuse files over a
+   size cap before downloading.
+3. Parse in the extension with **SheetJS 0.20.3, installed from `cdn.sheetjs.com`'s tarball**,
+   not the npm registry copy, which is stuck at 0.18.5. `workbook.SheetNames` fills the sheet
+   selector. This replaces step 4's blind `worksheets[0]` default: the first sheet is still
+   the default, but the user can pick another. The file never goes to the backend; only the
+   rows do, as today.
+4. Show the file's **`lastModifiedDateTime` as "data as of last save"**, with a note that edits
+   made in the last minute or two may not appear yet. In the spike, a cell edit bumped
+   `lastModifiedDateTime` about 24s later and showed up in the download within 90s. A sheet
+   rename took several minutes.
+
 ---
 
 ## 5. Data format contract compliance — both APIs' real response shapes
@@ -243,7 +408,20 @@ or numeric serial. Confirmed exactly how each platform's real API satisfies this
   dates, as the string it displays in the Sheets UI. The adapter must simply *not* override this
   to `UNFORMATTED_VALUE` (which would return a raw numeric date serial) — the contract is
   satisfied by doing nothing, not by extra client-side logic.
-- **Excel:** the workbook `Range` resource's `values` property holds the *raw* typed value (a
+- **Excel (Amended Phase D session 3a (spike-verified)):** because of B2 (§4), this path doesn't read the Graph `Range` resource. The
+  display string for each cell is SheetJS's rendered text (`cell.w`, via `sheet_to_json(ws,
+  {header: 1, raw: false, defval: ""})`). Spike result: 29 of 33 checks matched exactly
+  (currency, 1-decimal percent, a parenthesized negative, custom `d-mmm-yy` dates, and text).
+  **The 4 misses were all Excel's built-in Short Date format: SheetJS renders `3/31/25` where
+  Excel shows `3/31/2025`.** Formula cells carry cached values, so no recalculation is
+  needed. Two things are **open for session 3b and not decided here**:
+  1. Should dates be normalized to ISO-8601 on *both* platforms? Both the Short Date gap and
+     Google's locale-dependent `FORMATTED_VALUE` strings argue for it.
+  2. Should numbers be sent as underlying values or display strings? This matters for
+     traceability: `0.6145…` displays as `61.5%`.
+
+  The rest of this bullet describes the Graph `Range` path, which is no longer used.
+- *(Superseded for the reason above.)* **Excel:** the workbook `Range` resource's `values` property holds the *raw* typed value (a
   date comes back as a number, since Excel's `valueTypes` classifies a date cell as `Double`) —
   confirmed via the Graph resource reference. The `text` property instead holds the *displayed*
   string for every cell, explicitly documented as matching the Excel UI regardless of column
@@ -264,9 +442,13 @@ or numeric serial. Confirmed exactly how each platform's real API satisfies this
 Mechanically, this is `EXTENSION_INTEGRATION.md`'s already-fully-specified contract, wired
 end-to-end using §2's token-acquisition mechanism:
 
-1. `launchAuthFlow(provider)` (§2) → raw OAuth `oauth_token`.
-2. `POST /v1/auth/exchange` with `{provider, oauth_token}` → `{session_token, account_id,
-   expires_at}` (contract §1). Handle both documented error cases in the sign-in UI: `401`
+1. `launchAuthFlow(provider)` (§2) → for Microsoft, an OAuth `oauth_token` (identity scope
+   `User.Read` only); for Google, the raw `code` + `code_verifier` + `redirect_uri`.
+   (Amended Phase D session 3a (spike-verified): the earlier text said `oauth_token` for both providers, which has been stale since the
+   session 2 amendment in §2.)
+2. `POST /v1/auth/exchange` with `{provider, oauth_token}` (Microsoft) or `{provider, code,
+   code_verifier, redirect_uri}` (Google) → `{session_token, account_id, expires_at}`
+   (contract §1). Handle both documented error cases in the sign-in UI: `401`
    (token rejected/unverified email) and `422` (Microsoft account has no usable email — contract
    §1's specific `mail`/`userPrincipalName` fallback case).
 3. **Store `session_token` in `chrome.storage.local` — never `.sync`** — carried over verbatim
@@ -275,6 +457,10 @@ end-to-end using §2's token-acquisition mechanism:
    resolution (a second device just re-runs step 1–2 against its own OAuth grant and resolves
    back to the same `account_id` server-side, per the contract's cross-provider identity note —
    the token itself never needs to travel between devices).
+3a. **Provider data tokens (Amended Phase D session 3a (spike-verified)) go in `chrome.storage.session` only**, never `.local` or
+   `.sync`, and never together with `session_token`. A Microsoft `refresh_token` is thrown away
+   on receipt. See §2 "Data-access tokens". Sign-out, revoke-all, and any `401` also clear the
+   stored data tokens.
 4. Every subsequent request: `Authorization: Bearer <session_token>` header. Never send
    `X-Install-Id` — it does nothing server-side anymore (contract §1 step 4).
 5. **Any `401` — indistinguishably expired, revoked, or never valid, by the backend's own
@@ -286,6 +472,11 @@ end-to-end using §2's token-acquisition mechanism:
    of this section had revoke-all auto-relaunch sign-in, below — live testing showed this
    produces a surprise OAuth popup with no user action, and per the same principle, no code path
    may ever call `launchAuthFlow` except a direct click on a sign-in button.)
+   (Amended Phase D session 3a (spike-verified): the same rule, widened to cover data grants. **No `launchWebAuthFlow` call of any
+   kind, silent or interactive, starts except inside the handler for a direct user click**:
+   a sign-in button, or a "read this sheet" style action. A silent data-token attempt counts
+   as part of that click, never as a background refresh. Nothing re-acquires tokens on a
+   timer, on panel open, or after an error.)
 6. Sign-out UI: `POST /v1/auth/logout` (this device only) and `POST /v1/auth/sessions/revoke-all`
    ("sign out everywhere" / compromised-credential case) — both take no body, both return
    `{"revoked": true}` unconditionally (contract §4). Neither ever calls `launchAuthFlow` — both
@@ -345,6 +536,10 @@ Named plainly, matching this project's own design-doc convention:
   resolution mechanism (§4) is built to support either.
 - Any change to the backend contract itself — this document treats
   `backend/EXTENSION_INTEGRATION.md` as fixed and builds only the client side against it.
+  **(Amended Phase D session 3a (spike-verified): explicitly relaxed for exactly one addition, `POST /v1/google/data-token`**
+  (`EXTENSION_INTEGRATION.md` §1a). Google's "Web application" client is confidential, so a
+  Google data grant can't be exchanged client-side (§2). Without this endpoint the extension
+  couldn't read Sheets at all. Every other part of the contract stays fixed.)
 
 ---
 
@@ -360,10 +555,29 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
 2. **OAuth for both providers.** `launchWebAuthFlow` + PKCE for Google and Microsoft (§2), the
    shared auth module, full wiring through §6 (`/v1/auth/exchange`, `chrome.storage.local`,
    `Authorization` header, uniform 401→re-sign-in handling, logout/revoke-all buttons).
-3. **File/range adapters for both platforms.** Sheets' URL-parse → `spreadsheets.get` →
-   `spreadsheets.values.get` path and Excel's `/shares` → `workbook/range` path (§4), each
-   normalized into the same rows-of-display-strings shape (§5), including Sheets' ragged-row
-   padding step. Wired into `POST /v1/csv/parse`.
+3. *(Amended Phase D session 3a (spike-verified): split into 3a and 3b. The spike came first; its results are in `docs/spikes/session3a-auth-file-access.md`.)*
+   - **3a. Identity/data-token architecture.**
+     - Sign-in scopes reduced to identity only: Google `openid email`, Microsoft `User.Read`.
+       No `Files.ReadWrite`.
+     - A `getDataToken(provider)` module: cache, then silent, then interactive, inside a click
+       (§2 "Data-access tokens").
+     - Backend `POST /v1/google/data-token`, with tests: session required, code exchange
+       without `access_type=offline`, the data account's `email` returned, no check against
+       the sign-in identity, nothing stored or logged.
+     - Microsoft client-side data exchange that throws away the `refresh_token`.
+     - `chrome.storage.session` token storage, cleared on sign-out, revoke-all and `401`.
+     - Manifest host-permission updates (§1a).
+     - The widened click rule (§6 step 5).
+   - **3b. File/range adapters and range UI.**
+     - Sheets: URL parse (live `gid`, `range=` pre-fill), then `spreadsheets.get`, then
+       `spreadsheets.values.get`.
+     - Excel: `/shares`, then item metadata, then `downloadUrl` fetch, then SheetJS 0.20.3
+       (§4 B2).
+     - Sheet selector plus range field, and a "data as of last save" timestamp for Excel.
+     - Both normalized into one rows shape (§5), including padding for ragged rows, and wired
+       into `POST /v1/csv/parse`.
+     - Decide §5's two open questions first: ISO date normalization, and values vs display
+       strings.
 4. **Mapping-confirmation screen.** Side-panel view swap from chat to a review table:
    `POST /v1/csv/{id}/propose-mapping`'s proposal rendered editable, then
    `POST /v1/csv/{id}/confirm` — per the contract, this proposal is never auto-accepted.
@@ -401,7 +615,9 @@ This produces a design document, not code.
   site/drive-enumeration path.
 - One real, unavoidable trade-off is flagged plainly rather than glossed over: Microsoft Graph's
   workbook API has no read-only permission floor, so this extension must request `Files.ReadWrite`
-  even though it never writes (§3).
+  even though it never writes (§3). (Amended Phase D session 3a (spike-verified): no longer true. B2 doesn't use the workbook API, and
+  `Files.Read` was verified sufficient on a personal account, so the extension never requests
+  write access. See §3 and `docs/spikes/session3a-auth-file-access.md`.)
 - One implementation-time detail is explicitly flagged as unverified rather than guessed: the
   exact Google Cloud Console OAuth client type to register for `launchWebAuthFlow` (§2) — a
   console-UI detail more prone to drift than the protocol behavior surrounding it. (Resolved
