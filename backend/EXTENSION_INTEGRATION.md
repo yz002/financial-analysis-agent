@@ -76,6 +76,16 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
 
    Spike results: `docs/spikes/session3a-auth-file-access.md`.)
 
+   (Amended Phase D session 3a (live-verified): **for Microsoft, "identity scopes only"
+   describes the request, not the token this backend receives.** Microsoft adds every scope
+   the account has already consented to for Graph. Once a person has made the `Files.Read`
+   data grant, the `User.Read`-only sign-in token sent here carries `User.Read Files.Read`.
+   For accounts that consented before 3a it may also carry `Files.ReadWrite`.
+   - This backend uses that token once, for `/me`, and stores and logs nothing.
+   - Google sign-in tokens carry only `openid email`.
+   - Planned fix: verify Microsoft identity with a validated ID token, so no Graph token
+     reaches this backend (`docs/chrome-extension-design.md` §10, open item 1).)
+
 2. **Exchange for a session token:**
 
    `POST /v1/auth/exchange` — **no authentication required** (this is the one route a caller
@@ -170,10 +180,11 @@ All endpoints are versioned under `/v1`, JSON over HTTPS.
 
 ## 1a. Google data-access token — `POST /v1/google/data-token` (Amended Phase D session 3a (spike-verified))
 
-**Status: specified, not yet implemented.** Phase D session 3a builds it. Until then this route
-doesn't exist in `backend/app/main.py`. This is the only exception to the header's
-"verified against the code" rule, and it's labelled as one. It's the single contract addition
-that `docs/chrome-extension-design.md` §8 explicitly allows.
+**Status: implemented** (Phase D session 3a), in `backend/app/main.py`'s `google_data_token`
+and `app/oauth_providers.py`'s `exchange_google_data_code`. It's covered by
+`backend/tests/test_google_data_token.py` and was live-tested end to end with the extension
+against a local backend. This section now follows the code, like the rest of this document.
+It's the single contract addition that `docs/chrome-extension-design.md` §8 explicitly allows.
 
 **Purpose:** exchange a Google data-access authorization code for a short-lived access token
 that the extension uses to call the Google Sheets API itself. Google's "Web application" client
@@ -223,10 +234,14 @@ Response (200):
   "email": "<the data account's email, from userinfo>"
 }
 ```
-The extension keeps `access_token` and `email` only in `chrome.storage.session`. Google's granular consent
-lets the user untick the Sheets scope, so the extension must check `scope` for
-`https://www.googleapis.com/auth/spreadsheets.readonly` and show a named "Sheets access wasn't
-granted" message if it's missing.
+The extension keeps `access_token` only in `chrome.storage.session`. It keeps `email`, the data
+account, in `chrome.storage.local`, so silent re-auth works after a browser restart; it's not a
+credential. Both are cleared on sign-out, revoke-all, any `401`, and every successful
+sign-in. (Amended Phase D session 3a: the email was originally specified as session-only.)
+Google's granular consent lets the user untick the Sheets scope, so the extension must check
+`scope` for `https://www.googleapis.com/auth/spreadsheets.readonly` and show a named "Sheets
+access wasn't granted" message if it's missing. In that case it stores neither the token nor
+the email.
 
 Errors:
 - `401` — `{"detail": "Invalid or expired session token."}`: the *session token* failed. This
@@ -295,6 +310,12 @@ except inside the handler for a direct user click. Silent data-token attempts ar
 user-initiated read, never a background refresh. A `401` also clears any data tokens held in
 `chrome.storage.session`.)
 
+(Amended Phase D session 3a (live-verified): a `401` also clears the data-account emails in
+`chrome.storage.local`. **Chrome itself doesn't enforce the click rule:**
+`launchWebAuthFlow({interactive: true})` opened a window with no user gesture in the live test.
+The extension's `isTrusted` check on the click event, in `getDataToken`, is the only
+enforcement (`docs/chrome-extension-design.md` §6 step 5).)
+
 ---
 
 ## 4. Logout and revoke-all
@@ -331,8 +352,7 @@ every route.
 
 ## 6. Full route reference
 
-(Amended Phase D session 3a (spike-verified): `POST /v1/google/data-token` is specified in §1a. It's planned for session 3a and not
-implemented yet.)
+(Amended Phase D session 3a: `POST /v1/google/data-token` is specified in §1a and implemented.)
 
 ### `POST /v1/csv/parse`
 Auth required. Parses spreadsheet cell data into a structured CSV context for later mapping.

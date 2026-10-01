@@ -78,7 +78,9 @@ accounts. Google Sheets has one stable host.
 
 (Amended Phase D session 3a (spike-verified): the list above holds the *page* hosts the side panel is enabled on. Extension code also
 `fetch()`es these API hosts, which need their own `host_permissions` entries:
-`https://graph.microsoft.com/*`, the backend's own origin, and
+`https://graph.microsoft.com/*`, `https://sheets.googleapis.com/*` (the Sheets API; added
+during the 3a implementation, since the spike amendment had missed it), the backend's own
+origin, `https://login.microsoftonline.com/*` (Microsoft's token endpoint), and
 `https://my.microsoftpersonalcontent.com/*`, which is the host `@microsoft.graph.downloadUrl`
 pointed to for a personal-OneDrive `.xlsx` in the spike (§4). Download hosts for work/school
 OneDrive and SharePoint weren't observed. They're expected under `*.sharepoint.com`, which is
@@ -151,7 +153,18 @@ text never said how the extension gets a token to read a spreadsheet hours or da
 90-day session. It gets one this way, verified live in `docs/spikes/session3a-auth-file-access.md`:
 
 1. **Sign-in asks for identity scopes only** (§3): Google `openid email`, Microsoft
-   `User.Read`. `/v1/auth/exchange` and the backend never receive a token that can read data.
+   `User.Read`.
+   - **Google:** `/v1/auth/exchange` never receives a token that can read data. Sign-in
+     doesn't send `include_granted_scopes`, so its token carries only what it asked for.
+   - **Microsoft: not true once a data grant exists. Live-verified in the 3a test run.**
+     Microsoft adds every scope the account has already consented to for Graph, whatever the
+     request asks for. Before any data grant, the sign-in token's granted scope was
+     `User.Read`. After the `Files.Read` data grant, a fresh `User.Read`-only sign-in
+     returned `User.Read Files.Read`. So the backend does receive a `Files.Read`-capable
+     Graph token at every Microsoft sign-in after the first data grant. It uses the token
+     once for `/me` and discards it, never storing or logging it. Accounts that consented to
+     `Files.ReadWrite` before 3a would carry that too, until the person removes the consent
+     (see §3). Removing this exposure is open item 1 in §10.
 2. **Data tokens are obtained only when the user clicks something** that reads a spreadsheet,
    by one module, `getDataToken(provider)`:
    - **First, the cache.** Return a token from `chrome.storage.session` if one is there and not
@@ -161,25 +174,42 @@ text never said how the extension gets a token to read a spreadsheet hours or da
      the data scopes (Google also sends `include_granted_scopes=true`), and `login_hint` set to
      the **data account's** email. That's the account the last data grant for this provider was
      made with, which may not be the sign-in identity (see "Data account vs sign-in identity"
-     below). The extension keeps it per provider in `chrome.storage.session`:
+     below). The extension keeps it per provider:
      - Google: the backend returns it as `email` from `/v1/google/data-token`.
      - Microsoft: the extension reads `mail`, falling back to `userPrincipalName`, from Graph
        `/me` with the data token.
 
-     If no data email is stored for the provider (no grant yet, or the browser has restarted
-     since), skip silent and go straight to interactive.
+     (Amended Phase D session 3a (live-verified): **the data email is kept in
+     `chrome.storage.local`**, key `fa_data_accounts`, not in `chrome.storage.session` as this
+     section first said. It isn't a credential. Keeping it is what lets the first read after a
+     browser restart run silently instead of showing the account chooser again. It's
+     tied to the session: it's cleared on sign-out, Sign out everywhere, any `401`, **and
+     every successful sign-in**. The last case means a new sign-in, possibly a different
+     person on the same browser profile, never inherits the previous person's `login_hint`. Tokens stay
+     session-only. See item 4 below and §6 3a.)
+
+     If no data email is stored for the provider (no grant yet, or it was cleared), skip
+     silent and go straight to interactive.
      - Spike-verified: Google returns a code with no UI after a real grant, including after a
        full Chrome restart and with two Google accounts signed in, when `login_hint` names the
        granted account.
-     - Microsoft returns a code with no UI right after an interactive grant. Surviving a restart
-       is inferred: after a restart with consent revoked, Microsoft answered `consent_required`,
-       not `login_required`.
-     - One consequence of keeping the data email only in `chrome.storage.session`: the first
-       read after a browser restart shows the provider's account chooser once, even though a
-       silent grant would otherwise have worked. That's accepted in exchange for not persisting
-       the data account.
+     - Microsoft returns a code with no UI right after an interactive grant.
+     - **Live-verified in the 3a test run, for both providers:** with the email in `.local`,
+       a read after a full Chrome restart re-authenticated silently, with no window. This
+       closes the spike's "inferred" item for Microsoft.
+     - A wrong remembered email (live-tested with one that wasn't signed in) makes the silent
+       attempt fail, and the account chooser opens within the same click.
    - **If silent fails, interactive**, in the same click, with `prompt=select_account` so the
      person picks which account's files to read.
+     - **Live-verified in the 3a test run: Chrome doesn't require a user gesture for
+       `launchWebAuthFlow`.** Calling it with `interactive: true` from the panel console after
+       a 12-second `setTimeout`, with no user gesture at all, opened the Microsoft window.
+     - **This is good for the fallback.** Even a silent attempt that runs to its 10-second
+       timeout can still open the interactive window. If it ever doesn't, the extension shows
+       "click Connect data again" rather than failing silently.
+     - **It also means Chrome enforces nothing.** The extension's own `isTrusted` check on the
+       click event, at the top of `getDataToken`, is the **only** thing enforcing the
+       "only inside a click" rule (§6 step 5).
    - **The first data grant for each provider is always interactive and must complete a real
      code exchange.** Spike-verified: Google's `prompt=none` returned `interaction_required`
      after an authorize step whose code was never redeemed, and succeeded once a code had
@@ -197,13 +227,20 @@ text never said how the extension gets a token to read a spreadsheet hours or da
      with scopes `User.Read Files.Read`. **Spike-verified: Microsoft returns a `refresh_token`
      even though `offline_access` isn't requested. The extension must throw it away and never
      store it.**
-4. **Where data tokens live:** `chrome.storage.session` only, as `{access_token, expires_at,
-   data_email}` per provider. Never `.local`, never `.sync`. Spike-verified: it survives closing and
-   reopening the side panel and is cleared by a Chrome restart. No refresh token is kept
-   anywhere, extension or backend.
+4. **Where data tokens live:** `chrome.storage.session` only, key `fa_data_tokens`, as
+   `{accessToken, expiresAt, scope}` per provider. Never `.local`, never `.sync`.
+   Spike-verified: it survives closing and reopening the side panel and is cleared by a
+   Chrome restart. No refresh token is kept anywhere, extension or backend.
+   (Amended Phase D session 3a (live-verified): the data email is no longer stored with the
+   token. It's in `chrome.storage.local` (`fa_data_accounts`, see item 2). The live test
+   confirmed `.local` held only `fa_session` and `fa_data_accounts`, with emails only.)
 5. **If Google's granular consent drops the Sheets scope:** the user can untick individual
    scopes on Google's consent screen. The extension checks the returned `scope` and shows a
    named "Sheets access wasn't granted" message rather than failing later on a 403.
+   It stores nothing from that grant, not even the email: a remembered email would make the
+   next click silently fetch the same partial grant, so the consent screen would never come
+   back. Live-verified: after unticking Sheets, the next click brought consent back with
+   Sheets as the only new item.
 
 **Data account vs sign-in identity: allowed to differ, on purpose.** The Google or Microsoft
 account a data token is granted for **may differ from the identity the person signed in with**,
@@ -223,6 +260,17 @@ data account:
 Account resolution for sessions, billing and usage stays tied to the sign-in identity
 (`oauth-identity-session-design.md` §3). The data account only decides which files can be read.
 
+(Amended Phase D session 3a (live-verified): both cases above work.
+- Signed in with Microsoft, Connect data on a Google Sheet connected through a Google data
+  account.
+- On a Sheet owned by a second Google account, the remembered data account got a "can't open
+  this file" message. The extension then forgot that provider's grant, and the next click
+  opened the chooser and connected through the owner's account.
+
+In Google's "Testing" publishing mode, the second account had to be added as a test user
+first; see open item 5 in §10. Signing in to the app *itself* as that second account created
+a separate app account, as expected with no account linking.)
+
 **Threat model:**
 - **Why an identity check wouldn't add security.** `/v1/google/data-token` only exchanges a code
   the caller already obtained through Google's own consent screen. The code is PKCE-bound to
@@ -234,10 +282,22 @@ Account resolution for sessions, billing and usage stays tied to the sign-in ide
   anonymous caller can't use this backend's confidential client as a free code-exchange
   service. *Future consideration, not built:* per-account rate limiting on the endpoint.
 - **An extension compromise** exposes at most one hour-long read token per provider, plus the
-  data account's email.
-- **A backend compromise** exposes only Google tokens in flight during a data-token exchange.
-  The backend never sees a Microsoft data token or any spreadsheet file, only the rows posted to
+  data account's email. (Amended Phase D session 3a: the email now persists on disk in
+  `chrome.storage.local` until sign-out, revoke-all, a `401` or the next sign-in, rather than
+  only until a browser restart.)
+- **A backend compromise** exposes Google data tokens in flight during a data-token exchange.
+  (Amended Phase D session 3a (live-verified): it also exposes **Microsoft sign-in tokens in
+  flight that can read files.** As item 1 above records, once a Microsoft data grant exists,
+  every later Microsoft sign-in token carries `Files.Read`, or `Files.ReadWrite` for accounts
+  that consented before 3a. The backend uses each such token once for `/me` and keeps none,
+  so an attacker would have to capture them live, during sign-in, rather than read them from storage. The earlier claim that the backend
+  "never sees" a Microsoft token able to read data was wrong for sign-in tokens. It still
+  holds for Microsoft *data* tokens, which stay in the extension. Open item 1 in §10 removes
+  the exposure.) The backend never sees any spreadsheet file, only the rows posted to
   `/v1/csv/parse`. No refresh token exists anywhere.
+- **The click rule has one enforcement point.** Chrome lets `launchWebAuthFlow` run without a
+  user gesture (item 2 above), so the `isTrusted` guard in `getDataToken` is all that stops
+  code from opening an OAuth window, or silently obtaining a token, outside a click.
 
 ---
 
@@ -275,6 +335,17 @@ Account resolution for sessions, billing and usage stays tied to the sign-in ide
   record: the spike found the workbook API *also* works with `Files.Read` on a personal
   account, contradicting these same tables. **Unverified:** `Files.Read` on work/school
   accounts, since there's no business tenant to test on.
+- **Existing `Files.ReadWrite` consents (Amended Phase D session 3a).** People who signed in
+  before 3a consented to `Files.ReadWrite`. That consent stays with Microsoft until they remove
+  it themselves: account.live.com/consent/Manage for personal accounts, myapps.microsoft.com
+  for work/school. The extension has no API to revoke it.
+  - Because Microsoft carries consented scopes into every token (§2 item 1), those accounts'
+    data tokens, and their sign-in tokens, may carry `Files.ReadWrite`.
+  - The extension does nothing automatically about it. When a Microsoft data token's granted
+    scope includes `Files.ReadWrite`, the Connect result adds a one-line note saying the
+    account still grants an older write permission, with the place to remove it.
+  - The live test account had no leftover `Files.ReadWrite`: its data token's granted scope
+    was `User.Read Files.Read`.
 - *(Superseded by the amendment above.)* Data-access scope: **`Files.ReadWrite` (delegated)** — **not** `Files.Read`. This is the
   single most important, non-obvious finding of this section, confirmed against Microsoft's own
   Graph API reference tables for both Graph calls this design actually needs (the `/shares`
@@ -346,6 +417,24 @@ spike's personal edit URL looked like
 `resid`, and the file GUID in `sourcedoc`. `/shares` resolved it with `Files.Read` alone
 (200, `driveType: "personal"`). **There's no verified fallback** if `/shares` fails for some
 other URL shape, and work/school URLs are unverified.
+
+**Amended Phase D session 3a (live-verified): a second personal URL shape, which `/shares`
+rejects.**
+- **The URL.** Excel for the web also opens personal files at
+  `excel.cloud.microsoft/open/onedrive/?docId=<id>&driveId=<id>`. For that URL,
+  `/shares/u!…/driveItem` returns `400 invalidRequest "Invalid shares key."`
+- **Why the ids are usable directly.** The URL-decoded `docId` is the Graph item id itself.
+  For the test file it was `<driveId>!s<sourcedoc GUID without dashes>`: 50 characters, the
+  same id `/shares` returned when the file was opened via `onedrive.live.com`.
+- **How each shape is resolved now:**
+  - this shape: `GET /drives/{driveId}/items/{itemId}`, each id encoded as one path segment;
+  - `onedrive.live.com`, SharePoint and `officeapps.live.com` URLs: `/shares`, as before;
+  - any other `*.cloud.microsoft` shape (e.g. `/open/sharepoint/`, or a missing
+    `docId`/`driveId`): reported as unsupported with a clear message, before any token is
+    requested, and never sent to `/shares`.
+- **Live result:** both personal URL shapes connected to the same file.
+- **Still unverified:** `officeapps.live.com` URLs through `/shares`, and every other
+  `cloud.microsoft` shape. These are open items 2 and 3 in §10.
 
 Instead: use Graph's own **`/shares/{shareIdOrEncodedSharingUrl}/driveItem`** endpoint, which
 Microsoft documents specifically for resolving an arbitrary access URL to a `DriveItem` — this
@@ -461,6 +550,15 @@ end-to-end using §2's token-acquisition mechanism:
    `.sync`, and never together with `session_token`. A Microsoft `refresh_token` is thrown away
    on receipt. See §2 "Data-access tokens". Sign-out, revoke-all, and any `401` also clear the
    stored data tokens.
+   (Amended Phase D session 3a (live-verified): the **data-account email** per provider goes in
+   `chrome.storage.local` (`fa_data_accounts`), so silent re-auth works after a browser
+   restart. It isn't a credential.
+   - Sign-out, revoke-all, any `401` and every successful sign-in clear the tokens and the
+     emails together. `clearStoredSession()` is the single place that does it, so no future
+     path that ends the session can leave data-access state behind.
+   - Live-verified for sign-out, Sign out everywhere and a forced `401` (a `curl` logout of a
+     copied session token): all three cleared `fa_session`, `fa_data_tokens` and
+     `fa_data_accounts`, with no OAuth window.)
 4. Every subsequent request: `Authorization: Bearer <session_token>` header. Never send
    `X-Install-Id` — it does nothing server-side anymore (contract §1 step 4).
 5. **Any `401` — indistinguishably expired, revoked, or never valid, by the backend's own
@@ -477,6 +575,11 @@ end-to-end using §2's token-acquisition mechanism:
    a sign-in button, or a "read this sheet" style action. A silent data-token attempt counts
    as part of that click, never as a background refresh. Nothing re-acquires tokens on a
    timer, on panel open, or after an error.)
+   (Amended Phase D session 3a (live-verified): **Chrome doesn't enforce this.**
+   `launchWebAuthFlow({interactive: true})` opened a window with no user gesture at all (§2).
+   The rule is enforced only by `getDataToken` refusing any click event that isn't
+   `isTrusted`, before it touches `browser.identity`, plus unit tests that no other code path
+   reaches it. Any new code that obtains a provider token must go through that check.)
 6. Sign-out UI: `POST /v1/auth/logout` (this device only) and `POST /v1/auth/sessions/revoke-all`
    ("sign out everywhere" / compromised-credential case) — both take no body, both return
    `{"revoked": true}` unconditionally (contract §4). Neither ever calls `launchAuthFlow` — both
@@ -556,7 +659,9 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    shared auth module, full wiring through §6 (`/v1/auth/exchange`, `chrome.storage.local`,
    `Authorization` header, uniform 401→re-sign-in handling, logout/revoke-all buttons).
 3. *(Amended Phase D session 3a (spike-verified): split into 3a and 3b. The spike came first; its results are in `docs/spikes/session3a-auth-file-access.md`.)*
-   - **3a. Identity/data-token architecture.**
+   - **3a. Identity/data-token architecture.** *(Implemented and live-tested against the local
+     backend. Results are recorded in the amendments to §2, §3, §4 and §6; the open items it
+     left are listed in §10.)*
      - Sign-in scopes reduced to identity only: Google `openid email`, Microsoft `User.Read`.
        No `Files.ReadWrite`.
      - A `getDataToken(provider)` module: cache, then silent, then interactive, inside a click
@@ -593,6 +698,42 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
 7. **Polish + manual QA pass** across both OAuth providers and both spreadsheet platforms
    end-to-end (sign-in → file read → mapping confirm → ask → usage/billing surfacing). No new
    endpoints or scopes — a verification session, not a feature one.
+
+---
+
+## 10. Open items (from Phase D session 3a)
+
+Recorded so they aren't rediscovered later. None blocks 3b.
+
+1. **Verify Microsoft identity with a validated ID token, not a Graph access token.** Today
+   `/v1/auth/exchange` verifies Microsoft sign-in by calling Graph `/me` with an access token.
+   Microsoft carries every consented Graph scope into that token, so after the first data grant
+   the backend receives a `Files.Read`-capable token at every sign-in (§2 item 1, live-verified).
+   - The fix: request `openid` and send the backend the ID token instead. The backend would
+     then validate the ID token's signature, issuer, audience and expiry against Microsoft's
+     published keys, and take `oid`/`sub` plus `email`/`preferred_username` from its claims.
+   - The backend would then never hold a Graph token.
+   - It has to keep `oauth-identity-session-design.md`'s stable-subject and email-fallback
+     rules, and those rules' anti-takeover reasoning (`SECURITY.md` §7).
+2. **`officeapps.live.com` URLs still resolve through `/shares`, unverified.** No live test
+   has opened a file on that host (§4).
+3. **`excel.cloud.microsoft` shapes other than `/open/onedrive/` are unverified**, for example
+   work/school or SharePoint files. They're reported as unsupported for now rather than sent to
+   `/shares`, which rejected the one cloud.microsoft shape tested (§4).
+4. **3b idea: remember the data account per file, not one per provider.** Today the extension
+   keeps one data-account email per provider. A person who reads Sheets from two Google
+   accounts will hit "can't open this file", and then the chooser, each time they switch.
+   Keying the remembered account by spreadsheet/drive item would let each file re-authenticate
+   silently as the account that last opened it.
+5. **Google "Testing" publishing mode limits data access to listed test users.** The live test
+   needed a second Google account added as a test user before it could grant Sheets access.
+   `spreadsheets.readonly` is a sensitive scope, so **Google's OAuth app verification is needed
+   before public launch**. Until then, only listed test users can connect Sheets.
+
+Related, already tracked elsewhere: live-testing against the local backend writes to the shared
+production database, because there's no separate dev/test database (`backend/DEPLOYMENT.md`,
+"Known risk / backlog"). In the 3a test run, a sign-in as the second Google account created a
+real, separate account there.
 
 ---
 
