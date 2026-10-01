@@ -138,6 +138,25 @@ class AuthExchangeResponse(BaseModel):
     expires_at: datetime
 
 
+class GoogleDataTokenRequest(BaseModel):
+    # All optional at the schema level and checked by hand in the route, same as
+    # AuthExchangeRequest, so a missing field gets EXTENSION_INTEGRATION.md SS1a's named 422
+    # detail rather than FastAPI's generic validation array.
+    code: str | None = None
+    code_verifier: str | None = None
+    redirect_uri: str | None = None
+
+
+class GoogleDataTokenResponse(BaseModel):
+    # A short-lived Google access token for the extension's own Sheets API calls, plus the
+    # data account's email (its login_hint for later silent re-auth). Never stored or
+    # logged by this backend -- see the route's docstring.
+    access_token: str
+    expires_in: int
+    scope: str
+    email: str
+
+
 class LogoutResponse(BaseModel):
     revoked: bool
 

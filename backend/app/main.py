@@ -94,6 +94,8 @@ from .schemas import (
     ConfirmResponse,
     CsvParseRequest,
     CsvParseResponse,
+    GoogleDataTokenRequest,
+    GoogleDataTokenResponse,
     HealthResponse,
     LogoutResponse,
     MappingProposalEntry,
@@ -681,6 +683,59 @@ def auth_exchange(request: AuthExchangeRequest) -> AuthExchangeResponse:
 
     return AuthExchangeResponse(
         session_token=raw_token, account_id=str(account_id), expires_at=expires_at
+    )
+
+
+@app.post("/v1/google/data-token", response_model=GoogleDataTokenResponse)
+def google_data_token(
+    request: GoogleDataTokenRequest,
+    response: Response,
+    account: Account = Depends(get_current_account),
+) -> GoogleDataTokenResponse:
+    """
+    EXTENSION_INTEGRATION.md SS1a (Phase D session 3a): exchanges a Google data-grant code
+    for a short-lived access token the extension uses to call the Sheets API itself. Google's
+    "Web application" client is confidential, so this exchange needs GOOGLE_CLIENT_SECRET and
+    can't happen in the extension; this backend never reads spreadsheet data with the token.
+
+    The session requirement (get_current_account, the only source of a 401 here) is for
+    authentication and abuse control, so this confidential client isn't a free anonymous
+    code-exchange service. `account` is otherwise unused on purpose: the Google account the
+    code was granted for is NOT compared against the caller's linked identities, because the
+    data account may legitimately differ from the sign-in identity
+    (docs/chrome-extension-design.md SS2, "Data account vs sign-in identity"). The code is
+    PKCE-bound and came through Google's own consent, so a stolen session can only mint
+    tokens for Google accounts its holder already controls.
+
+    A failed exchange or userinfo call is a 400, deliberately not a 401: on an authenticated
+    route a 401 means "discard the session", which a failed data grant shouldn't trigger.
+    Nothing is stored and nothing is logged -- no DB session is opened, no logger call is
+    made -- and the response is marked Cache-Control: no-store.
+    """
+    if not (request.code and request.code_verifier and request.redirect_uri):
+        raise HTTPException(
+            status_code=422, detail="code, code_verifier, and redirect_uri are required."
+        )
+    try:
+        data_token = oauth_providers.exchange_google_data_code(
+            request.code, request.code_verifier, request.redirect_uri
+        )
+        # Reuses sign-in's userinfo call only to read the data account's email (its
+        # login_hint for later silent re-auth); its `subject` is ignored, per the docstring.
+        email = oauth_providers.verify_google_token(data_token.access_token).email
+    except oauth_providers.InvalidProviderTokenError as e:
+        raise HTTPException(
+            status_code=400, detail="Google authorization could not be exchanged."
+        ) from e
+    except oauth_providers.OAuthProviderConfigError as e:
+        raise HTTPException(status_code=500, detail="Google OAuth is not configured.") from e
+
+    response.headers["Cache-Control"] = "no-store"
+    return GoogleDataTokenResponse(
+        access_token=data_token.access_token,
+        expires_in=data_token.expires_in,
+        scope=data_token.scope,
+        email=email,
     )
 
 

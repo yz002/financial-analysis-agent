@@ -11,10 +11,12 @@ import pytest
 
 import app.oauth_providers as oauth_providers
 from app.oauth_providers import (
+    GoogleDataToken,
     InvalidProviderTokenError,
     OAuthProviderConfigError,
     ProviderEmailUnavailableError,
     exchange_google_code_for_token,
+    exchange_google_data_code,
     verify_google_token,
     verify_microsoft_token,
 )
@@ -114,6 +116,78 @@ def test_exchange_google_code_for_token_refuses_when_client_secret_missing(monke
 
     with pytest.raises(OAuthProviderConfigError):
         exchange_google_code_for_token("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+# --- exchange_google_data_code (Phase D session 3a -- the separate Google data grant behind
+# POST /v1/google/data-token) ------------------------------------------------------------------
+
+
+def test_exchange_google_data_code_returns_only_the_three_fields(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(200, {
+        "access_token": "data-access-token",
+        "expires_in": 3599,
+        "scope": "openid email https://www.googleapis.com/auth/spreadsheets.readonly",
+        "token_type": "Bearer",
+        "id_token": "header.payload.sig",
+        # Never requested (no access_type=offline), but must be dropped if it ever appears.
+        "refresh_token": "RT-must-not-survive",
+    }))
+
+    result = exchange_google_data_code("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+    assert result == GoogleDataToken(
+        access_token="data-access-token",
+        expires_in=3599,
+        scope="openid email https://www.googleapis.com/auth/spreadsheets.readonly",
+    )
+    assert "RT-must-not-survive" not in repr(result)
+
+
+def test_exchange_google_data_code_never_sends_access_type(monkeypatch):
+    _set_google_env(monkeypatch, client_id="cid-123", client_secret="csecret-456")
+    captured = {}
+
+    def _fake_post(url, data=None, timeout=None):
+        captured["data"] = data
+        return _FakeResponse(200, {"access_token": "tok", "expires_in": 3599, "scope": "openid"})
+
+    monkeypatch.setattr(oauth_providers.requests, "post", _fake_post)
+
+    exchange_google_data_code("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+    assert "access_type" not in captured["data"]
+    assert captured["data"] == {
+        "grant_type": "authorization_code",
+        "client_id": "cid-123",
+        "client_secret": "csecret-456",
+        "code": "code-1",
+        "code_verifier": "verifier-1",
+        "redirect_uri": "https://ext.chromiumapp.org/",
+    }
+
+
+def test_exchange_google_data_code_refuses_on_non_200(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(400, {"error": "invalid_grant"}))
+
+    with pytest.raises(InvalidProviderTokenError):
+        exchange_google_data_code("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+def test_exchange_google_data_code_refuses_when_access_token_missing(monkeypatch):
+    _set_google_env(monkeypatch)
+    _mock_post(monkeypatch, _FakeResponse(200, {"scope": "openid"}))
+
+    with pytest.raises(InvalidProviderTokenError):
+        exchange_google_data_code("code-1", "verifier-1", "https://ext.chromiumapp.org/")
+
+
+def test_exchange_google_data_code_refuses_when_not_configured(monkeypatch):
+    _set_google_env(monkeypatch, client_secret=None)
+
+    with pytest.raises(OAuthProviderConfigError):
+        exchange_google_data_code("code-1", "verifier-1", "https://ext.chromiumapp.org/")
 
 
 # --- verify_google_token -----------------------------------------------------------------

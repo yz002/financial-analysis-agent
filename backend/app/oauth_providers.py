@@ -70,24 +70,25 @@ class ProviderIdentity:
     email: str
 
 
-def exchange_google_code_for_token(code: str, code_verifier: str, redirect_uri: str) -> str:
-    """
-    Google's "Web application" client type -- the only one compatible with
-    launchWebAuthFlow's https redirect requirement (confirmed this session against
-    Chrome's own developer docs: the dedicated "Chrome Extension" client type has no
-    redirect-URI field and only works with chrome.identity.getAuthToken) -- is itself
-    documented by Google as a confidential client: "a web server application does need a
-    secret." PKCE does not substitute for client_secret at its token endpoint, unlike
-    Microsoft's Azure "Single-page application" platform type, which is a genuine
-    no-secret public client (confirmed via Google's current OAuth 2.0 docs, Phase D
-    session 2 -- see EXTENSION_INTEGRATION.md SS1). So, unlike Microsoft's exchange (done
-    client-side by the extension), this one happens here, where GOOGLE_CLIENT_SECRET can
-    stay confidential.
+@dataclass
+class GoogleDataToken:
+    """The only fields of a Google data-grant token response this backend ever reads.
+    Anything else in the response -- notably a refresh_token, should Google ever send one --
+    is never copied out of it."""
 
-    Raises OAuthProviderConfigError if GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET aren't set
-    (a server misconfiguration), InvalidProviderTokenError on a non-200 response or a
-    response missing access_token (an invalid/expired code, a code_verifier/redirect_uri
-    mismatch, etc. -- Google doesn't distinguish these to callers, so neither do we).
+    access_token: str
+    expires_in: int
+    scope: str
+
+
+def _post_google_token_request(code: str, code_verifier: str, redirect_uri: str) -> dict:
+    """
+    The one code-for-token POST both Google exchanges share (sign-in and the data grant).
+    Returns the parsed response body only once it's a 200 carrying an access_token.
+
+    The body deliberately has no `access_type` key, and must never gain one:
+    access_type=offline is what makes Google issue a refresh token, and nothing in this
+    design keeps one (docs/chrome-extension-design.md SS2 "Data-access tokens").
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -111,10 +112,50 @@ def exchange_google_code_for_token(code: str, code_verifier: str, redirect_uri: 
             f"Google token exchange failed with status {response.status_code}."
         )
 
-    access_token = response.json().get("access_token")
-    if not access_token:
+    body = response.json()
+    if not body.get("access_token"):
         raise InvalidProviderTokenError("Google token exchange response did not include an access token.")
-    return access_token
+    return body
+
+
+def exchange_google_code_for_token(code: str, code_verifier: str, redirect_uri: str) -> str:
+    """
+    Google's "Web application" client type -- the only one compatible with
+    launchWebAuthFlow's https redirect requirement (confirmed this session against
+    Chrome's own developer docs: the dedicated "Chrome Extension" client type has no
+    redirect-URI field and only works with chrome.identity.getAuthToken) -- is itself
+    documented by Google as a confidential client: "a web server application does need a
+    secret." PKCE does not substitute for client_secret at its token endpoint, unlike
+    Microsoft's Azure "Single-page application" platform type, which is a genuine
+    no-secret public client (confirmed via Google's current OAuth 2.0 docs, Phase D
+    session 2 -- see EXTENSION_INTEGRATION.md SS1). So, unlike Microsoft's exchange (done
+    client-side by the extension), this one happens here, where GOOGLE_CLIENT_SECRET can
+    stay confidential.
+
+    Raises OAuthProviderConfigError if GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET aren't set
+    (a server misconfiguration), InvalidProviderTokenError on a non-200 response or a
+    response missing access_token (an invalid/expired code, a code_verifier/redirect_uri
+    mismatch, etc. -- Google doesn't distinguish these to callers, so neither do we).
+    """
+    return _post_google_token_request(code, code_verifier, redirect_uri)["access_token"]
+
+
+def exchange_google_data_code(code: str, code_verifier: str, redirect_uri: str) -> GoogleDataToken:
+    """
+    Phase D session 3a: exchanges a Google *data-grant* code (openid email
+    spreadsheets.readonly, requested separately from sign-in -- docs/chrome-extension-design.md
+    SS2 "Data-access tokens") for a short-lived access token the extension uses itself. Same
+    confidential-client reason as exchange_google_code_for_token above for doing it here.
+
+    Only access_token/expires_in/scope are copied out of the response; a refresh_token, if
+    one were ever present, is never read. Same refusals as exchange_google_code_for_token.
+    """
+    body = _post_google_token_request(code, code_verifier, redirect_uri)
+    return GoogleDataToken(
+        access_token=body["access_token"],
+        expires_in=int(body.get("expires_in", 0)),
+        scope=body.get("scope", ""),
+    )
 
 
 def verify_google_token(oauth_token: str) -> ProviderIdentity:
