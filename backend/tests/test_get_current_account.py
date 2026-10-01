@@ -102,6 +102,20 @@ def test_missing_bearer_prefix_401s():
     assert resp.status_code == 401, resp.text
 
 
+def test_missing_authorization_header_401s_with_contract_detail():
+    # Not FastAPI's generic 422 for a missing required header -- EXTENSION_INTEGRATION.md SS3
+    # says a missing header 401s with the same body as every other credential failure.
+    resp = client.get("/v1/usage")
+    assert resp.status_code == 401, resp.text
+    assert resp.json() == {"detail": "Invalid or expired session token."}
+
+
+def test_missing_authorization_header_on_logout_401s():
+    resp = client.post("/v1/auth/logout")
+    assert resp.status_code == 401, resp.text
+    assert resp.json() == {"detail": "Invalid or expired session token."}
+
+
 def test_valid_token_expires_at_advances_on_use(auth_session):
     _, headers = auth_session()
     raw_token = headers["Authorization"].removeprefix("Bearer ")

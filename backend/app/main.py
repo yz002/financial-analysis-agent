@@ -121,7 +121,7 @@ def health(response: Response) -> HealthResponse:
 
 
 def get_current_account(
-    request: Request, authorization: str = Header(alias="Authorization")
+    request: Request, authorization: str | None = Header(default=None, alias="Authorization")
 ) -> Account:
     """
     Design doc SS2: parses "Bearer <token>" from Authorization, hashes it (SHA-256, matching
@@ -138,8 +138,13 @@ def get_current_account(
     validated against without re-deriving the token hash or re-querying sessions a second time.
     Only the plain UUID is stashed, never the ORM row itself -- session_row would be detached/
     expired the moment this function's own short-lived session closes below.
+
+    The header is optional at the FastAPI level on purpose: a required Header() makes a
+    request with no Authorization header at all fail FastAPI's own validation with a 422,
+    breaking EXTENSION_INTEGRATION.md SS3's rule that a missing header 401s identically to
+    every other credential failure.
     """
-    if not authorization.startswith("Bearer "):
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid or expired session token.")
     raw_token = authorization.removeprefix("Bearer ")
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
