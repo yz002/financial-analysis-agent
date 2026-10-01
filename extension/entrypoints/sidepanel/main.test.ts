@@ -416,9 +416,43 @@ describe('data grants only ever start from the Connect data click', () => {
     await clickConnect();
 
     expect(getDataTokenMock.mock.calls[0]![0]).toBe('microsoft');
-    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', EXCEL_URL);
+    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', { kind: 'microsoft', url: EXCEL_URL });
     expect(connectionText()).toBe('Connected: P&L.xlsx via me@outlook.example');
     expect(document.querySelector('#data-note')?.textContent).toContain('older write permission');
+  });
+
+  it('an excel.cloud.microsoft OneDrive tab is resolved by its drive and item ids', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(
+      'https://excel.cloud.microsoft/open/onedrive/?docId=951C971EBB28CD52%21s029c348d1f474d1a8fbb0ca639995392&driveId=951C971EBB28CD52',
+    );
+    getDataTokenMock.mockResolvedValue({ accessToken: 'ms-t', email: 'me@outlook.example', scope: 'User.Read Files.Read' });
+    fetchExcelFileNameMock.mockResolvedValue('P&L.xlsx');
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', {
+      kind: 'microsoft',
+      driveId: '951C971EBB28CD52',
+      itemId: '951C971EBB28CD52!s029c348d1f474d1a8fbb0ca639995392',
+    });
+    expect(connectionText()).toBe('Connected: P&L.xlsx via me@outlook.example');
+  });
+
+  it('an unsupported excel.cloud.microsoft URL shows a clear message and never requests a token', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl('https://excel.cloud.microsoft/open/sharepoint/?docId=X&driveId=Y');
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(getDataTokenMock).not.toHaveBeenCalled();
+    expect(fetchExcelFileNameMock).not.toHaveBeenCalled();
+    expect(statusText()).toBe(
+      "This Excel link type isn't supported yet. Open the file from onedrive.live.com or SharePoint, then click Connect data again.",
+    );
+    expect(isHidden('#signed-in-view')).toBe(false);
   });
 
   it('an unsupported tab never requests a token', async () => {

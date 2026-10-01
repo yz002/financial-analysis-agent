@@ -5,9 +5,25 @@
  * than replacing them (chrome-extension-design.md SS4).
  */
 
+/**
+ * How a Microsoft tab is resolved to its DriveItem:
+ * - `url`: Graph /shares on the tab URL (onedrive.live.com, SharePoint, officeapps).
+ * - `driveId` + `itemId`: read straight off an excel.cloud.microsoft/open/onedrive/ URL, whose
+ *   `docId` is the Graph item id. /shares rejects that URL shape ("Invalid shares key").
+ */
+export type MicrosoftTab =
+  | { kind: 'microsoft'; url: string }
+  | { kind: 'microsoft'; driveId: string; itemId: string };
+
 export type SpreadsheetTab =
   | { kind: 'google'; spreadsheetId: string }
-  | { kind: 'microsoft'; url: string };
+  | MicrosoftTab
+  // An excel.cloud.microsoft URL of a shape neither path above resolves. Never sent to /shares.
+  | { kind: 'unsupported-excel-url' };
+
+export const UNSUPPORTED_EXCEL_URL_MESSAGE =
+  "This Excel link type isn't supported yet. Open the file from onedrive.live.com or " +
+  'SharePoint, then click Connect data again.';
 
 /** A non-2xx response from Google's or Microsoft's API, with its status kept for handling. */
 export class ProviderApiError extends Error {
@@ -18,20 +34,47 @@ export class ProviderApiError extends Error {
 
 const GOOGLE_SHEET_URL = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]+)/;
 
-// The Microsoft page hosts from design SS1a (the same set background.ts enables the panel on).
-const MICROSOFT_PAGE_HOSTS: RegExp[] = [
+// The Microsoft page hosts that resolve through /shares, from design SS1a (background.ts
+// enables the panel on these plus *.cloud.microsoft, handled separately below).
+const SHARES_RESOLVABLE_HOSTS: RegExp[] = [
   /^https:\/\/onedrive\.live\.com\//,
   /^https:\/\/([a-z0-9-]+\.)+sharepoint\.com\//,
   /^https:\/\/([a-z0-9-]+\.)+officeapps\.live\.com\//,
-  /^https:\/\/([a-z0-9-]+\.)+cloud\.microsoft\//,
 ];
 
 export function classifyTab(url: string | undefined): SpreadsheetTab | null {
   if (!url) return null;
   const google = GOOGLE_SHEET_URL.exec(url);
   if (google) return { kind: 'google', spreadsheetId: google[1]! };
-  if (MICROSOFT_PAGE_HOSTS.some((pattern) => pattern.test(url))) return { kind: 'microsoft', url };
-  return null;
+  if (SHARES_RESOLVABLE_HOSTS.some((pattern) => pattern.test(url))) return { kind: 'microsoft', url };
+  return classifyCloudMicrosoftUrl(url);
+}
+
+/**
+ * excel.cloud.microsoft (the unified Microsoft 365 domain, design SS1a). The one verified
+ * shape is a personal file at /open/onedrive/?docId=<item id>&driveId=<drive id>: live
+ * testing showed docId (URL-decoded, e.g. "951C971EBB28CD52!s029c...") is the same 50-char
+ * item id /shares returned for that file when opened via onedrive.live.com. Every other
+ * cloud.microsoft shape (e.g. /open/sharepoint/, or missing params) is unverified, so it's
+ * reported as unsupported rather than guessed at.
+ */
+function classifyCloudMicrosoftUrl(url: string): SpreadsheetTab | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' || !/^([a-z0-9-]+\.)+cloud\.microsoft$/.test(parsed.hostname)) {
+    return null;
+  }
+  // URLSearchParams.get() already percent-decodes, so "%21" arrives as "!".
+  const itemId = parsed.searchParams.get('docId');
+  const driveId = parsed.searchParams.get('driveId');
+  if (parsed.pathname.replace(/\/+$/, '') === '/open/onedrive' && itemId && driveId) {
+    return { kind: 'microsoft', driveId, itemId };
+  }
+  return { kind: 'unsupported-excel-url' };
 }
 
 /**
@@ -57,20 +100,22 @@ export async function fetchSheetTitle(accessToken: string, spreadsheetId: string
 }
 
 /**
- * Resolves the open Excel tab's URL to its DriveItem via Graph /shares, with
- * redeemSharingLinkIfNecessary -- the "just peek" mode, deliberately not redeemSharingLink,
- * which would grant durable access as a side effect (design SS4).
+ * Fetches the open Excel file's name.
+ * - A tab URL goes through Graph /shares with redeemSharingLinkIfNecessary -- the "just peek"
+ *   mode, deliberately not redeemSharingLink, which would grant durable access as a side
+ *   effect (design SS4).
+ * - A known drive/item pair is read directly from /drives/{driveId}/items/{itemId}, each id
+ *   encoded as one path segment (the item id's "!" is left as-is by encodeURIComponent).
  */
-export async function fetchExcelFileName(accessToken: string, tabUrl: string): Promise<string> {
-  const response = await fetch(
-    `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tabUrl)}/driveItem?$select=name`,
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Prefer: 'redeemSharingLinkIfNecessary',
-      },
-    },
-  );
+export async function fetchExcelFileName(accessToken: string, tab: MicrosoftTab): Promise<string> {
+  const url =
+    'url' in tab
+      ? `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tab.url)}/driveItem?$select=name`
+      : `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(tab.driveId)}/items/${encodeURIComponent(tab.itemId)}?$select=name`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  if ('url' in tab) headers.Prefer = 'redeemSharingLinkIfNecessary';
+
+  const response = await fetch(url, { headers });
   if (!response.ok) throw new ProviderApiError(response.status);
   const json = (await response.json()) as { name?: string };
   return json.name ?? '(unnamed file)';

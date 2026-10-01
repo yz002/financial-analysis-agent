@@ -19,6 +19,7 @@ import {
   fetchExcelFileName,
   fetchSheetTitle,
   ProviderApiError,
+  UNSUPPORTED_EXCEL_URL_MESSAGE,
 } from '../../lib/connectData';
 
 // Every build mode loads from the same unpacked folder (see wxt.config.ts's
@@ -266,13 +267,18 @@ async function handleConnectData(click: MouseEvent): Promise<void> {
       setStatus('Open a Google Sheet or an Excel file first.', true);
       return;
     }
+    if (target.kind === 'unsupported-excel-url') {
+      // Checked before any token is requested: there's nothing this click could read.
+      setStatus(UNSUPPORTED_EXCEL_URL_MESSAGE, true);
+      return;
+    }
     provider = target.kind;
     const token = await getDataToken(provider, { sessionToken: session.sessionToken, click });
     dataEmail = token.email;
     const fileName =
       target.kind === 'google'
         ? await fetchSheetTitle(token.accessToken, target.spreadsheetId)
-        : await fetchExcelFileName(token.accessToken, target.url);
+        : await fetchExcelFileName(token.accessToken, target);
     clearStatus();
     setDataConnection(
       `Connected: ${fileName} via ${token.email}`,
