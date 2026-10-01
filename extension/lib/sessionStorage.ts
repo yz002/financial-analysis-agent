@@ -1,4 +1,5 @@
 import type { AuthProvider } from './authConfig';
+import { clearAllDataAccess } from './dataAccessStorage';
 
 export interface StoredSession {
   sessionToken: string;
@@ -21,8 +22,15 @@ export async function setStoredSession(session: StoredSession): Promise<void> {
   await browser.storage.local.set({ [SESSION_STORAGE_KEY]: session });
 }
 
+/**
+ * Also clears every provider data token and data-account email (lib/dataAccessStorage.ts).
+ * This is the single chokepoint, so sign-out, revoke-all, a 401, and any future path that
+ * ends the session can't leave data-access state behind
+ * (chrome-extension-design.md SS6 3a).
+ */
 export async function clearStoredSession(): Promise<void> {
   await browser.storage.local.remove(SESSION_STORAGE_KEY);
+  await clearAllDataAccess();
 }
 
 /**

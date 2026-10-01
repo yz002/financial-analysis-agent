@@ -21,14 +21,18 @@ export default defineConfig({
       'https://*.sharepoint.com/*',
       'https://*.officeapps.live.com/*',
       'https://*.cloud.microsoft/*',
-      // OAuth token-exchange endpoints this extension's own code fetch()es directly
-      // (session 2). accounts.google.com and Microsoft's /authorize endpoint don't
-      // need an entry -- those are only navigated to by launchWebAuthFlow, never
-      // fetch()ed from extension code.
-      'https://oauth2.googleapis.com/*',
+      // Microsoft's token endpoint, which this extension's own code fetch()es directly
+      // (a public SPA client). Google's token endpoint isn't listed: since session 2 the
+      // backend does every Google code exchange. accounts.google.com and Microsoft's
+      // /authorize endpoint don't need an entry -- those are only navigated to by
+      // launchWebAuthFlow, never fetch()ed from extension code.
       'https://login.microsoftonline.com/*',
-      // Not called yet this session -- pre-declared for a later session's Graph calls.
+      // Data APIs called with data tokens (session 3a): Graph (/me, /shares, item
+      // metadata), the Sheets API, and the personal-OneDrive download host that
+      // @microsoft.graph.downloadUrl pointed to in the session 3a spike (used from 3b).
       'https://graph.microsoft.com/*',
+      'https://sheets.googleapis.com/*',
+      'https://my.microsoftpersonalcontent.com/*',
       // This build's backend only -- Render for production, 127.0.0.1:8000 for
       // development -- from the same env var and validator as lib/authConfig.ts's
       // BACKEND_BASE_URL. Load-bearing: the backend sends no CORS headers, and this

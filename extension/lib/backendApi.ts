@@ -76,6 +76,32 @@ export async function exchangeToken(params: ExchangeTokenParams): Promise<Exchan
   return postJson<ExchangeTokenResponse>('/v1/auth/exchange', { body });
 }
 
+export interface GoogleDataTokenResponse {
+  access_token: string;
+  expires_in: number;
+  scope: string;
+  email: string;
+}
+
+/**
+ * POST /v1/google/data-token (EXTENSION_INTEGRATION.md SS1a): the backend exchanges a Google
+ * data-grant code with its client secret and returns the token. A 401 means the *session*
+ * failed (discard it); a 400 means only the data grant failed (keep the session).
+ */
+export async function exchangeGoogleDataToken(
+  sessionToken: string,
+  params: { code: string; codeVerifier: string; redirectUri: string },
+): Promise<GoogleDataTokenResponse> {
+  return postJson<GoogleDataTokenResponse>('/v1/google/data-token', {
+    sessionToken,
+    body: {
+      code: params.code,
+      code_verifier: params.codeVerifier,
+      redirect_uri: params.redirectUri,
+    },
+  });
+}
+
 /** No request body per the contract. Always resolves {revoked: true} on 2xx. */
 export async function logout(sessionToken: string): Promise<{ revoked: true }> {
   return postJson<{ revoked: true }>('/v1/auth/logout', { sessionToken });

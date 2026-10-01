@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BackendApiError } from '../../lib/backendApi';
+import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { AuthFlowError } from '../../lib/authFlow';
+import { ProviderApiError } from '../../lib/connectData';
+import { InteractiveAfterSilentFailedError, ScopeNotGrantedError } from '../../lib/dataToken';
 import type { StoredSession } from '../../lib/sessionStorage';
 
 /**
@@ -25,6 +28,9 @@ const SIDEPANEL_BODY = `
     </div>
     <div id="signed-in-view" hidden>
       <p id="account-info"></p>
+      <button id="connect-data" type="button">Connect data</button>
+      <p id="data-connection"></p>
+      <p id="data-note"></p>
       <button id="signout" type="button">Sign out</button>
       <button id="revoke-all" type="button">Sign out everywhere</button>
     </div>
@@ -40,7 +46,17 @@ const {
   exchangeTokenMock,
   logoutMock,
   revokeAllSessionsMock,
+  clearAllDataAccessMock,
+  forgetDataGrantMock,
+  getDataTokenMock,
+  fetchSheetTitleMock,
+  fetchExcelFileNameMock,
 } = vi.hoisted(() => ({
+  clearAllDataAccessMock: vi.fn(),
+  forgetDataGrantMock: vi.fn(),
+  getDataTokenMock: vi.fn(),
+  fetchSheetTitleMock: vi.fn(),
+  fetchExcelFileNameMock: vi.fn(),
   getStoredSessionMock: vi.fn(),
   setStoredSessionMock: vi.fn(),
   clearStoredSessionMock: vi.fn(),
@@ -78,10 +94,31 @@ vi.mock('../../lib/backendApi', async (importOriginal) => {
   };
 });
 
+vi.mock('../../lib/dataAccessStorage', () => ({
+  clearAllDataAccess: clearAllDataAccessMock,
+  forgetDataGrant: forgetDataGrantMock,
+}));
+
+// Keep the real error classes (main.ts does instanceof checks on them).
+vi.mock('../../lib/dataToken', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/dataToken')>();
+  return { ...actual, getDataToken: getDataTokenMock };
+});
+
+// classifyTab and ProviderApiError stay real; only the network calls are mocked.
+vi.mock('../../lib/connectData', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/connectData')>();
+  return {
+    ...actual,
+    fetchSheetTitle: fetchSheetTitleMock,
+    fetchExcelFileName: fetchExcelFileNameMock,
+  };
+});
+
+// A macrotask, not a fixed count of microtask ticks: every pending promise chain in a
+// handler settles before it runs, however many awaits that handler has.
 async function flushAsync(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 async function loadSidepanel(): Promise<void> {
@@ -115,6 +152,11 @@ beforeEach(() => {
   exchangeTokenMock.mockReset();
   logoutMock.mockReset().mockResolvedValue({ revoked: true });
   revokeAllSessionsMock.mockReset().mockResolvedValue({ revoked: true });
+  clearAllDataAccessMock.mockReset().mockResolvedValue(undefined);
+  forgetDataGrantMock.mockReset().mockResolvedValue(undefined);
+  getDataTokenMock.mockReset();
+  fetchSheetTitleMock.mockReset();
+  fetchExcelFileNameMock.mockReset();
 });
 
 afterEach(() => {
@@ -290,6 +332,212 @@ describe('bug 3: old session revoked only after a successful new sign-in', () =>
     expect(clearStoredSessionMock).not.toHaveBeenCalled();
     expect(isHidden('#signed-in-view')).toBe(false);
     expect(isHidden('#signed-out-view')).toBe(true);
+  });
+});
+
+const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1AbC/edit#gid=0';
+const EXCEL_URL =
+  'https://onedrive.live.com/personal/abc/_layouts/15/doc.aspx?sourcedoc={GUID}&action=edit';
+
+function setActiveTabUrl(url: string | undefined): void {
+  vi.spyOn(fakeBrowser.tabs, 'query').mockResolvedValue([{ url }] as never);
+}
+
+async function clickConnect(): Promise<void> {
+  document.querySelector<HTMLButtonElement>('#connect-data')!.click();
+  await flushAsync();
+}
+
+function connectionText(): string | null {
+  return document.querySelector('#data-connection')?.textContent ?? null;
+}
+
+describe('data grants only ever start from the Connect data click', () => {
+  it('panel load, storage-change re-renders, sign-out and every revoke-all branch never request a data token', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+    const onChanged = onStoredSessionChangedMock.mock.calls[0]![0] as (
+      s: StoredSession | null,
+    ) => void;
+    onChanged(existingSession);
+    onChanged(null);
+    await flushAsync();
+
+    for (const outcome of [
+      () => revokeAllSessionsMock.mockResolvedValue({ revoked: true }),
+      () => revokeAllSessionsMock.mockRejectedValue(new BackendApiError('x', 401, 'x')),
+      () => revokeAllSessionsMock.mockRejectedValue(new Error('network')),
+    ]) {
+      outcome();
+      document.querySelector<HTMLButtonElement>('#revoke-all')!.click();
+      await flushAsync();
+    }
+    document.querySelector<HTMLButtonElement>('#signout')!.click();
+    await flushAsync();
+
+    expect(getDataTokenMock).not.toHaveBeenCalled();
+    expect(launchAuthFlowMock).not.toHaveBeenCalled();
+  });
+
+  it('a Connect data click on a Sheets tab requests a Google token once, passing that click event', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(SHEET_URL);
+    getDataTokenMock.mockResolvedValue({
+      accessToken: 'ya29.t',
+      email: 'data@example.com',
+      scope: 'openid email',
+    });
+    fetchSheetTitleMock.mockResolvedValue('Q3 P&L');
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(getDataTokenMock).toHaveBeenCalledTimes(1);
+    const [provider, opts] = getDataTokenMock.mock.calls[0]!;
+    expect(provider).toBe('google');
+    expect(opts.sessionToken).toBe('old-token');
+    expect(opts.click).toBeInstanceOf(Event);
+    expect(opts.click.type).toBe('click');
+    expect(fetchSheetTitleMock).toHaveBeenCalledWith('ya29.t', '1AbC');
+    expect(connectionText()).toBe('Connected: Q3 P&L via data@example.com');
+  });
+
+  it('an Excel tab uses a Microsoft token, and flags a leftover Files.ReadWrite grant', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(EXCEL_URL);
+    getDataTokenMock.mockResolvedValue({
+      accessToken: 'ms-t',
+      email: 'me@outlook.example',
+      scope: 'User.Read Files.ReadWrite Files.Read',
+    });
+    fetchExcelFileNameMock.mockResolvedValue('P&L.xlsx');
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(getDataTokenMock.mock.calls[0]![0]).toBe('microsoft');
+    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', EXCEL_URL);
+    expect(connectionText()).toBe('Connected: P&L.xlsx via me@outlook.example');
+    expect(document.querySelector('#data-note')?.textContent).toContain('older write permission');
+  });
+
+  it('an unsupported tab never requests a token', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl('https://example.com/');
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(getDataTokenMock).not.toHaveBeenCalled();
+    expect(statusText()).toBe('Open a Google Sheet or an Excel file first.');
+  });
+});
+
+describe('Connect data error handling', () => {
+  beforeEach(() => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(SHEET_URL);
+  });
+
+  it('a backend 401 clears the session (and with it data access), shows signed-out, and never launches a flow', async () => {
+    getDataTokenMock.mockRejectedValue(
+      new BackendApiError('failed', 401, 'Invalid or expired session token.'),
+    );
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(isHidden('#signed-out-view')).toBe(false);
+    expect(statusText()).toBe('Your session ended — please sign in again.');
+    expect(getDataTokenMock).toHaveBeenCalledTimes(1);
+    expect(launchAuthFlowMock).not.toHaveBeenCalled();
+  });
+
+  it('a 400 keeps the session and asks to try again', async () => {
+    getDataTokenMock.mockRejectedValue(
+      new BackendApiError('failed', 400, 'Google authorization could not be exchanged.'),
+    );
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(clearStoredSessionMock).not.toHaveBeenCalled();
+    expect(isHidden('#signed-in-view')).toBe(false);
+    expect(statusText()).toBe("Google didn't complete the authorization — try again.");
+  });
+
+  it('a failed interactive window after a silent attempt says to click again, never silently', async () => {
+    getDataTokenMock.mockRejectedValue(
+      new InteractiveAfterSilentFailedError(
+        "Couldn't open the sign-in window — click Connect data again.",
+      ),
+    );
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(isHidden('#signed-in-view')).toBe(false);
+    expect(statusText()).toBe("Couldn't open the sign-in window — click Connect data again.");
+  });
+
+  it('a missing Sheets scope shows the named message', async () => {
+    getDataTokenMock.mockRejectedValue(
+      new ScopeNotGrantedError(
+        "Sheets access wasn't granted. Click Connect data and leave the Sheets box ticked.",
+      ),
+    );
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(statusText()).toContain("Sheets access wasn't granted");
+  });
+
+  it("a 403 from the Sheets API forgets that provider's grant, so the next click shows the chooser", async () => {
+    getDataTokenMock.mockResolvedValue({ accessToken: 't', email: 'data@example.com', scope: '' });
+    fetchSheetTitleMock.mockRejectedValue(new ProviderApiError(403));
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(forgetDataGrantMock).toHaveBeenCalledWith('google');
+    expect(clearStoredSessionMock).not.toHaveBeenCalled();
+    expect(statusText()).toBe(
+      "data@example.com can't open this file — click Connect data to choose another account.",
+    );
+  });
+
+  it('a 401 from the Sheets API forgets the grant and asks to click again, with no retry', async () => {
+    getDataTokenMock.mockResolvedValue({ accessToken: 't', email: 'data@example.com', scope: '' });
+    fetchSheetTitleMock.mockRejectedValue(new ProviderApiError(401));
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(forgetDataGrantMock).toHaveBeenCalledWith('google');
+    expect(getDataTokenMock).toHaveBeenCalledTimes(1);
+    expect(statusText()).toBe('Access expired — click Connect data again.');
+  });
+});
+
+describe('a successful sign-in starts with no data-access state', () => {
+  it('clears data tokens and data-account emails before storing the new session', async () => {
+    launchAuthFlowMock.mockResolvedValue({ provider: 'microsoft', oauthToken: 't' });
+    exchangeTokenMock.mockResolvedValue({
+      session_token: 'new-token',
+      account_id: 'account-new',
+      expires_at: '2026-02-01T00:00:00Z',
+    });
+    await loadSidepanel();
+
+    document.querySelector<HTMLButtonElement>('#signin-microsoft')!.click();
+    await flushAsync();
+
+    expect(clearAllDataAccessMock).toHaveBeenCalled();
+    expect(clearAllDataAccessMock.mock.invocationCallOrder[0]!).toBeLessThan(
+      setStoredSessionMock.mock.invocationCallOrder[0]!,
+    );
   });
 });
 

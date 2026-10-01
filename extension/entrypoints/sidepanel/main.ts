@@ -8,6 +8,18 @@ import {
   type StoredSession,
 } from '../../lib/sessionStorage';
 import { BACKEND_BASE_URL, type AuthProvider } from '../../lib/authConfig';
+import { clearAllDataAccess, forgetDataGrant } from '../../lib/dataAccessStorage';
+import {
+  getDataToken,
+  InteractiveAfterSilentFailedError,
+  ScopeNotGrantedError,
+} from '../../lib/dataToken';
+import {
+  classifyTab,
+  fetchExcelFileName,
+  fetchSheetTitle,
+  ProviderApiError,
+} from '../../lib/connectData';
 
 // Every build mode loads from the same unpacked folder (see wxt.config.ts's
 // outDirTemplate), so which backend a loaded build talks to isn't otherwise visible.
@@ -29,6 +41,9 @@ const signinGoogleButton = document.querySelector<HTMLButtonElement>('#signin-go
 const signinMicrosoftButton = document.querySelector<HTMLButtonElement>('#signin-microsoft');
 const signoutButton = document.querySelector<HTMLButtonElement>('#signout');
 const revokeAllButton = document.querySelector<HTMLButtonElement>('#revoke-all');
+const connectDataButton = document.querySelector<HTMLButtonElement>('#connect-data');
+const dataConnection = document.querySelector<HTMLElement>('#data-connection');
+const dataNote = document.querySelector<HTMLElement>('#data-note');
 
 const PROVIDER_LABEL: Record<AuthProvider, string> = {
   google: 'Google',
@@ -45,7 +60,13 @@ function clearStatus(): void {
   setStatus('');
 }
 
+function setDataConnection(text: string, note = ''): void {
+  if (dataConnection) dataConnection.textContent = text;
+  if (dataNote) dataNote.textContent = note;
+}
+
 function renderSignedOut(errorMessage?: string): void {
+  setDataConnection('');
   signedOutView?.removeAttribute('hidden');
   signedInView?.setAttribute('hidden', '');
   if (errorMessage) {
@@ -73,6 +94,7 @@ function setBusy(busy: boolean): void {
   if (signinMicrosoftButton) signinMicrosoftButton.disabled = busy;
   if (signoutButton) signoutButton.disabled = busy;
   if (revokeAllButton) revokeAllButton.disabled = busy;
+  if (connectDataButton) connectDataButton.disabled = busy;
 }
 
 function friendlyMessage(err: unknown): string {
@@ -113,6 +135,9 @@ async function handleSignIn(provider: AuthProvider): Promise<void> {
     // succeeded (launchAuthFlow/exchangeToken above throw first otherwise), so a
     // cancelled or failed sign-in never touches an existing session.
     const previousSession = await getStoredSession();
+    // A new sign-in may be a different person on the same browser profile: no data token or
+    // data-account email (a login_hint) may carry over from whoever was signed in before.
+    await clearAllDataAccess();
     await setStoredSession(session);
     renderSignedIn(session);
     if (previousSession && previousSession.sessionToken !== session.sessionToken) {
@@ -188,6 +213,105 @@ async function handleRevokeAll(): Promise<void> {
   }
 }
 
+/**
+ * A backend 401 on an authenticated call (EXTENSION_INTEGRATION.md SS3): discard the session
+ * -- which also clears every data token and data-account email -- and show the signed-out UI.
+ * Never starts a new sign-in or data grant; that only ever begins from a click.
+ */
+async function handleUnauthorized(): Promise<void> {
+  await clearStoredSession();
+  renderSignedOut('Your session ended — please sign in again.');
+}
+
+function isWritePermissionScope(scope: string): boolean {
+  return scope.split(' ').some((s) => s === 'Files.ReadWrite' || s.endsWith('/Files.ReadWrite'));
+}
+
+function connectErrorMessage(err: unknown): string {
+  if (
+    err instanceof ScopeNotGrantedError ||
+    err instanceof InteractiveAfterSilentFailedError ||
+    err instanceof AuthFlowError
+  ) {
+    return err.message;
+  }
+  if (err instanceof BackendApiError) {
+    if (err.status === 400) return "Google didn't complete the authorization — try again.";
+    if (err.status === 500) return 'Google access is currently unavailable.';
+  }
+  return 'Something went wrong — please try again.';
+}
+
+/**
+ * The minimal 3a "Connect data" read: a data token for whichever platform the active tab
+ * shows (Google Sheets or Excel Online), then just the file's name -- enough to prove the
+ * data-token path end to end. `click` is passed through to getDataToken, whose click guard
+ * is what keeps every launchWebAuthFlow inside a direct user click.
+ */
+async function handleConnectData(click: MouseEvent): Promise<void> {
+  const session = await getStoredSession();
+  if (!session) {
+    renderSignedOut();
+    return;
+  }
+  setBusy(true);
+  setStatus('Connecting…');
+  setDataConnection('');
+  let provider: AuthProvider | null = null;
+  let dataEmail = '';
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    const target = classifyTab(tab?.url);
+    if (!target) {
+      setStatus('Open a Google Sheet or an Excel file first.', true);
+      return;
+    }
+    provider = target.kind;
+    const token = await getDataToken(provider, { sessionToken: session.sessionToken, click });
+    dataEmail = token.email;
+    const fileName =
+      target.kind === 'google'
+        ? await fetchSheetTitle(token.accessToken, target.spreadsheetId)
+        : await fetchExcelFileName(token.accessToken, target.url);
+    clearStatus();
+    setDataConnection(
+      `Connected: ${fileName} via ${token.email}`,
+      provider === 'microsoft' && isWritePermissionScope(token.scope)
+        ? 'Your Microsoft account still grants this app an older write permission it no longer ' +
+            'uses — you can remove it at account.live.com/consent/Manage.'
+        : '',
+    );
+  } catch (err) {
+    if (err instanceof BackendApiError && err.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+    console.error('[sidepanel] connect data failed', err);
+    if (err instanceof ProviderApiError && provider) {
+      // The data token itself didn't work for this file: forget it and its account, so the
+      // next click goes through the account chooser. Never retried automatically.
+      await forgetDataGrant(provider);
+      if (err.status === 401) {
+        setStatus('Access expired — click Connect data again.', true);
+      } else if (err.status === 403 || err.status === 404) {
+        setStatus(
+          `${dataEmail} can't open this file — click Connect data to choose another account.`,
+          true,
+        );
+      } else {
+        setStatus('Could not read this file — please try again.', true);
+      }
+    } else {
+      setStatus(connectErrorMessage(err), true);
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+connectDataButton?.addEventListener('click', (event) => {
+  void handleConnectData(event);
+});
 signinGoogleButton?.addEventListener('click', () => {
   void handleSignIn('google');
 });

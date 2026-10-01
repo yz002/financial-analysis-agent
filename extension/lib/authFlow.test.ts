@@ -5,11 +5,12 @@ import {
   exchangeCodeForToken,
   parseAuthorizationCode,
 } from './authFlow';
+import { DATA_GRANT_CONFIG } from './authConfig';
 
 const REDIRECT_URI = 'https://abc123.chromiumapp.org/';
 
 describe('buildAuthorizationUrl', () => {
-  it('builds a Google authorization URL with the expected params', () => {
+  it('builds a Google sign-in URL with identity-only scopes', () => {
     const url = new URL(
       buildAuthorizationUrl('google', { codeChallenge: 'challenge123', redirectUri: REDIRECT_URI }),
     );
@@ -18,13 +19,11 @@ describe('buildAuthorizationUrl', () => {
     expect(url.searchParams.get('redirect_uri')).toBe(REDIRECT_URI);
     expect(url.searchParams.get('code_challenge')).toBe('challenge123');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
-    expect(url.searchParams.get('scope')).toBe(
-      'openid email https://www.googleapis.com/auth/spreadsheets.readonly',
-    );
+    expect(url.searchParams.get('scope')).toBe('openid email');
     expect(url.searchParams.has('response_mode')).toBe(false);
   });
 
-  it('builds a Microsoft authorization URL that pins response_mode=query', () => {
+  it('builds a Microsoft sign-in URL with User.Read only, pinning response_mode=query', () => {
     const url = new URL(
       buildAuthorizationUrl('microsoft', { codeChallenge: 'challenge123', redirectUri: REDIRECT_URI }),
     );
@@ -32,7 +31,41 @@ describe('buildAuthorizationUrl', () => {
       'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
     );
     expect(url.searchParams.get('response_mode')).toBe('query');
-    expect(url.searchParams.get('scope')).toBe('User.Read Files.ReadWrite');
+    expect(url.searchParams.get('scope')).toBe('User.Read');
+  });
+
+  it('builds a Google data-grant URL: Sheets scope, include_granted_scopes, never access_type', () => {
+    const { scopes, extraParams } = DATA_GRANT_CONFIG.google;
+    const url = new URL(
+      buildAuthorizationUrl('google', {
+        codeChallenge: 'challenge123',
+        redirectUri: REDIRECT_URI,
+        scopes,
+        extraParams: { ...extraParams, prompt: 'none', login_hint: 'data@example.com' },
+      }),
+    );
+    expect(url.searchParams.get('scope')).toBe(
+      'openid email https://www.googleapis.com/auth/spreadsheets.readonly',
+    );
+    expect(url.searchParams.get('include_granted_scopes')).toBe('true');
+    expect(url.searchParams.get('prompt')).toBe('none');
+    expect(url.searchParams.get('login_hint')).toBe('data@example.com');
+    expect(url.searchParams.has('access_type')).toBe(false);
+  });
+
+  it('builds a Microsoft data-grant URL with Files.Read, not Files.ReadWrite', () => {
+    const { scopes, extraParams } = DATA_GRANT_CONFIG.microsoft;
+    const url = new URL(
+      buildAuthorizationUrl('microsoft', {
+        codeChallenge: 'challenge123',
+        redirectUri: REDIRECT_URI,
+        scopes,
+        extraParams: { ...extraParams, prompt: 'select_account' },
+      }),
+    );
+    expect(url.searchParams.get('scope')).toBe('User.Read Files.Read');
+    expect(url.searchParams.get('prompt')).toBe('select_account');
+    expect(url.searchParams.get('response_mode')).toBe('query');
   });
 });
 
@@ -41,14 +74,26 @@ describe('parseAuthorizationCode', () => {
     expect(parseAuthorizationCode(`${REDIRECT_URI}?code=abc123`)).toBe('abc123');
   });
 
-  it('throws AuthFlowError when the provider reports an error', () => {
-    expect(() => parseAuthorizationCode(`${REDIRECT_URI}?error=access_denied`)).toThrow(
-      AuthFlowError,
-    );
+  it('throws AuthFlowError carrying the raw provider error when the provider reports one', () => {
+    let caught: unknown;
+    try {
+      parseAuthorizationCode(`${REDIRECT_URI}?error=interaction_required`);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AuthFlowError);
+    expect((caught as AuthFlowError).providerError).toBe('interaction_required');
   });
 
-  it('throws AuthFlowError when neither code nor error is present', () => {
-    expect(() => parseAuthorizationCode(REDIRECT_URI)).toThrow(AuthFlowError);
+  it('throws AuthFlowError with no providerError when neither code nor error is present', () => {
+    let caught: unknown;
+    try {
+      parseAuthorizationCode(REDIRECT_URI);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AuthFlowError);
+    expect((caught as AuthFlowError).providerError).toBeUndefined();
   });
 });
 
@@ -57,20 +102,20 @@ describe('exchangeCodeForToken (Microsoft only -- Google exchanges server-side, 
     vi.unstubAllGlobals();
   });
 
-  it('posts the expected fields and returns the access token on success', async () => {
+  it('posts the expected fields and returns the token, expiry, and scope', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ access_token: 'token123' }),
+      json: async () => ({ access_token: 'token123', expires_in: 3600, scope: 'User.Read' }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const token = await exchangeCodeForToken('microsoft', {
+    const result = await exchangeCodeForToken('microsoft', {
       code: 'code123',
       codeVerifier: 'verifier123',
       redirectUri: REDIRECT_URI,
     });
 
-    expect(token).toBe('token123');
+    expect(result).toEqual({ accessToken: 'token123', expiresIn: 3600, scope: 'User.Read' });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://login.microsoftonline.com/common/oauth2/v2.0/token');
     expect(init.method).toBe('POST');
@@ -80,6 +125,30 @@ describe('exchangeCodeForToken (Microsoft only -- Google exchanges server-side, 
     expect(body.get('code')).toBe('code123');
     expect(body.get('code_verifier')).toBe('verifier123');
     expect(body.get('redirect_uri')).toBe(REDIRECT_URI);
+  });
+
+  it("never returns Microsoft's unrequested refresh_token", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: 'token123',
+          expires_in: 3600,
+          scope: 'User.Read Files.Read',
+          refresh_token: 'RT-secret',
+        }),
+      }),
+    );
+
+    const result = await exchangeCodeForToken('microsoft', {
+      code: 'code123',
+      codeVerifier: 'verifier123',
+      redirectUri: REDIRECT_URI,
+    });
+
+    expect(result).not.toHaveProperty('refresh_token');
+    expect(JSON.stringify(result)).not.toContain('RT-secret');
   });
 
   it('throws AuthFlowError on a non-2xx response', async () => {

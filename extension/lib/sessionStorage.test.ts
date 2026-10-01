@@ -7,6 +7,7 @@ import {
   setStoredSession,
 } from './sessionStorage';
 import type { StoredSession } from './sessionStorage';
+import { setDataGrant } from './dataAccessStorage';
 
 function createFakeLocalStorage() {
   let store: Record<string, unknown> = {};
@@ -109,5 +110,32 @@ describe('onStoredSessionChanged', () => {
     await fakeBrowser.storage.sync.set({ fa_session: fakeSession });
 
     expect(callback).not.toHaveBeenCalled();
+  });
+});
+
+describe('clearStoredSession clears data access too (the single chokepoint)', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+    vi.stubGlobal('browser', fakeBrowser);
+  });
+
+  it('removes fa_data_tokens from storage.session and fa_data_accounts from storage.local', async () => {
+    await setStoredSession({
+      sessionToken: 'session-token-123',
+      accountId: 'account-123',
+      expiresAt: '2026-01-01T00:00:00Z',
+      provider: 'google',
+    });
+    await setDataGrant(
+      'google',
+      { accessToken: 'data-token', expiresAt: Date.now() + 3_600_000, scope: 'openid' },
+      'data@example.com',
+    );
+
+    await clearStoredSession();
+
+    expect(await getStoredSession()).toBeNull();
+    expect(await fakeBrowser.storage.session.get(null)).toEqual({});
+    expect(await fakeBrowser.storage.local.get(null)).toEqual({});
   });
 });

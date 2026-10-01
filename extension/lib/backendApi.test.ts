@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BackendApiError, exchangeToken, logout, revokeAllSessions } from './backendApi';
+import {
+  BackendApiError,
+  exchangeGoogleDataToken,
+  exchangeToken,
+  logout,
+  revokeAllSessions,
+} from './backendApi';
 import { BACKEND_BASE_URL } from './authConfig';
 
 describe('backendApi', () => {
@@ -136,5 +142,49 @@ describe('backendApi', () => {
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe(`${BACKEND_BASE_URL}/v1/auth/sessions/revoke-all`);
     expect(init.body).toBeUndefined();
+  });
+});
+
+describe('exchangeGoogleDataToken', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('posts code/code_verifier/redirect_uri with the session bearer token', async () => {
+    const grant = { access_token: 'ya29.x', expires_in: 3599, scope: 'openid', email: 'd@example.com' };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => grant });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await exchangeGoogleDataToken('session-123', {
+      code: 'code-1',
+      codeVerifier: 'verifier-1',
+      redirectUri: 'https://abc123.chromiumapp.org/',
+    });
+
+    expect(result).toEqual(grant);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/google/data-token`);
+    expect(init.method).toBe('POST');
+    expect(init.headers['Authorization']).toBe('Bearer session-123');
+    expect(JSON.parse(init.body as string)).toEqual({
+      code: 'code-1',
+      code_verifier: 'verifier-1',
+      redirect_uri: 'https://abc123.chromiumapp.org/',
+    });
+  });
+
+  it('throws BackendApiError carrying the status, so a 400 and a 401 can be told apart', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ detail: 'Google authorization could not be exchanged.' }),
+      }),
+    );
+
+    await expect(
+      exchangeGoogleDataToken('session-123', { code: 'c', codeVerifier: 'v', redirectUri: 'r' }),
+    ).rejects.toMatchObject({ status: 400, detail: 'Google authorization could not be exchanged.' });
   });
 });
