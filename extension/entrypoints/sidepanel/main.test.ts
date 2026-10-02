@@ -6,6 +6,15 @@ import { AuthFlowError } from '../../lib/authFlow';
 import { ProviderApiError } from '../../lib/connectData';
 import { InteractiveAfterSilentFailedError, ScopeNotGrantedError } from '../../lib/dataToken';
 import type { StoredSession } from '../../lib/sessionStorage';
+import {
+  normalizeGrid,
+  numberCell,
+  textCell,
+  type Cell,
+  type NormalizedGrid,
+} from '../../lib/cellGrid';
+import { ExcelFileError } from '../../lib/excelReader';
+import type { ConnectedFile } from '../../lib/spreadsheetSource';
 
 /**
  * These tests check the `hidden` attribute main.ts's rendering logic toggles, and which
@@ -31,6 +40,20 @@ const SIDEPANEL_BODY = `
       <button id="connect-data" type="button">Connect data</button>
       <p id="data-connection"></p>
       <p id="data-note"></p>
+      <section id="read-panel" hidden>
+        <p id="file-as-of"></p>
+        <select id="sheet-select"></select>
+        <input id="range-input" type="text" />
+        <button id="read-range" type="button">Preview</button>
+        <ul id="read-notices"></ul>
+        <p id="preview-caption"></p>
+        <table id="preview-table"></table>
+        <button id="send-data" type="button" hidden>Send to analysis</button>
+        <div id="parse-summary" hidden>
+          <p id="parse-summary-text"></p>
+          <table id="parse-sample-table"></table>
+        </div>
+      </section>
       <button id="signout" type="button">Sign out</button>
       <button id="revoke-all" type="button">Sign out everywhere</button>
     </div>
@@ -49,14 +72,16 @@ const {
   clearAllDataAccessMock,
   forgetDataGrantMock,
   getDataTokenMock,
-  fetchSheetTitleMock,
-  fetchExcelFileNameMock,
+  connectGoogleSheetMock,
+  connectExcelFileMock,
+  parseCsvMock,
 } = vi.hoisted(() => ({
   clearAllDataAccessMock: vi.fn(),
   forgetDataGrantMock: vi.fn(),
   getDataTokenMock: vi.fn(),
-  fetchSheetTitleMock: vi.fn(),
-  fetchExcelFileNameMock: vi.fn(),
+  connectGoogleSheetMock: vi.fn(),
+  connectExcelFileMock: vi.fn(),
+  parseCsvMock: vi.fn(),
   getStoredSessionMock: vi.fn(),
   setStoredSessionMock: vi.fn(),
   clearStoredSessionMock: vi.fn(),
@@ -91,6 +116,7 @@ vi.mock('../../lib/backendApi', async (importOriginal) => {
     exchangeToken: exchangeTokenMock,
     logout: logoutMock,
     revokeAllSessions: revokeAllSessionsMock,
+    parseCsv: parseCsvMock,
   };
 });
 
@@ -105,15 +131,22 @@ vi.mock('../../lib/dataToken', async (importOriginal) => {
   return { ...actual, getDataToken: getDataTokenMock };
 });
 
-// classifyTab and ProviderApiError stay real; only the network calls are mocked.
-vi.mock('../../lib/connectData', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../lib/connectData')>();
-  return {
-    ...actual,
-    fetchSheetTitle: fetchSheetTitleMock,
-    fetchExcelFileName: fetchExcelFileNameMock,
-  };
-});
+// classifyTab, ProviderApiError and the readers stay real; only connecting to a file (the
+// network calls behind it) is mocked. Each test hands back a fake ConnectedFile.
+vi.mock('../../lib/spreadsheetSource', () => ({
+  connectGoogleSheet: connectGoogleSheetMock,
+  connectExcelFile: connectExcelFileMock,
+}));
+
+// Pass-through mocks, so the error classes keep one identity: loadSidepanel's
+// vi.resetModules() re-imports unmocked modules for main.ts, which would make main.ts's
+// `instanceof ProviderApiError`/`ExcelFileError` miss the classes this file throws.
+vi.mock('../../lib/connectData', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/connectData')>()),
+}));
+vi.mock('../../lib/excelReader', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/excelReader')>()),
+}));
 
 // A macrotask, not a fixed count of microtask ticks: every pending promise chain in a
 // handler settles before it runs, however many awaits that handler has.
@@ -155,8 +188,9 @@ beforeEach(() => {
   clearAllDataAccessMock.mockReset().mockResolvedValue(undefined);
   forgetDataGrantMock.mockReset().mockResolvedValue(undefined);
   getDataTokenMock.mockReset();
-  fetchSheetTitleMock.mockReset();
-  fetchExcelFileNameMock.mockReset();
+  connectGoogleSheetMock.mockReset();
+  connectExcelFileMock.mockReset();
+  parseCsvMock.mockReset();
 });
 
 afterEach(() => {
@@ -352,6 +386,41 @@ function connectionText(): string | null {
   return document.querySelector('#data-connection')?.textContent ?? null;
 }
 
+// A P&L like the FA Spike Test sheet's, already in sent form: header in row 3, ISO dates,
+// underlying numbers. Built with the real cellGrid so notices and pre-checks are real too.
+function pnlGrid(cells?: Cell[][]): NormalizedGrid {
+  const rows = cells ?? [
+    [textCell('Period'), textCell('Revenue'), textCell('Margin')],
+    [
+      { kind: 'date', value: '2025-03-31', display: '3/31/2025' },
+      numberCell(1250000, '$1,250,000'),
+      numberCell(0.6145038167938931, '61.5%'),
+    ],
+  ];
+  return normalizeGrid('P&L', { originRow: 3, originCol: 0, cells: rows, hiddenRows: [], merges: [] })!;
+}
+
+function fakeFile(overrides: Partial<ConnectedFile> = {}): ConnectedFile {
+  return {
+    provider: 'google',
+    platform: 'google_sheets',
+    name: 'Q3 P&L',
+    modifiedAt: null,
+    sheets: ['P&L', 'Notes'],
+    defaultSheet: 'P&L',
+    defaultRange: 'A3:C4',
+    read: vi.fn(async () => pnlGrid()),
+    ...overrides,
+  };
+}
+
+const el = <T extends HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
+
+async function click(selector: string): Promise<void> {
+  el<HTMLButtonElement>(selector).click();
+  await flushAsync();
+}
+
 describe('data grants only ever start from the Connect data click', () => {
   it('panel load, storage-change re-renders, sign-out and every revoke-all branch never request a data token', async () => {
     getStoredSessionMock.mockResolvedValue(existingSession);
@@ -387,7 +456,7 @@ describe('data grants only ever start from the Connect data click', () => {
       email: 'data@example.com',
       scope: 'openid email',
     });
-    fetchSheetTitleMock.mockResolvedValue('Q3 P&L');
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
     await loadSidepanel();
 
     await clickConnect();
@@ -398,7 +467,7 @@ describe('data grants only ever start from the Connect data click', () => {
     expect(opts.sessionToken).toBe('old-token');
     expect(opts.click).toBeInstanceOf(Event);
     expect(opts.click.type).toBe('click');
-    expect(fetchSheetTitleMock).toHaveBeenCalledWith('ya29.t', '1AbC');
+    expect(connectGoogleSheetMock).toHaveBeenCalledWith('ya29.t', '1AbC', SHEET_URL);
     expect(connectionText()).toBe('Connected: Q3 P&L via data@example.com');
   });
 
@@ -410,13 +479,13 @@ describe('data grants only ever start from the Connect data click', () => {
       email: 'me@outlook.example',
       scope: 'User.Read Files.ReadWrite Files.Read',
     });
-    fetchExcelFileNameMock.mockResolvedValue('P&L.xlsx');
+    connectExcelFileMock.mockResolvedValue(fakeFile({ provider: 'microsoft', platform: 'excel', name: 'P&L.xlsx' }));
     await loadSidepanel();
 
     await clickConnect();
 
     expect(getDataTokenMock.mock.calls[0]![0]).toBe('microsoft');
-    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', { kind: 'microsoft', url: EXCEL_URL });
+    expect(connectExcelFileMock).toHaveBeenCalledWith('ms-t', { kind: 'microsoft', url: EXCEL_URL });
     expect(connectionText()).toBe('Connected: P&L.xlsx via me@outlook.example');
     expect(document.querySelector('#data-note')?.textContent).toContain('older write permission');
   });
@@ -427,12 +496,12 @@ describe('data grants only ever start from the Connect data click', () => {
       'https://excel.cloud.microsoft/open/onedrive/?docId=951C971EBB28CD52%21s029c348d1f474d1a8fbb0ca639995392&driveId=951C971EBB28CD52',
     );
     getDataTokenMock.mockResolvedValue({ accessToken: 'ms-t', email: 'me@outlook.example', scope: 'User.Read Files.Read' });
-    fetchExcelFileNameMock.mockResolvedValue('P&L.xlsx');
+    connectExcelFileMock.mockResolvedValue(fakeFile({ provider: 'microsoft', platform: 'excel', name: 'P&L.xlsx' }));
     await loadSidepanel();
 
     await clickConnect();
 
-    expect(fetchExcelFileNameMock).toHaveBeenCalledWith('ms-t', {
+    expect(connectExcelFileMock).toHaveBeenCalledWith('ms-t', {
       kind: 'microsoft',
       driveId: '951C971EBB28CD52',
       itemId: '951C971EBB28CD52!s029c348d1f474d1a8fbb0ca639995392',
@@ -448,7 +517,7 @@ describe('data grants only ever start from the Connect data click', () => {
     await clickConnect();
 
     expect(getDataTokenMock).not.toHaveBeenCalled();
-    expect(fetchExcelFileNameMock).not.toHaveBeenCalled();
+    expect(connectExcelFileMock).not.toHaveBeenCalled();
     expect(statusText()).toBe(
       "This Excel link type isn't supported yet. Open the file from onedrive.live.com or SharePoint, then click Connect data again.",
     );
@@ -530,7 +599,7 @@ describe('Connect data error handling', () => {
 
   it("a 403 from the Sheets API forgets that provider's grant, so the next click shows the chooser", async () => {
     getDataTokenMock.mockResolvedValue({ accessToken: 't', email: 'data@example.com', scope: '' });
-    fetchSheetTitleMock.mockRejectedValue(new ProviderApiError(403));
+    connectGoogleSheetMock.mockRejectedValue(new ProviderApiError(403));
     await loadSidepanel();
 
     await clickConnect();
@@ -544,7 +613,7 @@ describe('Connect data error handling', () => {
 
   it('a 401 from the Sheets API forgets the grant and asks to click again, with no retry', async () => {
     getDataTokenMock.mockResolvedValue({ accessToken: 't', email: 'data@example.com', scope: '' });
-    fetchSheetTitleMock.mockRejectedValue(new ProviderApiError(401));
+    connectGoogleSheetMock.mockRejectedValue(new ProviderApiError(401));
     await loadSidepanel();
 
     await clickConnect();
@@ -552,6 +621,218 @@ describe('Connect data error handling', () => {
     expect(forgetDataGrantMock).toHaveBeenCalledWith('google');
     expect(getDataTokenMock).toHaveBeenCalledTimes(1);
     expect(statusText()).toBe('Access expired — click Connect data again.');
+  });
+});
+
+describe('read panel: sheet, range, preview and send (session 3b)', () => {
+  const googleToken = { accessToken: 'ya29.t', email: 'data@example.com', scope: '' };
+
+  beforeEach(() => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(SHEET_URL);
+    getDataTokenMock.mockResolvedValue(googleToken);
+  });
+
+  it('Connect data fills the sheet selector and pre-fills the range= link for its sheet', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+    expect(isHidden('#read-panel')).toBe(true);
+
+    await clickConnect();
+
+    expect(isHidden('#read-panel')).toBe(false);
+    expect([...el<HTMLSelectElement>('#sheet-select').options].map((o) => o.value)).toEqual(['P&L', 'Notes']);
+    expect(el<HTMLSelectElement>('#sheet-select').value).toBe('P&L');
+    expect(el<HTMLInputElement>('#range-input').value).toBe('A3:C4');
+    expect(el('#file-as-of').textContent).toBe('');
+
+    // The link's range belongs to its own sheet only.
+    el<HTMLSelectElement>('#sheet-select').value = 'Notes';
+    el('#sheet-select').dispatchEvent(new Event('change'));
+    expect(el<HTMLInputElement>('#range-input').value).toBe('');
+    el<HTMLSelectElement>('#sheet-select').value = 'P&L';
+    el('#sheet-select').dispatchEvent(new Event('change'));
+    expect(el<HTMLInputElement>('#range-input').value).toBe('A3:C4');
+  });
+
+  it('an Excel file shows "data as of last save"', async () => {
+    setActiveTabUrl(EXCEL_URL);
+    getDataTokenMock.mockResolvedValue({ accessToken: 'ms-t', email: 'me@outlook.example', scope: '' });
+    connectExcelFileMock.mockResolvedValue(
+      fakeFile({ provider: 'microsoft', platform: 'excel', modifiedAt: '2026-09-30T12:17:57Z', defaultRange: null }),
+    );
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(el('#file-as-of').textContent).toContain('Data as of last save:');
+    expect(el('#file-as-of').textContent).toContain('may not appear yet');
+  });
+
+  it('an Excel file refused before download shows why', async () => {
+    setActiveTabUrl(EXCEL_URL);
+    getDataTokenMock.mockResolvedValue({ accessToken: 'ms-t', email: 'me@outlook.example', scope: '' });
+    connectExcelFileMock.mockRejectedValue(new ExcelFileError('"big.xlsx" is 12.0 MB; files over 10 MB can\'t be read.'));
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(statusText()).toContain('files over 10 MB');
+    expect(isHidden('#read-panel')).toBe(true);
+    expect(forgetDataGrantMock).not.toHaveBeenCalled();
+  });
+
+  it('Preview reads the chosen sheet and range with a token from that click, and shows what will be sent', async () => {
+    const file = fakeFile();
+    connectGoogleSheetMock.mockResolvedValue(file);
+    await loadSidepanel();
+    await clickConnect();
+
+    await click('#read-range');
+
+    expect(getDataTokenMock).toHaveBeenCalledTimes(2);
+    expect(getDataTokenMock.mock.calls[1]![1].click.type).toBe('click');
+    expect(file.read).toHaveBeenCalledWith('P&L', { startRow: 3, startCol: 0, endRow: 4, endCol: 2 }, 'ya29.t');
+    const cells = [...el('#preview-table').querySelectorAll('td')];
+    expect(cells.map((c) => c.textContent)).toEqual(['2025-03-31', '1250000', '0.6145038167938931']);
+    expect(cells[1]!.title).toBe('B4 shows "$1,250,000"');
+    expect(el('#preview-caption').textContent).toBe("'P&L'!A3:C4 · 1 data row × 3 columns");
+    expect(isHidden('#send-data')).toBe(false);
+  });
+
+  it('an Excel preview re-parses the downloaded copy without asking for a token', async () => {
+    setActiveTabUrl(EXCEL_URL);
+    getDataTokenMock.mockResolvedValue({ accessToken: 'ms-t', email: 'me@outlook.example', scope: '' });
+    const file = fakeFile({ provider: 'microsoft', platform: 'excel', defaultRange: null });
+    connectExcelFileMock.mockResolvedValue(file);
+    await loadSidepanel();
+    await clickConnect();
+
+    await click('#read-range');
+
+    expect(getDataTokenMock).toHaveBeenCalledTimes(1); // the Connect data click only
+    expect(file.read).toHaveBeenCalledWith('P&L', null, null);
+  });
+
+  it('an unreadable range is caught before any read', async () => {
+    const file = fakeFile();
+    connectGoogleSheetMock.mockResolvedValue(file);
+    await loadSidepanel();
+    await clickConnect();
+    el<HTMLInputElement>('#range-input').value = 'P&L!A3';
+
+    await click('#read-range');
+
+    expect(file.read).not.toHaveBeenCalled();
+    expect(statusText()).toBe('Enter a range like A3:G7, or leave it empty for the whole sheet.');
+  });
+
+  it('a title row picked up as the header points at the range field and offers no Send', async () => {
+    const titleGrid = pnlGrid([
+      [textCell('Acme Co — Quarterly P&L'), { kind: 'empty', value: '', display: '' }, { kind: 'empty', value: '', display: '' }],
+      [textCell('Period'), textCell('Revenue'), textCell('Margin')],
+    ]);
+    connectGoogleSheetMock.mockResolvedValue(fakeFile({ read: vi.fn(async () => titleGrid) }));
+    await loadSidepanel();
+    await clickConnect();
+
+    await click('#read-range');
+
+    expect(statusText()).toMatch(/^Row 3 looks like a title/);
+    expect(isHidden('#send-data')).toBe(true);
+  });
+
+  it('a 403 during Preview forgets the grant and closes the read panel', async () => {
+    connectGoogleSheetMock.mockResolvedValue(
+      fakeFile({ read: vi.fn(async () => Promise.reject(new ProviderApiError(403))) }),
+    );
+    await loadSidepanel();
+    await clickConnect();
+
+    await click('#read-range');
+
+    expect(forgetDataGrantMock).toHaveBeenCalledWith('google');
+    expect(isHidden('#read-panel')).toBe(true);
+    expect(statusText()).toContain("can't open this file");
+  });
+
+  it('Send posts the previewed values with the sheet source, then shows the backend summary', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    parseCsvMock.mockResolvedValue({
+      csv_context_id: 'ctx-123',
+      columns: ['Period', 'Revenue', 'Margin'],
+      sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']],
+      parse_error: null,
+    });
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+
+    await click('#send-data');
+
+    expect(parseCsvMock).toHaveBeenCalledWith('old-token', {
+      rows: [
+        ['Period', 'Revenue', 'Margin'],
+        ['2025-03-31', '1250000', '0.6145038167938931'],
+      ],
+      filename: 'Q3 P&L — P&L',
+      source: { platform: 'google_sheets', sheet_name: 'P&L', range: 'A3:C4', file_name: 'Q3 P&L', modified_at: null },
+    });
+    expect(isHidden('#parse-summary')).toBe(false);
+    expect(el('#parse-summary-text').textContent).toContain("Sent 'P&L'!A3:C4: 1 data rows × 3 columns");
+    expect(el('#parse-summary-text').textContent).toContain('ctx-123');
+    expect([...el('#parse-sample-table').querySelectorAll('td')].map((c) => c.textContent)).toEqual([
+      '2025-03-31',
+      '1250000',
+      '0.6145038167938931',
+    ]);
+    expect(isHidden('#send-data')).toBe(true);
+  });
+
+  it("shows the backend's own refusal as it says it", async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    parseCsvMock.mockResolvedValue({
+      csv_context_id: null,
+      columns: [],
+      sample_rows: [],
+      parse_error: "'Q3 P&L — P&L' has 2001 data rows -- the limit is 2000.",
+    });
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+
+    await click('#send-data');
+
+    expect(statusText()).toBe("'Q3 P&L — P&L' has 2001 data rows -- the limit is 2000.");
+    expect(isHidden('#parse-summary')).toBe(true);
+  });
+
+  it('a 401 from Send ends the session', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    parseCsvMock.mockRejectedValue(new BackendApiError('failed', 401, 'x'));
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+
+    await click('#send-data');
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(isHidden('#signed-out-view')).toBe(false);
+    expect(isHidden('#read-panel')).toBe(true);
+  });
+
+  it('editing the range discards a stale preview', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+    expect(isHidden('#send-data')).toBe(false);
+
+    el<HTMLInputElement>('#range-input').value = 'A3:C9';
+    el('#range-input').dispatchEvent(new Event('input'));
+
+    expect(isHidden('#send-data')).toBe(true);
+    expect(el('#preview-table').children).toHaveLength(0);
   });
 });
 

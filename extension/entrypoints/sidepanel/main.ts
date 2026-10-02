@@ -1,5 +1,29 @@
 import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
-import { exchangeToken, logout, revokeAllSessions, BackendApiError } from '../../lib/backendApi';
+import {
+  exchangeToken,
+  logout,
+  parseCsv,
+  revokeAllSessions,
+  BackendApiError,
+  type CsvParseResponse,
+} from '../../lib/backendApi';
+import {
+  bodySizeError,
+  buildParseRequest,
+  cellAddress,
+  columnLetter,
+  formatA1Range,
+  parseA1Range,
+  precheckGrid,
+  quoteSheetName,
+  type NormalizedGrid,
+} from '../../lib/cellGrid';
+import { ExcelFileError } from '../../lib/excelReader';
+import {
+  connectExcelFile,
+  connectGoogleSheet,
+  type ConnectedFile,
+} from '../../lib/spreadsheetSource';
 import {
   getStoredSession,
   setStoredSession,
@@ -16,8 +40,6 @@ import {
 } from '../../lib/dataToken';
 import {
   classifyTab,
-  fetchExcelFileName,
-  fetchSheetTitle,
   ProviderApiError,
   UNSUPPORTED_EXCEL_URL_MESSAGE,
 } from '../../lib/connectData';
@@ -45,6 +67,25 @@ const revokeAllButton = document.querySelector<HTMLButtonElement>('#revoke-all')
 const connectDataButton = document.querySelector<HTMLButtonElement>('#connect-data');
 const dataConnection = document.querySelector<HTMLElement>('#data-connection');
 const dataNote = document.querySelector<HTMLElement>('#data-note');
+const readPanel = document.querySelector<HTMLElement>('#read-panel');
+const fileAsOf = document.querySelector<HTMLElement>('#file-as-of');
+const sheetSelect = document.querySelector<HTMLSelectElement>('#sheet-select');
+const rangeInput = document.querySelector<HTMLInputElement>('#range-input');
+const readRangeButton = document.querySelector<HTMLButtonElement>('#read-range');
+const readNotices = document.querySelector<HTMLElement>('#read-notices');
+const previewCaption = document.querySelector<HTMLElement>('#preview-caption');
+const previewTable = document.querySelector<HTMLTableElement>('#preview-table');
+const sendDataButton = document.querySelector<HTMLButtonElement>('#send-data');
+const parseSummary = document.querySelector<HTMLElement>('#parse-summary');
+const parseSummaryText = document.querySelector<HTMLElement>('#parse-summary-text');
+const parseSampleTable = document.querySelector<HTMLTableElement>('#parse-sample-table');
+
+// The connected spreadsheet and the grid last previewed from it -- panel memory only.
+let connectedFile: ConnectedFile | null = null;
+let connectedEmail = '';
+let previewGrid: NormalizedGrid | null = null;
+
+const PREVIEW_DATA_ROWS = 10;
 
 const PROVIDER_LABEL: Record<AuthProvider, string> = {
   google: 'Google',
@@ -66,7 +107,137 @@ function setDataConnection(text: string, note = ''): void {
   if (dataNote) dataNote.textContent = note;
 }
 
+function clearPreview(): void {
+  previewGrid = null;
+  readNotices?.replaceChildren();
+  if (previewCaption) previewCaption.textContent = '';
+  previewTable?.replaceChildren();
+  sendDataButton?.setAttribute('hidden', '');
+  parseSummary?.setAttribute('hidden', '');
+  parseSampleTable?.replaceChildren();
+}
+
+function resetReadPanel(): void {
+  connectedFile = null;
+  connectedEmail = '';
+  clearPreview();
+  sheetSelect?.replaceChildren();
+  if (rangeInput) rangeInput.value = '';
+  if (fileAsOf) fileAsOf.textContent = '';
+  readPanel?.setAttribute('hidden', '');
+}
+
+function showConnectedFile(file: ConnectedFile): void {
+  clearPreview();
+  sheetSelect?.replaceChildren(
+    ...file.sheets.map((title) => {
+      const option = document.createElement('option');
+      option.value = title;
+      option.textContent = title;
+      return option;
+    }),
+  );
+  if (sheetSelect) sheetSelect.value = file.defaultSheet;
+  if (rangeInput) rangeInput.value = file.defaultRange ?? '';
+  if (fileAsOf) {
+    fileAsOf.textContent = file.modifiedAt
+      ? `Data as of last save: ${new Date(file.modifiedAt).toLocaleString()}. Edits from the ` +
+        'last minute or two may not appear yet.'
+      : '';
+  }
+  readPanel?.removeAttribute('hidden');
+}
+
+function headerCell(text: string, className?: string): HTMLTableCellElement {
+  const th = document.createElement('th');
+  th.textContent = text;
+  if (className) th.className = className;
+  return th;
+}
+
+/**
+ * Exactly what will be sent, labelled with the sheet's own row numbers and column letters so
+ * each value can be checked against its cell. The spreadsheet's displayed text, when it
+ * differs, is in the cell's tooltip.
+ */
+function renderPreview(grid: NormalizedGrid): void {
+  previewGrid = grid;
+  const { range, rows } = grid;
+  const width = rows[0]!.length;
+  const shown = rows.slice(0, PREVIEW_DATA_ROWS + 1);
+
+  const letters = document.createElement('tr');
+  letters.append(headerCell('', 'address'));
+  for (let c = 0; c < width; c++) letters.append(headerCell(columnLetter(range.startCol + c), 'address'));
+  const body = shown.map((row, r) => {
+    const tr = document.createElement('tr');
+    tr.append(headerCell(String(range.startRow + r), 'address'));
+    row.forEach((cell, c) => {
+      const td = r === 0 ? headerCell(cell.value) : document.createElement('td');
+      td.textContent = cell.value;
+      td.title =
+        cell.display && cell.display !== cell.value
+          ? `${cellAddress(range.startRow + r, range.startCol + c)} shows "${cell.display}"`
+          : cellAddress(range.startRow + r, range.startCol + c);
+      tr.append(td);
+    });
+    return tr;
+  });
+  previewTable?.replaceChildren(letters, ...body);
+
+  const dataRows = rows.length - 1;
+  if (previewCaption) {
+    previewCaption.textContent =
+      `${quoteSheetName(grid.sheetName)}!${formatA1Range(range)} · ${dataRows} data ` +
+      `row${dataRows === 1 ? '' : 's'} × ${width} column${width === 1 ? '' : 's'}` +
+      (dataRows > PREVIEW_DATA_ROWS ? ` · showing the first ${PREVIEW_DATA_ROWS}` : '');
+  }
+  readNotices?.replaceChildren(
+    ...grid.notices.map((notice) => {
+      const li = document.createElement('li');
+      li.textContent = notice.message;
+      return li;
+    }),
+  );
+
+  const problem = precheckGrid(grid);
+  if (problem) {
+    setStatus(problem, true);
+    sendDataButton?.setAttribute('hidden', '');
+  } else {
+    clearStatus();
+    sendDataButton?.removeAttribute('hidden');
+  }
+}
+
+function renderParseSummary(response: CsvParseResponse, grid: NormalizedGrid): void {
+  const dataRows = grid.rows.length - 1;
+  if (parseSummaryText) {
+    parseSummaryText.textContent =
+      `Sent ${quoteSheetName(grid.sheetName)}!${formatA1Range(grid.range)}: ${dataRows} data ` +
+      `rows × ${response.columns.length} columns. Mapping columns to financial concepts is the ` +
+      `next step (coming soon). Reference ${response.csv_context_id}, kept for one hour.`;
+  }
+  const head = document.createElement('tr');
+  head.append(...response.columns.map((column) => headerCell(column)));
+  const body = response.sample_rows.map((row) => {
+    const tr = document.createElement('tr');
+    tr.append(
+      ...row.map((value) => {
+        const td = document.createElement('td');
+        td.textContent = value;
+        return td;
+      }),
+    );
+    return tr;
+  });
+  parseSampleTable?.replaceChildren(head, ...body);
+  sendDataButton?.setAttribute('hidden', '');
+  parseSummary?.removeAttribute('hidden');
+}
+
 function renderSignedOut(errorMessage?: string): void {
+  resetReadPanel();
   setDataConnection('');
   signedOutView?.removeAttribute('hidden');
   signedInView?.setAttribute('hidden', '');
@@ -96,6 +267,10 @@ function setBusy(busy: boolean): void {
   if (signoutButton) signoutButton.disabled = busy;
   if (revokeAllButton) revokeAllButton.disabled = busy;
   if (connectDataButton) connectDataButton.disabled = busy;
+  if (readRangeButton) readRangeButton.disabled = busy;
+  if (sendDataButton) sendDataButton.disabled = busy;
+  if (sheetSelect) sheetSelect.disabled = busy;
+  if (rangeInput) rangeInput.disabled = busy;
 }
 
 function friendlyMessage(err: unknown): string {
@@ -244,10 +419,46 @@ function connectErrorMessage(err: unknown): string {
 }
 
 /**
- * The minimal 3a "Connect data" read: a data token for whichever platform the active tab
- * shows (Google Sheets or Excel Online), then just the file's name -- enough to prove the
- * data-token path end to end. `click` is passed through to getDataToken, whose click guard
- * is what keeps every launchWebAuthFlow inside a direct user click.
+ * Shared by Connect data and Preview: a failed data-token or provider read. Never retried
+ * automatically.
+ */
+async function handleDataError(
+  err: unknown,
+  provider: AuthProvider | null,
+  dataEmail: string,
+): Promise<void> {
+  if (err instanceof BackendApiError && err.status === 401) {
+    await handleUnauthorized();
+    return;
+  }
+  console.error('[sidepanel] data read failed', err);
+  if (err instanceof ProviderApiError && provider) {
+    // The data token itself didn't work for this file: forget it and its account, so the
+    // next click goes through the account chooser.
+    await forgetDataGrant(provider);
+    resetReadPanel();
+    if (err.status === 401) {
+      setStatus('Access expired — click Connect data again.', true);
+    } else if (err.status === 403 || err.status === 404) {
+      setStatus(
+        `${dataEmail} can't open this file — click Connect data to choose another account.`,
+        true,
+      );
+    } else {
+      setStatus('Could not read this file — please try again.', true);
+    }
+  } else if (err instanceof ExcelFileError) {
+    setStatus(err.message, true);
+  } else {
+    setStatus(connectErrorMessage(err), true);
+  }
+}
+
+/**
+ * Connect data: a data token for whichever platform the active tab shows (Google Sheets or
+ * Excel Online), then the file's sheet list -- for Excel, by downloading the workbook once.
+ * `click` is passed through to getDataToken, whose click guard is what keeps every
+ * launchWebAuthFlow inside a direct user click.
  */
 async function handleConnectData(click: MouseEvent): Promise<void> {
   const session = await getStoredSession();
@@ -258,6 +469,7 @@ async function handleConnectData(click: MouseEvent): Promise<void> {
   setBusy(true);
   setStatus('Connecting…');
   setDataConnection('');
+  resetReadPanel();
   let provider: AuthProvider | null = null;
   let dataEmail = '';
   try {
@@ -275,41 +487,110 @@ async function handleConnectData(click: MouseEvent): Promise<void> {
     provider = target.kind;
     const token = await getDataToken(provider, { sessionToken: session.sessionToken, click });
     dataEmail = token.email;
-    const fileName =
+    const file =
       target.kind === 'google'
-        ? await fetchSheetTitle(token.accessToken, target.spreadsheetId)
-        : await fetchExcelFileName(token.accessToken, target);
+        ? await connectGoogleSheet(token.accessToken, target.spreadsheetId, tab!.url!)
+        : await connectExcelFile(token.accessToken, target);
+    connectedFile = file;
+    connectedEmail = token.email;
     clearStatus();
     setDataConnection(
-      `Connected: ${fileName} via ${token.email}`,
+      `Connected: ${file.name} via ${token.email}`,
       provider === 'microsoft' && isWritePermissionScope(token.scope)
         ? 'Your Microsoft account still grants this app an older write permission it no longer ' +
             'uses — you can remove it at account.live.com/consent/Manage.'
         : '',
     );
+    showConnectedFile(file);
+  } catch (err) {
+    await handleDataError(err, provider, dataEmail);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/** Preview: reads the chosen sheet and range and shows exactly what would be sent. */
+async function handleReadRange(click: MouseEvent): Promise<void> {
+  const file = connectedFile;
+  if (!file || !sheetSelect || !rangeInput) return;
+  const session = await getStoredSession();
+  if (!session) {
+    renderSignedOut();
+    return;
+  }
+  const rangeText = rangeInput.value.trim();
+  const range = rangeText === '' ? null : parseA1Range(rangeText);
+  if (rangeText !== '' && !range) {
+    setStatus('Enter a range like A3:G7, or leave it empty for the whole sheet.', true);
+    return;
+  }
+  setBusy(true);
+  setStatus('Reading…');
+  clearPreview();
+  try {
+    // Google reads go to the live sheet and need a data token (normally the cached one);
+    // Excel re-parses the copy downloaded at Connect data.
+    const accessToken =
+      file.provider === 'google'
+        ? (await getDataToken('google', { sessionToken: session.sessionToken, click })).accessToken
+        : null;
+    const grid = await file.read(sheetSelect.value, range, accessToken);
+    if (connectedFile !== file) return; // reconnected or signed out meanwhile
+    if (!grid) {
+      setStatus('That range is empty.', true);
+      return;
+    }
+    renderPreview(grid);
+  } catch (err) {
+    await handleDataError(err, file.provider, connectedEmail);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/** Send to analysis: POST /v1/csv/parse with the previewed grid and its sheet source. */
+async function handleSendData(): Promise<void> {
+  const file = connectedFile;
+  const grid = previewGrid;
+  if (!file || !grid) return;
+  const session = await getStoredSession();
+  if (!session) {
+    renderSignedOut();
+    return;
+  }
+  const request = buildParseRequest(grid, {
+    name: file.name,
+    platform: file.platform,
+    modifiedAt: file.modifiedAt,
+  });
+  const sizeError = bodySizeError(request);
+  if (sizeError) {
+    setStatus(sizeError, true);
+    return;
+  }
+  setBusy(true);
+  setStatus('Sending…');
+  try {
+    const response = await parseCsv(session.sessionToken, request);
+    if (response.parse_error !== null || !response.csv_context_id) {
+      // The backend's own refusal, shown as it says it.
+      setStatus(response.parse_error ?? 'The data could not be read.', true);
+      return;
+    }
+    clearStatus();
+    renderParseSummary(response, grid);
   } catch (err) {
     if (err instanceof BackendApiError && err.status === 401) {
       await handleUnauthorized();
       return;
     }
-    console.error('[sidepanel] connect data failed', err);
-    if (err instanceof ProviderApiError && provider) {
-      // The data token itself didn't work for this file: forget it and its account, so the
-      // next click goes through the account chooser. Never retried automatically.
-      await forgetDataGrant(provider);
-      if (err.status === 401) {
-        setStatus('Access expired — click Connect data again.', true);
-      } else if (err.status === 403 || err.status === 404) {
-        setStatus(
-          `${dataEmail} can't open this file — click Connect data to choose another account.`,
-          true,
-        );
-      } else {
-        setStatus('Could not read this file — please try again.', true);
-      }
-    } else {
-      setStatus(connectErrorMessage(err), true);
-    }
+    console.error('[sidepanel] send data failed', err);
+    setStatus(
+      err instanceof BackendApiError && err.status === 422
+        ? 'The data was sent in a shape the server rejected. This is a bug; please report it.'
+        : 'Could not send the data — please try again.',
+      true,
+    );
   } finally {
     setBusy(false);
   }
@@ -317,6 +598,23 @@ async function handleConnectData(click: MouseEvent): Promise<void> {
 
 connectDataButton?.addEventListener('click', (event) => {
   void handleConnectData(event);
+});
+readRangeButton?.addEventListener('click', (event) => {
+  void handleReadRange(event);
+});
+sendDataButton?.addEventListener('click', () => {
+  void handleSendData();
+});
+sheetSelect?.addEventListener('change', () => {
+  // A range= link only applies to the sheet it was copied from.
+  if (rangeInput && connectedFile) {
+    rangeInput.value =
+      sheetSelect.value === connectedFile.defaultSheet ? (connectedFile.defaultRange ?? '') : '';
+  }
+  clearPreview();
+});
+rangeInput?.addEventListener('input', () => {
+  clearPreview();
 });
 signinGoogleButton?.addEventListener('click', () => {
   void handleSignIn('google');

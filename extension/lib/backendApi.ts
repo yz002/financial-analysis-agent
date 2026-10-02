@@ -1,4 +1,5 @@
 import { BACKEND_BASE_URL } from './authConfig';
+import type { CsvParseRequest } from './cellGrid';
 
 export class BackendApiError extends Error {
   constructor(
@@ -100,6 +101,24 @@ export async function exchangeGoogleDataToken(
       redirect_uri: params.redirectUri,
     },
   });
+}
+
+export interface CsvParseResponse {
+  csv_context_id: string | null;
+  columns: string[];
+  sample_rows: string[][];
+  parse_error: string | null;
+}
+
+/**
+ * POST /v1/csv/parse (EXTENSION_INTEGRATION.md SS6, amended 3b). Always 200 for a well-formed
+ * request: a structural refusal comes back in-band as parse_error, never as an HTTP error.
+ */
+export async function parseCsv(
+  sessionToken: string,
+  request: CsvParseRequest,
+): Promise<CsvParseResponse> {
+  return postJson<CsvParseResponse>('/v1/csv/parse', { sessionToken, body: request });
 }
 
 /** No request body per the contract. Always resolves {revoked: true} on 2xx. */

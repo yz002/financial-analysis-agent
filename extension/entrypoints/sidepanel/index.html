@@ -24,6 +24,34 @@
         <button id="connect-data" type="button">Connect data</button>
         <p id="data-connection"></p>
         <p id="data-note"></p>
+
+        <section id="read-panel" aria-label="Read spreadsheet data" hidden>
+          <p id="file-as-of"></p>
+          <div class="field">
+            <label for="sheet-select">Sheet</label>
+            <select id="sheet-select"></select>
+          </div>
+          <div class="field">
+            <label for="range-input">Range</label>
+            <input
+              id="range-input"
+              type="text"
+              placeholder="Whole sheet, or e.g. A3:G7"
+              spellcheck="false"
+              autocomplete="off"
+            />
+          </div>
+          <button id="read-range" type="button">Preview</button>
+          <ul id="read-notices"></ul>
+          <p id="preview-caption"></p>
+          <div class="table-scroll"><table id="preview-table"></table></div>
+          <button id="send-data" type="button" hidden>Send to analysis</button>
+          <div id="parse-summary" hidden>
+            <p id="parse-summary-text"></p>
+            <div class="table-scroll"><table id="parse-sample-table"></table></div>
+          </div>
+        </section>
+
         <button id="signout" type="button">Sign out</button>
         <button id="revoke-all" type="button">Sign out everywhere</button>
       </div>
