@@ -320,6 +320,32 @@ def test_figure_citation_caption_renders_csv_citation_when_present():
     )
 
 
+def test_figure_citation_caption_prefers_the_sheet_cell_when_present():
+    payload = {
+        "periods": [
+            {
+                "period_end": "2025-03-31",
+                "revenue": {
+                    "value": 1250000.0, "source_file": "FA Spike Test.xlsx — P&L", "source_row": 0,
+                    "source_column": "Revenue", "uploaded_at": "2026-10-02 12:00:00",
+                    "source_cell": "'P&L'!B4",
+                },
+            }
+        ],
+    }
+    result = {"tool_calls": [_tool_call("get_csv_statement", payload)]}
+    match = {
+        "tool_call_index": 0, "tool_name": "get_csv_statement", "iteration": 1,
+        "json_path": "periods[0].revenue.value", "matched_value": 1250000.0,
+    }
+
+    caption = app_main._figure_citation_caption(result, match)
+    assert caption == (
+        "via uploaded file \"FA Spike Test.xlsx — P&L\", cell 'P&L'!B4 "
+        "(uploaded 2026-10-02 12:00:00) = 1250000.0"
+    )
+
+
 def test_figure_citation_caption_falls_back_when_citation_fields_absent():
     """An EDGAR-sourced match (or a get_csv_ratios match on a ratio's own computed value, which
     has no single source cell) has no source_file/source_row/source_column/uploaded_at siblings

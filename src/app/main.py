@@ -261,6 +261,11 @@ def _figure_citation_caption(result: dict, match: dict) -> str:
     parent = _json_path_parent(payload, match["json_path"])
     if parent is None or not all(f in parent for f in _CSV_CITATION_FIELDS):
         return default
+    if "source_cell" in parent:  # spreadsheet-sourced: the exact cell beats a row index
+        return (
+            f'via uploaded file "{parent["source_file"]}", cell {parent["source_cell"]} '
+            f'(uploaded {parent["uploaded_at"]}) = {match["matched_value"]}'
+        )
     return (
         f'via uploaded file "{parent["source_file"]}", row {parent["source_row"]}, column '
         f'"{parent["source_column"]}" (uploaded {parent["uploaded_at"]}) = {match["matched_value"]}'

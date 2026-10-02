@@ -329,6 +329,47 @@ def test_unparseable_numeric_cell_becomes_nan_not_zero():
         assert pd.isna(df["revenue_tag"].iloc[i])  # no real value -> no tag either, per convention
 
 
+def test_exponent_form_numbers_parse_exactly():
+    """The Chrome extension sends a numeric cell's underlying value as JavaScript's String(v)
+    (Phase D session 3b contract amendment), which switches to exponent form at the extremes:
+    String(1e21) is "1e+21", String(1e-7) is "1e-7". The numeric cleaner must read those
+    exact strings as the same floats, never as None."""
+    df_raw = pd.DataFrame(
+        {
+            "Date": ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31"],
+            "Revenue": ["1e+21", "1e-7", "-1e-7", "1.5e+300"],
+        }
+    )
+    raw = RawCsv(df=df_raw, filename="exp.csv", uploaded_at=_UPLOADED_AT)
+    df, errors, _ = normalize(raw, {"Date": "period_end", "Revenue": "revenue"}, entity_name="Exp Co")
+    assert errors == []
+    assert df["revenue"].tolist() == [1e21, 1e-7, -1e-7, 1.5e300]
+
+
+def test_spreadsheet_source_adds_sheet_qualified_source_cell():
+    """With a spreadsheet source (sheet_ingest's `source`, range C3:D5 here), each provenance
+    entry also names the exact cell: data row i sits at sheet row 3 + 1 + i, and the column
+    letter is offset from the range's first column (Revenue is the 2nd column -> D)."""
+    df_raw = pd.DataFrame({"Date": ["2024-03-31", "2024-06-30"], "Revenue": ["100", "200"]})
+    source = {
+        "platform": "google_sheets", "sheet_name": "P&L", "range": "C3:D5",
+        "file_name": "Book", "modified_at": None,
+    }
+    raw = RawCsv(df=df_raw, filename="Book — P&L", uploaded_at=_UPLOADED_AT, source=source)
+    df, errors, _ = normalize(raw, {"Date": "period_end", "Revenue": "revenue"}, entity_name="Co")
+    assert errors == []
+    prov = df.attrs["csv_provenance"]["revenue"]
+    assert prov["2024-03-31"] == {"source_row": 0, "source_column": "Revenue", "source_cell": "'P&L'!D4"}
+    assert prov["2024-06-30"]["source_cell"] == "'P&L'!D5"
+
+
+def test_no_source_means_no_source_cell():
+    df, _ = _normalized_sample()
+    for by_period in df.attrs["csv_provenance"].values():
+        for entry in by_period.values():
+            assert "source_cell" not in entry
+
+
 # --- verification: exact schema match against get_statement(), and a live ratios.py smoke run -
 
 

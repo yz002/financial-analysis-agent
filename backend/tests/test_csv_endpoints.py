@@ -240,3 +240,165 @@ def test_propose_mapping_generic_exception_does_not_leak_exception_detail(auth_s
     assert resp.status_code == 500, resp.text
     assert marker not in resp.text
     assert resp.json()["detail"] == "propose_mapping failed unexpectedly."
+
+
+# --- Phase D session 3b contract amendment: source, size caps --------------------------------
+
+_SOURCE = {
+    "platform": "google_sheets",
+    "sheet_name": "P&L",
+    "range": "A3:C5",
+    "file_name": "FA Spike Test",
+    "modified_at": None,
+}
+
+
+def _count_csv_rows(account_id: str) -> int:
+    session = get_session()
+    try:
+        return session.execute(
+            text("SELECT count(*) FROM csv_statements WHERE account_id = :id"), {"id": account_id}
+        ).scalar()
+    finally:
+        session.close()
+
+
+def test_source_is_stored_and_confirmed_provenance_cites_the_cell(auth_session):
+    _, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        json={"rows": _SAMPLE_ROWS, "filename": "FA Spike Test — P&L", "source": _SOURCE},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["parse_error"] is None
+    csv_context_id = resp.json()["csv_context_id"]
+
+    resp = client.post(
+        f"/v1/csv/{csv_context_id}/confirm",
+        json={
+            "mapping": {
+                "Quarter Ending": "period_end", "Total Revenue": "revenue", "Net Income": "net_income",
+            },
+            "entity_name": "Spike Co",
+        },
+        headers=headers,
+    )
+    assert resp.json()["confirmed"] is True, resp.text
+
+    session = get_session()
+    try:
+        raw_columns, attrs = session.execute(
+            text("SELECT raw_columns, statement_attrs FROM csv_statements WHERE id = :id"),
+            {"id": csv_context_id},
+        ).one()
+    finally:
+        session.close()
+    assert raw_columns["source"] == _SOURCE
+    # Header in row 3, so the first data row is row 4; Total Revenue is the range's 2nd column.
+    assert attrs["csv_provenance"]["revenue"]["2024-01-01"]["source_cell"] == "'P&L'!B4"
+    assert attrs["csv_provenance"]["net_income"]["2024-04-01"]["source_cell"] == "'P&L'!C5"
+
+
+def test_source_range_that_does_not_match_the_rows_is_refused_in_band(auth_session):
+    account_id, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        json={"rows": _SAMPLE_ROWS, "filename": "f", "source": {**_SOURCE, "range": "A3:C9"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["csv_context_id"] is None
+    assert "were sent" in resp.json()["parse_error"]
+    assert _count_csv_rows(account_id) == 0
+
+
+def test_malformed_source_range_is_a_422(auth_session):
+    _, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        json={"rows": _SAMPLE_ROWS, "filename": "f", "source": {**_SOURCE, "range": "Sheet1!A1"}},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_non_string_cell_is_still_a_422(auth_session):
+    _, headers = auth_session()
+    resp = _parse(headers, rows=[["Quarter Ending", "Total Revenue"], ["2024-01-01", 100000]])
+    assert resp.status_code == 422
+    assert resp.json()["detail"][0]["loc"][0] == "body"
+
+
+def test_malformed_json_body_is_a_422(auth_session):
+    _, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        content=b"{not json",
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422
+
+
+def test_empty_header_is_refused_in_band(auth_session):
+    _, headers = auth_session()
+    resp = _parse(headers, rows=[["Quarter Ending", ""], ["2024-01-01", "1"]])
+    assert resp.status_code == 200
+    assert "empty header" in resp.json()["parse_error"]
+
+
+def test_total_cell_cap_is_refused_in_band(auth_session):
+    account_id, headers = auth_session()
+    columns = 100
+    rows = [[f"c{i}" for i in range(columns)]] + [["1"] * columns] * 500  # 50,100 cells
+    resp = _parse(headers, rows=rows)
+    assert resp.status_code == 200
+    assert resp.json()["csv_context_id"] is None
+    assert "50000" in resp.json()["parse_error"]
+    assert _count_csv_rows(account_id) == 0
+
+
+def _oversize_body() -> bytes:
+    body = json.dumps({"rows": [["Note"], ["x" * 900]] * 2400, "filename": "big"}).encode()
+    assert len(body) > app_main.MAX_CSV_PARSE_BODY_BYTES
+    return body
+
+
+def test_body_over_the_cap_is_refused_in_band_via_content_length(auth_session):
+    account_id, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        content=_oversize_body(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["csv_context_id"] is None
+    assert "too large" in resp.json()["parse_error"]
+    assert _count_csv_rows(account_id) == 0
+
+
+def test_chunked_body_over_the_cap_is_refused_in_band(auth_session):
+    """A generator body goes out chunked, with no Content-Length header, so this exercises the
+    streamed byte count rather than the header check."""
+    account_id, headers = auth_session()
+    body = _oversize_body()
+
+    def chunks():
+        for i in range(0, len(body), 64 * 1024):
+            yield body[i : i + 64 * 1024]
+
+    resp = client.post(
+        "/v1/csv/parse",
+        content=chunks(),
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert "too large" in resp.json()["parse_error"]
+    assert _count_csv_rows(account_id) == 0
+
+
+def test_missing_auth_is_401_even_with_an_oversize_body():
+    resp = client.post(
+        "/v1/csv/parse", content=_oversize_body(), headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code == 401

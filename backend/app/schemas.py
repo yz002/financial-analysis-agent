@@ -14,7 +14,7 @@ response_model wants one consistent shape per route.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
@@ -43,9 +43,21 @@ class AskResponse(BaseModel):
     tool_calls_summary: list
 
 
+class CsvSource(BaseModel):
+    """Where in a spreadsheet the rows came from (Phase D session 3b contract amendment).
+    `range` is the exact A1 rectangle sent, header row included (e.g. "A3:G7")."""
+
+    platform: Literal["google_sheets", "excel"]
+    sheet_name: str = Field(min_length=1, max_length=255)
+    range: str = Field(pattern=r"^[A-Z]{1,3}[1-9][0-9]*:[A-Z]{1,3}[1-9][0-9]*$")
+    file_name: str = Field(max_length=1000)
+    modified_at: datetime | None = None
+
+
 class CsvParseRequest(BaseModel):
     rows: list[list[str]]
     filename: str
+    source: CsvSource | None = None
 
 
 class CsvParseResponse(BaseModel):

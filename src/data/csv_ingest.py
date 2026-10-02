@@ -59,6 +59,9 @@ class RawCsv:
     df: pd.DataFrame
     filename: str
     uploaded_at: datetime
+    # Where in a spreadsheet the rows came from (src/data/sheet_ingest.py's `source`), or None
+    # for a plain uploaded file. normalize() uses it to cite real cell addresses.
+    source: dict | None = None
 
 
 @dataclass

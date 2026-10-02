@@ -455,6 +455,33 @@ def test_get_csv_statement_shape_and_citation_fields():
         assert key not in revenue_entry
 
     assert result["periods"][0]["gross_profit"] is None
+    assert "source_cell" not in revenue_entry  # a plain CSV upload has no cell addresses
+
+
+def test_get_csv_statement_cites_the_sheet_cell_for_spreadsheet_sourced_data():
+    from src.data.sheet_ingest import rows_to_raw_csv
+
+    rows = [
+        ["Quarter Ending", "Total Revenue"],
+        ["2024-03-31", "1250000"],
+        ["2024-06-30", "1300000"],
+    ]
+    source = {
+        "platform": "excel", "sheet_name": "P&L", "range": "A3:B5",
+        "file_name": "FA Spike Test.xlsx", "modified_at": None,
+    }
+    raw, error = rows_to_raw_csv(rows, "FA Spike Test.xlsx — P&L", source=source)
+    assert error is None, error
+    df, errors, _ = csv_statement.normalize(
+        raw, {"Quarter Ending": "period_end", "Total Revenue": "revenue"}, entity_name="Spike Co"
+    )
+    assert errors == [], errors
+    csv_session.set_active_csv(df)
+
+    result = json.loads(tools.get_csv_statement())
+    by_period = {p["period_end"]: p for p in result["periods"]}
+    assert by_period["2024-03-31"]["revenue"]["source_cell"] == "'P&L'!B4"
+    assert by_period["2024-06-30"]["revenue"]["source_cell"] == "'P&L'!B5"
 
 
 def test_get_csv_ratios_shape_and_citation_fields():

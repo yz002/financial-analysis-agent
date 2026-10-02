@@ -26,7 +26,9 @@ from pathlib import Path
 import anthropic
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
+from pydantic import ValidationError
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 
@@ -105,6 +107,11 @@ from .schemas import (
 )
 
 app = FastAPI(title="Sheets Add-on Backend")
+
+# /v1/csv/parse's request-body cap (Phase D session 3b contract amendment). Sits above
+# src/data/sheet_ingest.py's cell-count caps: 2 MB is ~50k cells at ~40 bytes each, so the two
+# limits agree, but this one is checked before any JSON is parsed.
+MAX_CSV_PARSE_BODY_BYTES = 2 * 1024 * 1024
 
 
 @app.get("/v1/health", response_model=HealthResponse)
@@ -494,12 +501,57 @@ def ask(
     )
 
 
+async def _read_csv_parse_body(request: Request) -> CsvParseRequest | None:
+    """
+    /v1/csv/parse's body, read with a MAX_CSV_PARSE_BODY_BYTES cap before any JSON parsing.
+    Returns None when the body is over the cap (the route then refuses in-band, keeping the
+    contract's "always 200" rule), and raises RequestValidationError -- FastAPI's ordinary 422
+    -- for malformed JSON or a body that doesn't match CsvParseRequest. A dependency rather
+    than a body parameter so it runs *after* get_current_account: an unauthenticated caller
+    gets its 401 before a single body byte is read. Checks Content-Length first, then counts
+    streamed bytes, so a chunked body without a Content-Length can't slip past the cap.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_CSV_PARSE_BODY_BYTES:
+        return None
+    chunks = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_CSV_PARSE_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+    try:
+        payload = json.loads(b"".join(chunks))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RequestValidationError(
+            [{"type": "json_invalid", "loc": ("body",), "msg": "Request body is not valid JSON."}]
+        ) from e
+    try:
+        return CsvParseRequest.model_validate(payload)
+    except ValidationError as e:
+        raise RequestValidationError(
+            [{**err, "loc": ("body", *err["loc"])} for err in e.errors(include_url=False)]
+        ) from e
+
+
 @app.post("/v1/csv/parse", response_model=CsvParseResponse)
 def csv_parse(
-    request: CsvParseRequest,
     account: Account = Depends(get_current_account),
+    request: CsvParseRequest | None = Depends(_read_csv_parse_body),
 ) -> CsvParseResponse:
-    raw, error = rows_to_raw_csv(request.rows, request.filename)
+    if request is None:
+        return CsvParseResponse(
+            csv_context_id=None,
+            columns=[],
+            sample_rows=[],
+            parse_error=(
+                f"This selection is too large to send (over "
+                f"{MAX_CSV_PARSE_BODY_BYTES // (1024 * 1024)} MB). Select a smaller range."
+            ),
+        )
+    source = request.source.model_dump(mode="json") if request.source else None
+    raw, error = rows_to_raw_csv(request.rows, request.filename, source=source)
     if error is not None:
         return CsvParseResponse(csv_context_id=None, columns=[], sample_rows=[], parse_error=error)
 

@@ -31,6 +31,7 @@ import re
 import pandas as pd
 
 from ..data.concepts import CONCEPTS
+from ..data.sheet_ingest import cell_reference, parse_a1_range
 
 DURATION_CONCEPTS = [name for name, spec in CONCEPTS.items() if spec["kind"] == "duration"]
 INSTANT_CONCEPTS = [name for name, spec in CONCEPTS.items() if spec["kind"] == "instant"]
@@ -270,7 +271,9 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
     periods_available (the row count after date-parsing/dedup), csv_source
     ({"filename", "uploaded_at", "cadence"}), and csv_provenance
     ({concept: {period_end_iso: {"source_row", "source_column"}}}, entries only for periods
-    where that concept has a real value) -- the last two are additive metadata for a future
+    where that concept has a real value, plus "source_cell" -- a sheet-qualified address like
+    'P&L'!B4 -- when `raw.source` says which spreadsheet range the rows came from; source_row
+    stays the 0-based data-row index either way) -- the last two are additive metadata for a future
     CSV-facing agent tool to cite, not part of get_statement()'s own contract, so they don't
     affect a caller diffing .columns against a real get_statement() result.
     sparse_history/sparse_history_note are deliberately omitted -- that signal exists to catch
@@ -323,6 +326,19 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
     cleaned_columns: dict[str, pd.Series] = {}
     provenance: dict[str, dict] = {}
 
+    # A spreadsheet-sourced upload (sheet_ingest's `source`) can cite the exact cell: data row
+    # i of the range sits one row below the header, i.e. sheet row start_row + 1 + i.
+    source = raw.source
+    origin = parse_a1_range(source["range"]) if source else None
+
+    def source_cell(column: str, row_idx: int) -> str | None:
+        if origin is None:
+            return None
+        start_row, start_col = origin[0], origin[1]
+        return cell_reference(
+            source["sheet_name"], start_row + 1 + row_idx, start_col + raw.df.columns.get_loc(column)
+        )
+
     def values_for(concept: str) -> list:
         column = role_to_column.get(concept)
         if column is None:
@@ -338,7 +354,11 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
                 result.append(float("nan"))
             else:
                 result.append(v)
-                prov[period_end_iso[i]] = {"source_row": int(row_idx), "source_column": column}
+                entry = {"source_row": int(row_idx), "source_column": column}
+                cell = source_cell(column, int(row_idx))
+                if cell is not None:
+                    entry["source_cell"] = cell
+                prov[period_end_iso[i]] = entry
         return result
 
     out: dict[str, list] = {

@@ -361,12 +361,55 @@ Request:
 ```json
 {
   "rows": [["header1", "header2", ...], ["cell", "cell", ...], ...],  // list of list of strings
-  "filename": "some-name.csv"
+  "filename": "some-name.csv",
+  "source": {                          // optional (Amended Phase D session 3b)
+    "platform": "google_sheets",       // or "excel"
+    "sheet_name": "P&L",
+    "range": "A3:G7",                  // the exact A1 rectangle sent; its first row is the header
+    "file_name": "FA Spike Test",
+    "modified_at": null                // ISO-8601 when known (Excel lastModifiedDateTime), else null
+  }
 }
 ```
 Every cell must be sent as a **display string**, not a raw typed value — this matters
 specifically for date cells, which the backend expects to parse as ordinary date strings, not
 as a spreadsheet's internal numeric date-serial format.
+
+(Amended Phase D session 3b: **cell encoding.** "Display string" above is refined to these
+rules. Every cell is still a JSON string, and a date is still never sent as a serial.)
+- **Every cell is a JSON string.** A number, `null` or boolean fails request validation (`422`).
+  An empty cell is `""`.
+- **A date cell is sent as ISO-8601**: `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM:SS` when it has a
+  time. Locale-formatted strings like `01/02/2025` are read month-first by the backend, so a
+  non-US date would silently become the wrong date.
+- **A numeric cell is sent as its underlying value**, in JavaScript `String(value)` form:
+  `1250000`, `-45000`, `0.6145038167938931`, and exponent form at the extremes (`1e+21`,
+  `1e-7`), which the backend parses. A display string can hide scale (`#,##0,` shows
+  1,250,000 as `1,250`) or round.
+- **Everything else is sent as displayed**: text, booleans (`TRUE`), and formula errors as
+  their literal (`#DIV/0!`). A non-numeric cell in a column later mapped to a concept becomes
+  "no value" for that period.
+
+(Amended Phase D session 3b: **`source` and cell provenance.**)
+- `source` is optional. When it's present:
+  - `range` must be exactly `len(rows)` rows by `len(rows[0])` columns, or the request is
+    refused in-band.
+  - A malformed `range` (not `A1:B2` form) is a `422`.
+- The backend stores `source` with the rows. Once the mapping is confirmed, every cited
+  figure carries `source_cell`, for example `'P&L'!B4`, alongside `source_row`/`source_column`.
+- The extension therefore sends one contiguous rectangle, and trims only trailing empty rows
+  and columns.
+
+(Amended Phase D session 3b: **size limits and new refusals**, all in-band unless noted.)
+- At most 200 columns, 2,000 data rows, 50,000 cells in total (header included), and 1,000
+  characters per cell.
+- At most a **2 MB request body**. It's checked after authentication and before the JSON is
+  parsed, and it applies to chunked bodies too. An oversize body gets `200` with
+  `"parse_error": "This selection is too large to send (over 2 MB)…"`.
+- An **empty or whitespace-only header cell** is refused, naming its position: the cell
+  (`cell C3`) when `source` is given, otherwise the column number. Two blank headers used to
+  surface as an empty "duplicate column headers ()" message.
+- A missing or invalid `Authorization` header is a `401` before any of the body is read.
 
 Response (200 — always 200; structural failures are reported in-band, not via HTTP error status):
 ```json

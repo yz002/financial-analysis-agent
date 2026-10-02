@@ -111,6 +111,10 @@ normalize() sees the same kind of string it would from a real uploaded CSV, not 
 numeric serial needing Sheets' 1899-12-30 epoch correction reproduced server-side.
 (The Apps Script side of this is out of scope per §5; stated here as a contract the
 backend's adapter documents and expects.)
+(Amended Phase D session 3b: for the Chrome extension, this contract is refined in
+`backend/EXTENSION_INTEGRATION.md` §6. Dates are sent as ISO-8601, numbers as their
+underlying value, and an optional `source` lets cited figures name their cell. It also adds
+size limits and an empty-header refusal. A date is still never sent as a serial.)
 
 Running run_agent: sync def, FastAPI's threadpool
 

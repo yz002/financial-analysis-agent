@@ -199,12 +199,16 @@ def _csv_citation(df_attrs: dict, concept: str, period_end_iso: str) -> dict:
     if prov is None:
         return {}
     source = df_attrs.get("csv_source", {})
-    return {
+    citation = {
         "source_file": source.get("filename"),
         "source_row": prov["source_row"],
         "source_column": prov["source_column"],
         "uploaded_at": source.get("uploaded_at"),
     }
+    # Spreadsheet-sourced uploads also know the exact cell, e.g. 'P&L'!B4 (see normalize()).
+    if "source_cell" in prov:
+        citation["source_cell"] = prov["source_cell"]
+    return citation
 
 
 def get_financial_statement(
@@ -1078,7 +1082,8 @@ TOOL_DEFINITIONS = [
             "most one). Every present value carries the literal CSV column header it came from "
             "(as 'tag'), the upload timestamp (as 'filed'), and four citation fields "
             "(source_file, source_row, source_column, uploaded_at) pinpointing exactly where "
-            "in the uploaded file it came from. A concept the CSV didn't map is listed in "
+            "in the uploaded file it came from, plus source_cell (e.g. 'P&L'!B4) when the data "
+            "came from a spreadsheet range -- cite that cell when it's present. A concept the CSV didn't map is listed in "
             "concepts_unavailable with a plain-English note. Returns a data_unavailable error "
             "if no CSV has been uploaded and confirmed yet."
         ),
@@ -1108,7 +1113,8 @@ TOOL_DEFINITIONS = [
             "raw dollar figures from get_csv_statement/get_financial_statement -- absolute "
             "figures aren't meaningful across very different company sizes. Every value "
             "includes raw inputs and citation provenance (tag/filed plus source_file/"
-            "source_row/source_column/uploaded_at). If the response's cadence is 'annual', use "
+            "source_row/source_column/uploaded_at, plus source_cell when the data came from a "
+            "spreadsheet range). If the response's cadence is 'annual', use "
             "revenue_growth_yoy/earnings_growth_yoy for year-over-year growth, not the _qoq "
             "variants -- same reasoning as get_ratios: _qoq targets roughly a quarter back and "
             "returns null against annual spacing. Returns a data_unavailable error if no CSV "
