@@ -108,15 +108,24 @@ export async function fetchSheetTitle(accessToken: string, spreadsheetId: string
  *   encoded as one path segment (the item id's "!" is left as-is by encodeURIComponent).
  */
 export async function fetchExcelFileName(accessToken: string, tab: MicrosoftTab): Promise<string> {
+  const json = await fetchDriveItem<{ name?: string }>(accessToken, tab, 'name');
+  return json.name ?? '(unnamed file)';
+}
+
+/** The open Excel file's DriveItem, with just the `select`ed properties (see above). */
+export async function fetchDriveItem<T>(
+  accessToken: string,
+  tab: MicrosoftTab,
+  select: string,
+): Promise<T> {
   const url =
     'url' in tab
-      ? `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tab.url)}/driveItem?$select=name`
-      : `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(tab.driveId)}/items/${encodeURIComponent(tab.itemId)}?$select=name`;
+      ? `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tab.url)}/driveItem?$select=${select}`
+      : `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(tab.driveId)}/items/${encodeURIComponent(tab.itemId)}?$select=${select}`;
   const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
   if ('url' in tab) headers.Prefer = 'redeemSharingLinkIfNecessary';
 
   const response = await fetch(url, { headers });
   if (!response.ok) throw new ProviderApiError(response.status);
-  const json = (await response.json()) as { name?: string };
-  return json.name ?? '(unnamed file)';
+  return (await response.json()) as T;
 }
