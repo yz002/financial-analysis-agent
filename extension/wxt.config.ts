@@ -14,6 +14,10 @@ export default defineConfig({
   // form is evaluated when this file is imported, before that happens).
   manifest: () => ({
     name: 'Financial Analysis Agent',
+    // 119+: fetch drops the Authorization header on a cross-origin redirect, which the Excel
+    // download's /content fallback relies on so the Graph token never reaches the download
+    // host (lib/excelReader.ts). Also above sidePanel's 114 floor.
+    minimum_chrome_version: '119',
     permissions: ['identity', 'storage', 'tabs'],
     host_permissions: [
       'https://docs.google.com/spreadsheets/*',

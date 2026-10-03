@@ -216,6 +216,7 @@ export function readWorksheet(
     originCol: target.startCol,
     cells,
     hiddenRows,
+    ...(range ? { requested: range } : {}),
     merges: (sheet['!merges'] ?? []).map((m) => ({
       startRow: m.s.r + 1,
       startCol: m.s.c,

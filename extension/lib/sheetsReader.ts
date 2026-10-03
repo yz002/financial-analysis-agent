@@ -203,6 +203,7 @@ export async function readSheetGrid(
     // Rows and trailing cells come back ragged/absent when empty; normalizeGrid pads them.
     cells: (data?.rowData ?? []).map((row) => (row.values ?? []).map(googleCell)),
     hiddenRows,
+    ...(range ? { requested: range } : {}),
     merges: (sheet?.merges ?? []).map((m) => ({
       startRow: (m.startRowIndex ?? 0) + 1,
       endRow: m.endRowIndex ?? 0,

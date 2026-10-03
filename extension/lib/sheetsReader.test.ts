@@ -188,8 +188,10 @@ describe('readSheetGrid', () => {
       ['2025-03-31', '1250000', '0.6145038167938931'],
       ['2025-06-30', '-45000', ''],
     ]);
-    // Row 5 is hidden; the title merge sits above A3, so it isn't mentioned.
-    expect(grid.notices.map((x) => x.kind)).toEqual(['hidden-rows']);
+    // A3:C6 was asked for but row 6 is empty, so it's trimmed -- out loud. Row 5 is hidden;
+    // the title merge sits above A3, so it isn't mentioned.
+    expect(grid.notices.map((x) => x.kind)).toEqual(['range-trimmed', 'hidden-rows']);
+    expect(grid.notices[0]!.message).toBe('Row 6 was empty and was left out.');
   });
 
   it('reads the whole used range from A1 when no range is given', async () => {

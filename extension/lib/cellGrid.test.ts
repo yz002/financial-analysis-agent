@@ -113,6 +113,26 @@ describe('normalizeGrid', () => {
     expect(formatA1Range(g.range)).toBe('A3:B5');
   });
 
+  it('never shrinks a requested range silently', () => {
+    const cells = [
+      [t('Period'), t('Revenue'), EMPTY_CELL],
+      [date('2025-03-31'), n(1), EMPTY_CELL],
+      [EMPTY_CELL, EMPTY_CELL, EMPTY_CELL],
+    ];
+    const notice = (requested: string) =>
+      grid(cells, { requested: parseA1Range(requested)! }).notices.find((x) => x.kind === 'range-trimmed')
+        ?.message;
+
+    expect(notice('A3:C4')).toBe('Column C was empty and was left out.');
+    expect(notice('A3:E4')).toBe('Columns C–E were empty and were left out.');
+    expect(notice('A3:B5')).toBe('Row 5 was empty and was left out.');
+    expect(notice('A3:C7')).toBe(
+      'Column C was empty and was left out. Rows 5–7 were empty and were left out.',
+    );
+    expect(notice('A3:B4')).toBeUndefined(); // nothing trimmed
+    expect(grid(cells).notices.map((x) => x.kind)).not.toContain('range-trimmed'); // no range asked for
+  });
+
   it('returns null when nothing non-empty is left', () => {
     expect(normalizeGrid('P&L', raw([[EMPTY_CELL], []]))).toBeNull();
     expect(normalizeGrid('P&L', raw([]))).toBeNull();

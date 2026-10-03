@@ -122,10 +122,18 @@ export interface RawGrid {
   /** 1-based sheet rows hidden by the user or a filter. */
   hiddenRows: number[];
   merges: A1Range[];
+  /** The range the person asked for, when they gave one -- so trimming it is never silent. */
+  requested?: A1Range;
 }
 
 export interface Notice {
-  kind: 'hidden-rows' | 'merged-cells' | 'formula-errors' | 'text-dates' | 'periods-across-columns';
+  kind:
+    | 'range-trimmed'
+    | 'hidden-rows'
+    | 'merged-cells'
+    | 'formula-errors'
+    | 'text-dates'
+    | 'periods-across-columns';
   message: string;
 }
 
@@ -181,9 +189,30 @@ export function normalizeGrid(sheetName: string, raw: RawGrid): NormalizedGrid |
   return { sheetName, range, rows, notices: buildNotices(rows, range, raw) };
 }
 
+/** "Column H was empty…", "Columns H–J were empty…", and the same for rows; null if untrimmed. */
+function trimMessage(range: A1Range, requested: A1Range): string | null {
+  const parts: string[] = [];
+  const span = (from: string, to: string, one: string, many: string) =>
+    from === to ? `${one} ${from} was` : `${many} ${from}–${to} were`;
+  if (requested.endCol > range.endCol) {
+    parts.push(
+      `${span(columnLetter(range.endCol + 1), columnLetter(requested.endCol), 'Column', 'Columns')} empty and ${requested.endCol > range.endCol + 1 ? 'were' : 'was'} left out.`,
+    );
+  }
+  if (requested.endRow > range.endRow) {
+    parts.push(
+      `${span(String(range.endRow + 1), String(requested.endRow), 'Row', 'Rows')} empty and ${requested.endRow > range.endRow + 1 ? 'were' : 'was'} left out.`,
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
 function buildNotices(rows: Cell[][], range: A1Range, raw: RawGrid): Notice[] {
   const notices: Notice[] = [];
   const at = (r: number, c: number) => cellAddress(range.startRow + r, range.startCol + c);
+
+  const trimmed = raw.requested ? trimMessage(range, raw.requested) : null;
+  if (trimmed) notices.push({ kind: 'range-trimmed', message: trimmed });
 
   const hidden = raw.hiddenRows.filter((r) => r >= range.startRow && r <= range.endRow);
   if (hidden.length > 0) {

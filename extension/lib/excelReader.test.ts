@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import { formatA1Range, parseA1Range, precheckGrid } from './cellGrid';
@@ -105,6 +106,61 @@ describe('readWorksheet', () => {
 
   it('refuses a sheet that no longer exists', () => {
     expect(() => readWorksheet(XLSX, syntheticWorkbook(), 'Renamed', null)).toThrow(ExcelFileError);
+  });
+});
+
+describe('the real Excel-authored fixture (FA Spike Test.xlsx, synthetic data)', () => {
+  // Saved by Excel for the web, so number formats, cached formula results, the hidden row and
+  // the error cell are exactly what Excel writes -- not what SheetJS writes.
+  const bytes = readFileSync(new URL('./fixtures/fa-spike-test.xlsx', import.meta.url));
+  const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const raw = XLSX.read(data, { type: 'array', cellNF: true, cellFormula: true }).Sheets['P&L']!;
+
+  it('lists the sheets in workbook order', () => {
+    expect(workbookSheetNames(XLSX, data)).toEqual(['Notes', 'P&L']);
+  });
+
+  it("sends Excel's built-in Short Date (numFmt 14) as ISO", () => {
+    expect((XLSX.SSF as { get_table(): Record<number, string> }).get_table()[14]).toBe('m/d/yy');
+    expect((raw.A4 as XLSX.CellObject).z).toBe('m/d/yy');
+    const grid = readWorksheet(XLSX, data, 'P&L', parseA1Range('A3:H7'))!;
+    expect(grid.rows.slice(1).map((r) => r[0]!.value)).toEqual([
+      '2025-03-31',
+      '2025-06-30',
+      '2025-09-30',
+      '2025-12-31',
+    ]);
+    expect(grid.rows[1]![0]!.display).toBe('3/31/25'); // SheetJS's rendering; Excel shows 3/31/2025
+    expect(grid.rows[1]![6]!.value).toBe('2025-04-28'); // the custom d-mmm-yy column
+  });
+
+  it('sends the cached results of formula cells, at full precision', () => {
+    expect((raw.D4 as XLSX.CellObject).f).toBe('B4-C4');
+    expect((raw.E5 as XLSX.CellObject).f).toBe('D5/B5');
+    const grid = readWorksheet(XLSX, data, 'P&L', parseA1Range('A3:H7'))!;
+    expect(grid.rows.map((r) => r[3]!.value)).toEqual(['Gross Profit', '770000', '805000', '750000', '880000']);
+    expect(grid.rows.map((r) => r[4]!.value)).toEqual([
+      'Gross Margin',
+      '0.616',
+      '0.6145038167938931',
+      '0.5859375',
+      '0.6197183098591549',
+    ]);
+    expect(grid.rows[2]![4]!.display).toBe('61.5%');
+  });
+
+  it('sends the parenthesized negative as -45000', () => {
+    const grid = readWorksheet(XLSX, data, 'P&L', parseA1Range('A3:H7'))!;
+    expect(grid.rows[3]![5]).toMatchObject({ kind: 'number', value: '-45000', display: '($45,000)' });
+  });
+
+  it('notes the hidden row, the #DIV/0! cell, and the empty columns trimmed from a wider range', () => {
+    const grid = readWorksheet(XLSX, data, 'P&L', parseA1Range('A3:J7'))!;
+    expect(formatA1Range(grid.range)).toBe('A3:H7');
+    const byKind = Object.fromEntries(grid.notices.map((x) => [x.kind, x.message]));
+    expect(byKind['range-trimmed']).toBe('Columns I–J were empty and were left out.');
+    expect(byKind['hidden-rows']).toBe('A hidden row is included (row 6).');
+    expect(byKind['formula-errors']).toContain('H4');
   });
 });
 
