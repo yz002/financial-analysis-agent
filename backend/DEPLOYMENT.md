@@ -79,3 +79,17 @@ the **production** database (`fin_agent_db`). As a result:
 
 A separate dev/test database, with its own `DATABASE_URL` and `BYO_KEY_ENCRYPTION_KEY` in
 `backend/.env`, is needed **before real users**.
+
+## Backlog: CI coverage and dependency audit (review in Phase D session 7)
+
+- **CI runs only the root `pytest` suite.** `.github/workflows/tests.yml` installs
+  `requirements-lock.txt`, seeds the EDGAR cache and runs `pytest` from the repo root. It
+  doesn't run these, so a push to `main` (which deploys) isn't gated on them:
+  - the backend suite (`backend/tests/`), which also needs a database (see the risk above);
+  - the extension's `npm run compile` and `npm test`.
+  Today they're run by hand before each push.
+- **`npm audit` in `extension/` reports 5 high-severity findings, all in dev tooling.** They
+  all come through `web-ext` (via `addons-linter`/`image-size` and
+  `@devicefarmer/adbkit`/`node-forge`), which is used only for running and packaging builds. None
+  is in code the extension ships. SheetJS (`xlsx` 0.20.3, from the `cdn.sheetjs.com` tarball)
+  has no findings. Re-check, and update `web-ext`, in session 7.

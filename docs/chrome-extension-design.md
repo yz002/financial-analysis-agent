@@ -385,6 +385,22 @@ a separate app account, as expected with no account linking.)
   rows, blank rows and footnotes break `rows_to_raw_csv`'s header-row checks.
 - **Freshness of Sheets data wasn't tested.** The Sheets API reads the live document.)
 
+(Amended Phase D session 3b (live-verified, local and production):
+- **One read call replaces steps 2–3's `values.get`.** `spreadsheets.get` with `ranges=` and a
+  grid-data field mask returns each cell's raw value, displayed text and number-format type
+  together, plus the range's origin, hidden rows and merges (§5 says how cells are encoded).
+  The sheet list for the selector still comes from `fields=sheets.properties(sheetId,title)`.
+- **Sheet selector and range field.** The selector defaults to the live `gid` sheet. A `range=`
+  link pre-fills the range field only when its `gid` matches a sheet. **Any sheet switch clears
+  the range field**, whether the range was pre-filled or typed: a range belongs to its sheet.
+  An empty range field means the sheet's whole used range.
+- **A requested range is never shrunk silently.** Trailing empty rows and columns are trimmed
+  (only trailing ones, so every cell keeps its address), and the preview says what was left
+  out, for example "Column H was empty and was left out." Confirmed live on `A3:J7`.
+- **Freshness.** A committed edit (after Enter) shows up on the very next read, including
+  formulas recalculated from it. An unfinished edit (still typing, Enter not pressed) isn't
+  visible. People need to press Enter before reading; §10 item 9.)
+
 1. Read the active tab's URL (`chrome.tabs.query({active:true,currentWindow:true})`). Extract
    `spreadsheetId` (the path segment after `/d/`) and `gid` (the `#gid=N` fragment — Sheets'
    internal numeric ID for whichever tab was open when the URL was captured).
@@ -484,9 +500,76 @@ editing session. Instead:
    `lastModifiedDateTime` about 24s later and showed up in the download within 90s. A sheet
    rename took several minutes.
 
+(Amended Phase D session 3b (live-verified, local and production): how B2 is actually built.
+- **Step 1 requests the whole DriveItem, with no `$select`.** The first 3b build sent
+  `?$select=id,name,size,lastModifiedDateTime,eTag,@microsoft.graph.downloadUrl`. Graph
+  returned the item **without** `@microsoft.graph.downloadUrl`, on both URL shapes. The spike's
+  working request (step 1 above, as written) used `select=` **without the `$`**. That isn't a
+  query option on Graph v1.0, so the spike was really getting the whole item, which includes
+  the download URL by default. That part is inferred: what was observed is that `$select`
+  dropped the URL and the whole item carries it. Live result with the whole item: driveItem
+  200, then the download from `download.aspx` on `my.microsoftpersonalcontent.com`, on both
+  URL shapes.
+- **Fallback: `/content`.** If the item still has no download URL, the extension requests
+  `.../driveItem/content` (or `/drives/{d}/items/{i}/content`) with the token and lets `fetch`
+  follow the 302. The CORS concern in step 2 doesn't apply to an extension page whose host
+  permissions cover both hops (`graph.microsoft.com`, `my.microsoftpersonalcontent.com`). From
+  Chrome 119, `fetch` drops `Authorization` on a cross-origin redirect, so the token never
+  reaches the download host. The manifest therefore sets **`minimum_chrome_version: "119"`**,
+  which is also above the side panel's 114 floor. The fallback is unit-tested, but it didn't
+  run live, because the primary path worked.
+- **Neither URL is kept.** The download URL and the redirect target are never logged, stored
+  or shown. Only the workbook bytes stay in panel memory, so switching sheets re-parses them
+  without downloading again (confirmed in the Network tab).
+- **SheetJS ships with the extension.** It's pinned at install time to the `cdn.sheetjs.com`
+  0.20.3 tarball, because MV3 forbids loading remote code at runtime. It's loaded with a
+  dynamic `import()` as a separate ~492 kB chunk, only when an Excel file is read (confirmed
+  live). Dates use `SSF.parse_date_code` with the workbook's 1900/1904 setting, and hidden rows
+  need `cellStyles: true`.
+- **Save lag (step 4).** Twice in the 3b live tests, edits took about **2 minutes** to reach the
+  downloaded file. The "data as of last save" line and its "last minute or two" note are what
+  tell people about it.)
+
 ---
 
 ## 5. Data format contract compliance — both APIs' real response shapes
+
+(Amended Phase D session 3b (live-verified, local and production): **both open questions below
+are closed**, and the contract was amended to match (`backend/EXTENSION_INTEGRATION.md` §6). The
+Sheets `FORMATTED_VALUE` bullet and the Excel `cell.w` approach below are superseded.
+- **Q1, dates: converted to ISO-8601 in the extension, on both platforms.** Display strings
+  were unsafe: the backend parses `01/02/2025` month-first, so a non-US date would silently
+  become the wrong date. Mixed formats in one column dropped rows, and SheetJS renders Excel's
+  Short Date as `3/31/25`.
+  - Google: a cell whose format type is `DATE`/`DATE_TIME` is converted from its serial
+    (counted from 1899-12-30, in UTC).
+  - Excel: a numeric cell whose number format is a date format is converted with
+    `SSF.parse_date_code`, which honors the 1900/1904 setting and uses no JS `Date`.
+  - A date with a time is sent as `YYYY-MM-DDTHH:MM:SS`.
+  - Text that only looks like a date is sent as shown, and the preview names those cells.
+  - Live: Excel's built-in Short Date (numFmt 14) and Google dates both arrived as
+    `2025-03-31`.
+- **Q2, numbers: the underlying value, sent as `String(value)`** (plain decimal, with exponent
+  form at the extremes such as `1e+21`, which the backend parses).
+  - Display strings can hide scale (`#,##0,` shows 1,250,000 as `1,250`) and round.
+    `61.5%` doesn't parse at all.
+  - Live: `0.6145038167938931` (shown as `61.5%`), `1250000` (shown as `$1,250,000`), and
+    `-45000` (shown as `($45,000)`), on both platforms. Formula cells send their cached
+    results.
+- **Google's numeric rule** (live finding): plain, unformatted numbers have **no**
+  `numberFormat` at all, and their `formattedValue` is truncated (`0.6145038168`).
+  - So a cell is numeric when `effectiveValue.numberValue` is present and the format type
+    isn't `DATE`/`DATE_TIME`/`TIME`.
+  - `NUMBER`/`CURRENCY`/`PERCENT` are never consulted. The format type decides only
+    `DATE`/`DATE_TIME` (sent as ISO) and `TIME` (sent as shown).
+  - Text, booleans and error literals are sent as shown.
+- **The preview shows exactly what's sent**, labelled with the sheet's row numbers and column
+  letters. Each cell's tooltip gives the address and the displayed value, for example
+  `B4 — shown as $1,250,000`. Notices name the cells concerned: hidden rows, merges, formula
+  errors, date-looking text, periods across columns, and a trimmed range.
+- **Shape:** both readers pad ragged rows and trim only *trailing* empty rows and columns, so
+  the rows sent are one contiguous rectangle. That rectangle's `source.range` lets the backend
+  cite figures as cells, e.g. `'P&L'!B4`.)
 
 `sheets-backend-design.md` §1's contract is unchanged and non-negotiable: `POST /v1/csv/parse`
 needs `rows` as a list of list of **display strings** — dates included — never a raw typed value
@@ -673,7 +756,11 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
      - `chrome.storage.session` token storage, cleared on sign-out, revoke-all and `401`.
      - Manifest host-permission updates (§1a).
      - The widened click rule (§6 step 5).
-   - **3b. File/range adapters and range UI.**
+   - **3b. File/range adapters and range UI.** *(Done. Live-tested locally and against
+     production on Google Sheets and on Excel through both personal URL shapes. It ends at a
+     successful `/v1/csv/parse` with a summary. How it was built is recorded in the 3b
+     amendments to §4 and §5 and in `EXTENSION_INTEGRATION.md` §6. The open items it left
+     are §10 items 6–9; it also settled item 4.)*
      - Sheets: URL parse (live `gid`, `range=` pre-fill), then `spreadsheets.get`, then
        `spreadsheets.values.get`.
      - Excel: `/shares`, then item metadata, then `downloadUrl` fetch, then SheetJS 0.20.3
@@ -701,9 +788,10 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
 
 ---
 
-## 10. Open items (from Phase D session 3a)
+## 10. Open items (from Phase D sessions 3a and 3b)
 
-Recorded so they aren't rediscovered later. None blocks 3b.
+Recorded so they aren't rediscovered later. Items 1–5 come from 3a, and none of them blocked 3b.
+Items 6–9 come from 3b.
 
 1. **Verify Microsoft identity with a validated ID token, not a Graph access token.** Today
    `/v1/auth/exchange` verifies Microsoft sign-in by calling Graph `/me` with an access token.
@@ -725,10 +813,38 @@ Recorded so they aren't rediscovered later. None blocks 3b.
    accounts will hit "can't open this file", and then the chooser, each time they switch.
    Keying the remembered account by spreadsheet/drive item would let each file re-authenticate
    silently as the account that last opened it.
+   - *Decided in 3b: still one data account per provider.* Per-file storage would need three
+     things:
+     - a key from the URL, since Graph's item id is only known after a token is obtained;
+     - a token cache keyed by provider and email;
+     - a capped list of opened file ids in `chrome.storage.local`.
+   - That list is a disk-backed history of which files the person opened. Today the friction
+     is one account chooser when switching accounts, which is recoverable. Revisit in
+     session 7 only if live use shows it actually happens.
 5. **Google "Testing" publishing mode limits data access to listed test users.** The live test
    needed a second Google account added as a test user before it could grant Sheets access.
    `spreadsheets.readonly` is a sensitive scope, so **Google's OAuth app verification is needed
    before public launch**. Until then, only listed test users can connect Sheets.
+6. **A mapped numeric cell that can't be parsed becomes "no value" silently (session 4).**
+   - `normalize`'s numeric cleaner turns cells like these into `None` without a warning:
+     - `61.5%` typed as text;
+     - `#DIV/0!`;
+     - `€1,250`;
+     - `1 250 000`.
+   - The read panel already flags error cells, but the confirm step should warn when a cell
+     in a *mapped* column comes back empty after parsing.
+7. **Layouts with periods across columns aren't supported.** P&L sheets often put the dates in
+   the header row and the line items down the rows. `normalize` needs one period per row. The
+   preview warns when the header looks like dates, but nothing transposes the grid. If
+   transposing is added, `source` needs an orientation flag so cell citations stay right.
+8. **Units and scale aren't captured anywhere.** A title row saying "in thousands" or "(USD)"
+   is lost. Sending underlying values fixes display scaling (`#,##0,`), but not a sheet whose
+   numbers were *typed* in thousands. A typed `1,250` meaning $1.25M is stored as 1250. This
+   needs unit metadata on the source or the mapping.
+9. **Google mid-edit freshness: "press Enter before reading."** A cell still being typed into
+   isn't visible to the API. Committed edits are immediate, including recalculated formulas.
+   The panel doesn't say this yet. A short hint near Preview (session 7 polish) would cover
+   it.
 
 Related, already tracked elsewhere: live-testing against the local backend writes to the shared
 production database, because there's no separate dev/test database (`backend/DEPLOYMENT.md`,
