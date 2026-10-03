@@ -9,7 +9,7 @@ import {
   type Cell,
   type NormalizedGrid,
 } from './cellGrid';
-import { fetchDriveItem, type MicrosoftTab } from './connectData';
+import { driveItemRequest, fetchDriveItem, type MicrosoftTab } from './connectData';
 
 /**
  * Excel reader (Phase D session 3b, chrome-extension-design.md SS4 "download + parse (B2)").
@@ -47,10 +47,17 @@ export interface ExcelFileMeta {
   name: string;
   size: number;
   lastModified: string | null;
-  /** Preauthenticated: a credential. Never logged, stored or shown. */
-  downloadUrl: string;
+  /** Preauthenticated: a credential. Never logged, stored or shown. Null when Graph left it out. */
+  downloadUrl: string | null;
 }
 
+/**
+ * The whole DriveItem, deliberately with no `$select`. The session 3b live test found that
+ * `?$select=...,@microsoft.graph.downloadUrl` returns the item WITHOUT the download URL, on
+ * both URL shapes. The session 3a spike, which did get it, sent `?select=...` with no `$`,
+ * which Graph v1.0 doesn't treat as a query option, so the spike was really fetching the
+ * whole item. That's what's requested here.
+ */
 export async function fetchExcelFileMeta(
   accessToken: string,
   tab: MicrosoftTab,
@@ -60,12 +67,12 @@ export async function fetchExcelFileMeta(
     size?: number;
     lastModifiedDateTime?: string;
     '@microsoft.graph.downloadUrl'?: string;
-  }>(accessToken, tab, 'id,name,size,lastModifiedDateTime,eTag,@microsoft.graph.downloadUrl');
+  }>(accessToken, tab, null);
   return {
     name: json.name ?? '(unnamed file)',
     size: json.size ?? 0,
     lastModified: json.lastModifiedDateTime ?? null,
-    downloadUrl: json['@microsoft.graph.downloadUrl'] ?? '',
+    downloadUrl: json['@microsoft.graph.downloadUrl'] ?? null,
   };
 }
 
@@ -78,13 +85,32 @@ export function excelFileRefusal(meta: ExcelFileMeta): string | null {
   if (meta.size > MAX_EXCEL_FILE_BYTES) {
     return `"${meta.name}" is ${(meta.size / (1024 * 1024)).toFixed(1)} MB; files over 10 MB can't be read.`;
   }
-  if (!meta.downloadUrl) return `"${meta.name}" can't be downloaded with this account's access.`;
   return null;
 }
 
-export async function downloadWorkbook(meta: ExcelFileMeta): Promise<ArrayBuffer> {
-  // No Authorization header: the URL itself carries the access (Graph's documented JS path).
-  const response = await fetch(meta.downloadUrl, { credentials: 'omit' });
+/**
+ * Downloads the workbook bytes.
+ * - Primary: the item's preauthenticated downloadUrl, with no Authorization header (the URL
+ *   itself carries the access).
+ * - Fallback, when the metadata had no downloadUrl: GET .../content with the token. Graph
+ *   answers 302 to the same kind of preauthenticated URL, and fetch follows it. Per the Fetch
+ *   standard a cross-origin redirect drops the Authorization header, so the token isn't sent
+ *   to the download host. The extension's host permissions (graph.microsoft.com and
+ *   my.microsoftpersonalcontent.com) exempt both hops from CORS. The redirect target is never
+ *   read, logged or kept.
+ */
+export async function downloadWorkbook(
+  meta: ExcelFileMeta,
+  accessToken: string,
+  tab: MicrosoftTab,
+): Promise<ArrayBuffer> {
+  let response: Response;
+  if (meta.downloadUrl) {
+    response = await fetch(meta.downloadUrl, { credentials: 'omit' });
+  } else {
+    const { url, headers } = driveItemRequest(accessToken, tab, '/content');
+    response = await fetch(url, { headers, credentials: 'omit', redirect: 'follow' });
+  }
   if (!response.ok) {
     throw new ExcelFileError(`Couldn't download "${meta.name}" (${response.status}). Try again.`);
   }

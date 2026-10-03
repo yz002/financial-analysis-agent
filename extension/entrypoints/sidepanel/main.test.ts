@@ -646,13 +646,14 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     expect(el<HTMLInputElement>('#range-input').value).toBe('A3:C4');
     expect(el('#file-as-of').textContent).toBe('');
 
-    // The link's range belongs to its own sheet only.
+    // A range belongs to its sheet: any switch clears it, pre-filled or typed.
     el<HTMLSelectElement>('#sheet-select').value = 'Notes';
     el('#sheet-select').dispatchEvent(new Event('change'));
     expect(el<HTMLInputElement>('#range-input').value).toBe('');
+    el<HTMLInputElement>('#range-input').value = 'B2:D9';
     el<HTMLSelectElement>('#sheet-select').value = 'P&L';
     el('#sheet-select').dispatchEvent(new Event('change'));
-    expect(el<HTMLInputElement>('#range-input').value).toBe('A3:C4');
+    expect(el<HTMLInputElement>('#range-input').value).toBe('');
   });
 
   it('an Excel file shows "data as of last save"', async () => {
@@ -695,7 +696,11 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     expect(file.read).toHaveBeenCalledWith('P&L', { startRow: 3, startCol: 0, endRow: 4, endCol: 2 }, 'ya29.t');
     const cells = [...el('#preview-table').querySelectorAll('td')];
     expect(cells.map((c) => c.textContent)).toEqual(['2025-03-31', '1250000', '0.6145038167938931']);
-    expect(cells[1]!.title).toBe('B4 shows "$1,250,000"');
+    expect(cells.map((c) => c.title)).toEqual([
+      'A4 — shown as 3/31/2025',
+      'B4 — shown as $1,250,000',
+      'C4 — shown as 61.5%',
+    ]);
     expect(el('#preview-caption').textContent).toBe("'P&L'!A3:C4 · 1 data row × 3 columns");
     expect(isHidden('#send-data')).toBe(false);
   });

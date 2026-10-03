@@ -157,8 +157,8 @@ function headerCell(text: string, className?: string): HTMLTableCellElement {
 
 /**
  * Exactly what will be sent, labelled with the sheet's own row numbers and column letters so
- * each value can be checked against its cell. The spreadsheet's displayed text, when it
- * differs, is in the cell's tooltip.
+ * each value can be checked against its cell. Each cell's tooltip gives its address and what
+ * the spreadsheet shows ("C4 — shown as 0.6145038168").
  */
 function renderPreview(grid: NormalizedGrid): void {
   previewGrid = grid;
@@ -175,10 +175,8 @@ function renderPreview(grid: NormalizedGrid): void {
     row.forEach((cell, c) => {
       const td = r === 0 ? headerCell(cell.value) : document.createElement('td');
       td.textContent = cell.value;
-      td.title =
-        cell.display && cell.display !== cell.value
-          ? `${cellAddress(range.startRow + r, range.startCol + c)} shows "${cell.display}"`
-          : cellAddress(range.startRow + r, range.startCol + c);
+      const address = cellAddress(range.startRow + r, range.startCol + c);
+      td.title = cell.display ? `${address} — shown as ${cell.display}` : address;
       tr.append(td);
     });
     return tr;
@@ -606,11 +604,8 @@ sendDataButton?.addEventListener('click', () => {
   void handleSendData();
 });
 sheetSelect?.addEventListener('change', () => {
-  // A range= link only applies to the sheet it was copied from.
-  if (rangeInput && connectedFile) {
-    rangeInput.value =
-      sheetSelect.value === connectedFile.defaultSheet ? (connectedFile.defaultRange ?? '') : '';
-  }
+  // A range belongs to the sheet it was entered or linked for, so any sheet switch clears it.
+  if (rangeInput) rangeInput.value = '';
   clearPreview();
 });
 rangeInput?.addEventListener('input', () => {

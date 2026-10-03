@@ -131,7 +131,10 @@ describe('Graph metadata, refusal and download', () => {
     downloadUrl: 'https://my.microsoftpersonalcontent.com/download?token=secret',
   };
 
-  it('selects the download URL and modified time, for both URL shapes', async () => {
+  const DRIVE_TAB = { kind: 'microsoft' as const, driveId: 'D', itemId: 'D!s1' };
+  const SHARES_TAB = { kind: 'microsoft' as const, url: 'https://onedrive.live.com/personal/x/doc.aspx' };
+
+  it('requests the whole item (no $select, which drops the download URL), for both URL shapes', async () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -145,36 +148,60 @@ describe('Graph metadata, refusal and download', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      fetchExcelFileMeta('tok', { kind: 'microsoft', driveId: 'D', itemId: 'D!s1' }),
-    ).resolves.toEqual(meta);
-    await fetchExcelFileMeta('tok', {
-      kind: 'microsoft',
-      url: 'https://onedrive.live.com/personal/x/doc.aspx',
-    });
+    await expect(fetchExcelFileMeta('tok', DRIVE_TAB)).resolves.toEqual(meta);
+    await fetchExcelFileMeta('tok', SHARES_TAB);
 
     const urls = fetchMock.mock.calls.map((call) => (call as unknown as [string])[0]);
-    expect(urls[0]).toBe(
-      'https://graph.microsoft.com/v1.0/drives/D/items/D!s1?$select=id,name,size,lastModifiedDateTime,eTag,@microsoft.graph.downloadUrl',
+    expect(urls[0]).toBe('https://graph.microsoft.com/v1.0/drives/D/items/D!s1');
+    expect(urls[1]).toMatch(/^https:\/\/graph\.microsoft\.com\/v1\.0\/shares\/u![^?]+\/driveItem$/);
+  });
+
+  it('reports a missing download URL as null rather than refusing the file', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ name: 'FA Spike Test.xlsx', size: 20_000 }))),
     );
-    expect(urls[1]).toMatch(
-      /^https:\/\/graph\.microsoft\.com\/v1\.0\/shares\/u!.+\/driveItem\?\$select=id,name,size/,
-    );
+    const noUrl = await fetchExcelFileMeta('tok', DRIVE_TAB);
+    expect(noUrl.downloadUrl).toBeNull();
+    expect(excelFileRefusal(noUrl)).toBeNull();
   });
 
   it('refuses non-workbooks and files over 10 MB before downloading', () => {
     expect(excelFileRefusal(meta)).toBeNull();
     expect(excelFileRefusal({ ...meta, name: 'notes.docx' })).toMatch(/isn't an Excel workbook/);
     expect(excelFileRefusal({ ...meta, size: MAX_EXCEL_FILE_BYTES + 1 })).toMatch(/over 10 MB/);
-    expect(excelFileRefusal({ ...meta, downloadUrl: '' })).toMatch(/can't be downloaded/);
   });
 
-  it('downloads without credentials or an Authorization header', async () => {
+  it('primary path: downloads from the download URL without credentials or an Authorization header', async () => {
     const fetchMock = vi.fn(async () => new Response(new Uint8Array([1, 2, 3])));
     vi.stubGlobal('fetch', fetchMock);
-    const data = await downloadWorkbook(meta);
+    const data = await downloadWorkbook(meta, 'tok', DRIVE_TAB);
     expect(data.byteLength).toBe(3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(meta.downloadUrl, { credentials: 'omit' });
+  });
+
+  it.each([
+    [DRIVE_TAB, 'https://graph.microsoft.com/v1.0/drives/D/items/D!s1/content'],
+    [SHARES_TAB, /^https:\/\/graph\.microsoft\.com\/v1\.0\/shares\/u![^?]+\/driveItem\/content$/],
+  ])('fallback: with no download URL, GETs .../content with the token and follows the redirect (%#)', async (tab, expected) => {
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([1, 2, 3, 4])));
+    vi.stubGlobal('fetch', fetchMock);
+    const data = await downloadWorkbook({ ...meta, downloadUrl: null }, 'tok', tab);
+    expect(data.byteLength).toBe(4);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    if (typeof expected === 'string') expect(url).toBe(expected);
+    else expect(url).toMatch(expected);
+    expect(init.redirect).toBe('follow');
+    expect(init.credentials).toBe('omit');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok');
+  });
+
+  it('fallback: a failed /content download is reported plainly', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })));
+    await expect(downloadWorkbook({ ...meta, downloadUrl: null }, 'tok', DRIVE_TAB)).rejects.toThrow(
+      `Couldn't download "FA Spike Test.xlsx" (404). Try again.`,
+    );
   });
 
   it('refuses a download that turns out to be over the cap', async () => {
@@ -182,12 +209,12 @@ describe('Graph metadata, refusal and download', () => {
       'fetch',
       vi.fn(async () => new Response(new Uint8Array(MAX_EXCEL_FILE_BYTES + 1))),
     );
-    await expect(downloadWorkbook(meta)).rejects.toThrow(/over 10 MB/);
+    await expect(downloadWorkbook(meta, 'tok', DRIVE_TAB)).rejects.toThrow(/over 10 MB/);
   });
 
   it('reports a failed download without the URL', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 403 })));
-    const error = await downloadWorkbook(meta).then(
+    const error = await downloadWorkbook(meta, 'tok', DRIVE_TAB).then(
       () => null,
       (e: unknown) => e as Error,
     );

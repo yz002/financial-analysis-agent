@@ -68,7 +68,7 @@ export async function connectExcelFile(
   if (refusal) throw new ExcelFileError(refusal);
   // The download URL is used once, here, and not kept: only the bytes stay in memory, so a
   // different sheet or range is re-parsed without downloading again.
-  const data = await downloadWorkbook(meta);
+  const data = await downloadWorkbook(meta, accessToken, tab);
   const XLSX = await loadXlsx();
   const sheets = workbookSheetNames(XLSX, data);
   return {

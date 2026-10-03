@@ -112,20 +112,37 @@ export async function fetchExcelFileName(accessToken: string, tab: MicrosoftTab)
   return json.name ?? '(unnamed file)';
 }
 
-/** The open Excel file's DriveItem, with just the `select`ed properties (see above). */
+/**
+ * The Graph request for the open Excel file's DriveItem (see above), or for one of its
+ * sub-resources (`suffix`, e.g. "/content").
+ */
+export function driveItemRequest(
+  accessToken: string,
+  tab: MicrosoftTab,
+  suffix = '',
+): { url: string; headers: Record<string, string> } {
+  const url =
+    'url' in tab
+      ? `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tab.url)}/driveItem${suffix}`
+      : `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(tab.driveId)}/items/${encodeURIComponent(tab.itemId)}${suffix}`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+  if ('url' in tab) headers.Prefer = 'redeemSharingLinkIfNecessary';
+  return { url, headers };
+}
+
+/**
+ * The open Excel file's DriveItem: just the `select`ed properties, or the whole item when
+ * `select` is null. The whole item is what carries @microsoft.graph.downloadUrl -- a
+ * `$select` that names it came back without it in the session 3b live test (see
+ * excelReader.ts's fetchExcelFileMeta).
+ */
 export async function fetchDriveItem<T>(
   accessToken: string,
   tab: MicrosoftTab,
-  select: string,
+  select: string | null,
 ): Promise<T> {
-  const url =
-    'url' in tab
-      ? `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(tab.url)}/driveItem?$select=${select}`
-      : `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(tab.driveId)}/items/${encodeURIComponent(tab.itemId)}?$select=${select}`;
-  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
-  if ('url' in tab) headers.Prefer = 'redeemSharingLinkIfNecessary';
-
-  const response = await fetch(url, { headers });
+  const { url, headers } = driveItemRequest(accessToken, tab);
+  const response = await fetch(select === null ? url : `${url}?$select=${select}`, { headers });
   if (!response.ok) throw new ProviderApiError(response.status);
   return (await response.json()) as T;
 }
