@@ -909,6 +909,15 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
       confirmed mapping".
     - Strip the file extension from the pre-filled business name.
     - A restored card has no actions. Add "Read another range".
+    - Add a test that changing the sheet hides Send and clears the preview. Only the range
+      edit is tested today.
+    - The preview shows only the first 10 rows. Consider a "Show all rows" toggle.
+    - The disabled mint button looks murky in dark mode, because it's opacity-based. Consider
+      a dedicated disabled color token.
+    - Optional: a manual light/dark/system theme switch. Today the panel follows the system
+      setting only.
+    - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
+      that raises the owner's question cap for session 5 live testing, if it was created.
 11. **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
     `statement_attrs` exist in production, predating the current confirm code. One belongs to
     account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
