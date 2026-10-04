@@ -1,7 +1,7 @@
 body {
   margin: 0;
   background: var(--color-canvas);
-  font-family: var(--font-family);
+  font-family: var(--font-sans);
   color: var(--color-ink);
 }
 
@@ -16,8 +16,8 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
-  padding: var(--space-xl);
+  gap: var(--space-sm);
+  padding: var(--space-lg);
 }
 
 h1 {
@@ -25,7 +25,6 @@ h1 {
   font-size: var(--text-heading-size);
   font-weight: var(--text-heading-weight);
   line-height: var(--text-heading-line-height);
-  letter-spacing: var(--text-heading-letter-spacing);
   color: var(--color-ink);
 }
 
@@ -34,7 +33,6 @@ h1 {
   font-size: var(--text-body-size);
   font-weight: var(--text-body-weight);
   line-height: var(--text-body-line-height);
-  letter-spacing: var(--text-body-letter-spacing);
   color: var(--color-ink-secondary);
 }
 
@@ -42,20 +40,19 @@ h1 {
 #signed-in-view {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: var(--space-sm);
 }
 
 #status-message {
   font-size: var(--text-meta-size);
   font-weight: var(--text-meta-weight);
   line-height: var(--text-meta-line-height);
-  letter-spacing: var(--text-meta-letter-spacing);
   color: var(--color-ink-mute);
   min-height: 1em;
 }
 
 #status-message.status-message--error {
-  color: var(--color-error);
+  color: var(--color-danger);
 }
 
 /* Non-production builds only (main.ts): which backend this build talks to. */
@@ -63,17 +60,22 @@ h1 {
   font-size: var(--text-meta-size);
   font-weight: var(--text-meta-weight);
   line-height: var(--text-meta-line-height);
-  letter-spacing: var(--text-meta-letter-spacing);
   color: var(--color-ink-mute);
 }
 
+/* Cell references and A1 ranges (built by main.ts's refSpan), in mono wherever they appear. */
+.ref {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  color: var(--color-ink);
+}
+
 button {
-  font-family: var(--font-family);
+  font-family: var(--font-sans);
   font-size: var(--text-button-size);
   font-weight: var(--text-button-weight);
   line-height: var(--text-button-line-height);
-  letter-spacing: var(--text-button-letter-spacing);
-  padding: var(--space-sm) var(--space-lg);
+  padding: var(--button-padding);
   border-radius: var(--radius-pill);
   border: 1px solid transparent;
   cursor: pointer;
@@ -84,100 +86,137 @@ button:focus-visible {
   outline-offset: var(--focus-ring-offset);
 }
 
-#signin-google {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-}
-
-#signin-google:hover {
-  background: var(--color-primary-press);
-}
-
-#signin-microsoft,
-#signout,
-#revoke-all {
-  background: var(--color-canvas);
-  color: var(--color-primary);
-  border-color: var(--color-hairline-input);
-}
-
-#signin-microsoft:hover,
-#signout:hover,
-#revoke-all:hover {
-  background: var(--color-canvas-soft);
-}
-
-/* Read panel (Phase D session 3b): sheet + range, preview, send. */
-#read-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-card);
-  background: var(--color-canvas-soft);
-}
-
-#read-panel .field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-#read-panel label,
-#app #file-as-of,
-#app #preview-caption,
-#read-notices {
-  font-size: var(--text-meta-size);
-  font-weight: var(--text-meta-weight);
-  line-height: var(--text-meta-line-height);
-  letter-spacing: var(--text-meta-letter-spacing);
-  color: var(--color-ink-mute);
-}
-
-#read-panel select,
-#read-panel input {
-  font-family: var(--font-family);
-  font-size: var(--text-button-size);
-  color: var(--color-ink);
-  background: var(--color-canvas);
-  padding: var(--space-sm);
-  border: 1px solid var(--color-hairline-input);
-  border-radius: var(--radius-input);
-  min-width: 0;
-}
-
-#read-panel select:focus-visible,
-#read-panel input:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: var(--focus-ring-offset);
-}
-
-#read-range {
-  align-self: flex-start;
-  background: var(--color-canvas);
-  color: var(--color-primary);
-  border-color: var(--color-hairline-input);
-}
-
-#send-data {
-  align-self: flex-start;
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-}
-
-#send-data:hover {
-  background: var(--color-primary-press);
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
+/* Primary actions: accent pill with dark text. */
+#signin-google,
+#send-data,
+#confirm-mapping,
+#confirm-anyway {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+#signin-google:hover:not(:disabled),
+#send-data:hover:not(:disabled),
+#confirm-mapping:hover:not(:disabled),
+#confirm-anyway:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+/* Secondary actions: outline pill with an accent label. */
+#signin-microsoft,
+#connect-data,
+#read-range,
+#reset-mapping,
+#cancel-mapping,
+#ack-back,
+#change-mapping,
+#signout,
+#revoke-all {
+  background: var(--color-canvas);
+  color: var(--color-accent-text);
+  border-color: var(--color-border-input);
+}
+
+#signin-microsoft:hover:not(:disabled),
+#connect-data:hover:not(:disabled),
+#read-range:hover:not(:disabled),
+#reset-mapping:hover:not(:disabled),
+#cancel-mapping:hover:not(:disabled),
+#ack-back:hover:not(:disabled),
+#change-mapping:hover:not(:disabled),
+#signout:hover:not(:disabled),
+#revoke-all:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-accent-text);
+}
+
+/* Cards: read panel (Phase D session 3b), mapping screen and active statement (session 4). */
+#read-panel,
+#mapping-panel,
+#statement-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+}
+
+#mapping-panel h2,
+#statement-card h2 {
+  margin: 0;
+  font-size: var(--text-section-size);
+  font-weight: var(--text-section-weight);
+  color: var(--color-ink);
+}
+
+#read-panel .field,
+#mapping-panel .field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+#read-panel label,
+#app #file-as-of,
+#app #preview-caption,
+#read-notices,
+#mapping-panel label,
+#app #mapping-caption,
+#app #mapping-cadence,
+#mapping-panel .mapping-rationale {
+  font-size: var(--text-meta-size);
+  font-weight: var(--text-meta-weight);
+  line-height: var(--text-meta-line-height);
+  color: var(--color-ink-mute);
+}
+
+#read-panel select,
+#read-panel input,
+#mapping-panel select,
+#mapping-panel input {
+  font-family: var(--font-sans);
+  font-size: var(--text-button-size);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  padding: var(--space-xs);
+  border: 1px solid var(--color-border-input);
+  border-radius: var(--radius-input);
+  min-width: 0;
+}
+
+/* The range box holds an A1 range. */
+#read-panel #range-input {
+  font-family: var(--font-mono);
+}
+
+#mapping-panel select,
+#mapping-panel input {
+  padding: var(--space-xxs) var(--space-xs);
+}
+
+#read-panel select:focus-visible,
+#read-panel input:focus-visible,
+#mapping-panel select:focus-visible,
+#mapping-panel input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+#read-range,
+#send-data {
+  align-self: flex-start;
+}
+
 #read-notices {
   margin: 0;
-  padding-left: var(--space-lg);
+  padding-left: var(--space-md);
   color: var(--color-ink-secondary);
 }
 
@@ -193,7 +232,8 @@ button:disabled {
 
 .table-scroll table {
   border-collapse: collapse;
-  font-size: var(--text-meta-size);
+  font-size: var(--text-mono-size);
+  line-height: var(--text-mono-line-height);
   font-variant-numeric: tabular-nums;
   background: var(--color-canvas);
 }
@@ -204,7 +244,7 @@ button:disabled {
 
 .table-scroll th,
 .table-scroll td {
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-xxs) var(--space-xs);
   border: 1px solid var(--color-hairline);
   text-align: left;
   white-space: nowrap;
@@ -213,75 +253,30 @@ button:disabled {
 
 .table-scroll th {
   font-weight: 500;
-  background: var(--color-canvas-soft);
+  background: var(--color-surface);
+}
+
+/* The preview is the sheet's own cells: all mono, values neutral (never accent- or sign-colored). */
+#preview-table {
+  font-family: var(--font-mono);
 }
 
 /* Row/column labels: the sheet's own addresses, so the preview can be checked cell by cell. */
 .table-scroll th.address {
-  font-weight: var(--text-meta-weight);
+  font-weight: 400;
   color: var(--color-ink-mute);
   text-align: center;
 }
 
-/* Mapping screen and active statement (Phase D session 4). Same card look as the read panel. */
-#mapping-panel,
-#statement-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-card);
-  background: var(--color-canvas-soft);
-}
-
-#mapping-panel h2,
-#statement-card h2 {
-  margin: 0;
-  font-size: var(--text-button-size);
-  font-weight: 500;
-  color: var(--color-ink);
-}
-
-#mapping-panel .field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-#mapping-panel label,
-#app #mapping-caption,
-#app #mapping-cadence,
-#mapping-panel .mapping-rationale,
+/* Mapping table: column names and reasons stay in Inter, sample values are mono. */
 #mapping-panel .mapping-values {
-  font-size: var(--text-meta-size);
-  font-weight: var(--text-meta-weight);
-  line-height: var(--text-meta-line-height);
-  letter-spacing: var(--text-meta-letter-spacing);
-  color: var(--color-ink-mute);
+  font-family: var(--font-mono);
+  color: var(--color-ink);
 }
 
 #mapping-panel .mapping-rationale {
   white-space: normal;
   min-width: 10em;
-}
-
-#mapping-panel select,
-#mapping-panel input {
-  font-family: var(--font-family);
-  font-size: var(--text-button-size);
-  color: var(--color-ink);
-  background: var(--color-canvas);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-hairline-input);
-  border-radius: var(--radius-input);
-  min-width: 0;
-}
-
-#mapping-panel select:focus-visible,
-#mapping-panel input:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring-color);
-  outline-offset: var(--focus-ring-offset);
 }
 
 /* A column that won't be used is shown dimmed, but stays editable. */
@@ -291,7 +286,7 @@ button:disabled {
 }
 
 #mapping-panel tr.mapping-row--conflict .role-select {
-  border-color: var(--color-error);
+  border-color: var(--color-danger);
 }
 
 #mapping-panel .mapping-conflict,
@@ -299,7 +294,8 @@ button:disabled {
 #app #mapping-note {
   margin: 0;
   font-size: var(--text-meta-size);
-  color: var(--color-error);
+  line-height: var(--text-meta-line-height);
+  color: var(--color-danger);
   white-space: normal;
 }
 
@@ -318,49 +314,31 @@ button:disabled {
 #ack-cells,
 #statement-warnings {
   margin: 0;
-  padding-left: var(--space-lg);
+  padding-left: var(--space-md);
 }
 
+/* A caution, not an error: confirming anyway is allowed. */
 #ack-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-sm);
-  border: 1px solid var(--color-error);
-  border-radius: var(--radius-card);
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-input);
   background: var(--color-canvas);
 }
 
 #ack-cells,
 #statement-warnings {
   font-size: var(--text-meta-size);
+  line-height: var(--text-meta-line-height);
   color: var(--color-ink-secondary);
 }
 
 #mapping-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-sm);
-}
-
-#confirm-mapping,
-#confirm-anyway {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-}
-
-#confirm-mapping:hover:not(:disabled),
-#confirm-anyway:hover:not(:disabled) {
-  background: var(--color-primary-press);
-}
-
-#reset-mapping,
-#cancel-mapping,
-#ack-back,
-#change-mapping {
-  background: var(--color-canvas);
-  color: var(--color-primary);
-  border-color: var(--color-hairline-input);
+  gap: var(--space-xs);
 }
 
 #change-mapping,

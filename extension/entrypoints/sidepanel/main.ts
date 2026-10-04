@@ -220,6 +220,15 @@ function showConnectedFile(file: ConnectedFile): void {
   readPanel?.removeAttribute('hidden');
 }
 
+/** A cell reference or A1 range, styled in mono. textContent only: sheet names come from user
+ * files and can hold any characters, so this must never go through innerHTML. */
+function refSpan(text: string): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'ref';
+  span.textContent = text;
+  return span;
+}
+
 function headerCell(text: string, className?: string): HTMLTableCellElement {
   const th = document.createElement('th');
   th.textContent = text;
@@ -257,10 +266,11 @@ function renderPreview(grid: NormalizedGrid): void {
 
   const dataRows = rows.length - 1;
   if (previewCaption) {
-    previewCaption.textContent =
-      `${quoteSheetName(grid.sheetName)}!${formatA1Range(range)} · ${dataRows} data ` +
-      `row${dataRows === 1 ? '' : 's'} × ${width} column${width === 1 ? '' : 's'}` +
-      (dataRows > PREVIEW_DATA_ROWS ? ` · showing the first ${PREVIEW_DATA_ROWS}` : '');
+    previewCaption.replaceChildren(
+      refSpan(rangeLabel(grid)),
+      ` · ${dataRows} data row${dataRows === 1 ? '' : 's'} × ${width} column${width === 1 ? '' : 's'}` +
+        (dataRows > PREVIEW_DATA_ROWS ? ` · showing the first ${PREVIEW_DATA_ROWS}` : ''),
+    );
   }
   readNotices?.replaceChildren(
     ...grid.notices.map((notice) => {
@@ -385,12 +395,14 @@ function renderAcknowledgement(m: MappingSession): void {
       'If you confirm anyway, those periods will have no value for that item.';
   }
   ackCells?.replaceChildren(
-    ...listItems(
-      ack.cells.map(
-        (c) =>
-          `${c.cell ?? `Data row ${c.source_row + 1}`} — “${c.value}” (${roleLabel(c.role)}, ${c.period_end})`,
-      ),
-    ),
+    ...ack.cells.map((c) => {
+      const li = document.createElement('li');
+      li.append(
+        c.cell ? refSpan(c.cell) : `Data row ${c.source_row + 1}`,
+        ` — “${c.value}” (${roleLabel(c.role)}, ${c.period_end})`,
+      );
+      return li;
+    }),
   );
   ackPanel?.removeAttribute('hidden');
   mappingActions?.setAttribute('hidden', '');
@@ -398,9 +410,11 @@ function renderAcknowledgement(m: MappingSession): void {
 
 function showMappingPanel(m: MappingSession): void {
   if (mappingCaption) {
-    mappingCaption.textContent =
-      `${m.file.name} · ${rangeLabel(m.grid)} · ${m.grid.rows.length - 1} data rows. ` +
-      'Choose what each column is. Nothing is used until you confirm.';
+    mappingCaption.replaceChildren(
+      `${m.file.name} · `,
+      refSpan(rangeLabel(m.grid)),
+      ` · ${m.grid.rows.length - 1} data rows. Choose what each column is. Nothing is used until you confirm.`,
+    );
   }
   if (entityNameInput) entityNameInput.value = m.draft.entityName;
   scaleSelect?.replaceChildren(

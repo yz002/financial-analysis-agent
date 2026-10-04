@@ -1081,6 +1081,49 @@ describe('mapping screen (session 4)', () => {
     expect(el('#statement-warnings').textContent).toContain("No value for: 'P&L'!B4 (“#DIV/0!”)");
   });
 
+  it('a sheet or file name that looks like HTML is shown as literal text, never parsed', async () => {
+    const NAME = '<img src=x onerror=alert(1)>';
+    const ref = `'${NAME}'!A3:C4`;
+    const hostileGrid = normalizeGrid(NAME, {
+      originRow: 3,
+      originCol: 0,
+      cells: [
+        [textCell('Period'), textCell('Revenue'), textCell('Margin')],
+        [{ kind: 'date', value: '2025-03-31', display: '3/31/2025' }, numberCell(1250000, '1,250,000'), numberCell(0.5, '50%')],
+      ],
+      hiddenRows: [],
+      merges: [],
+    })!;
+    connectGoogleSheetMock.mockResolvedValue(
+      fakeFile({ name: NAME, sheets: [NAME], defaultSheet: NAME, read: vi.fn(async () => hostileGrid) }),
+    );
+    confirmMappingMock.mockResolvedValue(
+      confirmResponse({
+        confirmed: false, cadence: null, requires_acknowledgement: true, ack_fingerprint: 'fp-1',
+        unparsed_cells: [
+          { cell: `'${NAME}'!B4`, source_row: 0, column: 'Revenue', role: 'revenue', period_end: '2025-03-31', value: NAME },
+        ],
+      }),
+    );
+
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+    expect(el('#preview-caption').textContent).toBe(`${ref} · 1 data row × 3 columns`);
+    expect(el('#preview-caption .ref').textContent).toBe(ref);
+
+    await click('#send-data');
+    expect(el('#mapping-caption').textContent).toContain(`${NAME} · ${ref} · 1 data rows.`);
+    expect(el('#mapping-caption .ref').textContent).toBe(ref);
+
+    choose('#scale-select', 'ones');
+    await click('#confirm-mapping');
+    expect(el('#ack-cells').textContent).toBe(`'${NAME}'!B4 — “${NAME}” (Revenue, 2025-03-31)`);
+    expect(el('#ack-cells .ref').textContent).toBe(`'${NAME}'!B4`);
+
+    expect(document.querySelector('img')).toBeNull();
+  });
+
   it('changing anything after the list is shown drops the acknowledgement', async () => {
     confirmMappingMock.mockResolvedValue(
       confirmResponse({
