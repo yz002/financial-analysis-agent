@@ -49,10 +49,31 @@ const SIDEPANEL_BODY = `
         <p id="preview-caption"></p>
         <table id="preview-table"></table>
         <button id="send-data" type="button" hidden>Send to analysis</button>
-        <div id="parse-summary" hidden>
-          <p id="parse-summary-text"></p>
-          <table id="parse-sample-table"></table>
+      </section>
+      <section id="mapping-panel" hidden>
+        <p id="mapping-caption"></p>
+        <p id="mapping-note"></p>
+        <table id="mapping-table"></table>
+        <input id="entity-name" type="text" />
+        <select id="scale-select"></select>
+        <select id="currency-select"></select>
+        <ul id="mapping-errors"></ul>
+        <div id="ack-panel" hidden>
+          <p id="ack-text"></p>
+          <ul id="ack-cells"></ul>
+          <button id="confirm-anyway" type="button">Confirm anyway</button>
+          <button id="ack-back" type="button">Back to mapping</button>
         </div>
+        <div id="mapping-actions">
+          <button id="confirm-mapping" type="button" disabled>Confirm mapping</button>
+          <button id="reset-mapping" type="button">Reset to suggestion</button>
+          <button id="cancel-mapping" type="button">Back</button>
+        </div>
+      </section>
+      <section id="statement-card" hidden>
+        <p id="statement-summary"></p>
+        <ul id="statement-warnings"></ul>
+        <button id="change-mapping" type="button" hidden>Change mapping</button>
       </section>
       <button id="signout" type="button">Sign out</button>
       <button id="revoke-all" type="button">Sign out everywhere</button>
@@ -75,7 +96,17 @@ const {
   connectGoogleSheetMock,
   connectExcelFileMock,
   parseCsvMock,
+  proposeMappingMock,
+  confirmMappingMock,
+  getActiveStatementMock,
+  setActiveStatementMock,
+  clearActiveStatementMock,
 } = vi.hoisted(() => ({
+  proposeMappingMock: vi.fn(),
+  confirmMappingMock: vi.fn(),
+  getActiveStatementMock: vi.fn(),
+  setActiveStatementMock: vi.fn(),
+  clearActiveStatementMock: vi.fn(),
   clearAllDataAccessMock: vi.fn(),
   forgetDataGrantMock: vi.fn(),
   getDataTokenMock: vi.fn(),
@@ -99,6 +130,9 @@ vi.mock('../../lib/sessionStorage', () => ({
   setStoredSession: setStoredSessionMock,
   clearStoredSession: clearStoredSessionMock,
   onStoredSessionChanged: onStoredSessionChangedMock,
+  getActiveStatement: getActiveStatementMock,
+  setActiveStatement: setActiveStatementMock,
+  clearActiveStatement: clearActiveStatementMock,
 }));
 
 // Keep the real AuthFlowError class (main.ts does `instanceof AuthFlowError`) while
@@ -117,6 +151,8 @@ vi.mock('../../lib/backendApi', async (importOriginal) => {
     logout: logoutMock,
     revokeAllSessions: revokeAllSessionsMock,
     parseCsv: parseCsvMock,
+    proposeMapping: proposeMappingMock,
+    confirmMapping: confirmMappingMock,
   };
 });
 
@@ -191,6 +227,11 @@ beforeEach(() => {
   connectGoogleSheetMock.mockReset();
   connectExcelFileMock.mockReset();
   parseCsvMock.mockReset();
+  proposeMappingMock.mockReset();
+  confirmMappingMock.mockReset();
+  getActiveStatementMock.mockReset().mockResolvedValue(null);
+  setActiveStatementMock.mockReset().mockResolvedValue(undefined);
+  clearActiveStatementMock.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -761,7 +802,7 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     expect(statusText()).toContain("can't open this file");
   });
 
-  it('Send posts the previewed values with the sheet source, then shows the backend summary', async () => {
+  it('Send posts the previewed values with the sheet source, then opens the mapping screen', async () => {
     connectGoogleSheetMock.mockResolvedValue(fakeFile());
     parseCsvMock.mockResolvedValue({
       csv_context_id: 'ctx-123',
@@ -769,6 +810,7 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
       sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']],
       parse_error: null,
     });
+    proposeMappingMock.mockResolvedValue({ proposal: [], note: null });
     await loadSidepanel();
     await clickConnect();
     await click('#read-range');
@@ -783,15 +825,15 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
       filename: 'Q3 P&L — P&L',
       source: { platform: 'google_sheets', sheet_name: 'P&L', range: 'A3:C4', file_name: 'Q3 P&L', modified_at: null },
     });
-    expect(isHidden('#parse-summary')).toBe(false);
-    expect(el('#parse-summary-text').textContent).toContain("Sent 'P&L'!A3:C4: 1 data rows × 3 columns");
-    expect(el('#parse-summary-text').textContent).toContain('ctx-123');
-    expect([...el('#parse-sample-table').querySelectorAll('td')].map((c) => c.textContent)).toEqual([
+    expect(proposeMappingMock).toHaveBeenCalledWith('old-token', 'ctx-123');
+    expect(isHidden('#mapping-panel')).toBe(false);
+    expect(isHidden('#read-panel')).toBe(true);
+    expect(el('#mapping-caption').textContent).toContain("Q3 P&L · 'P&L'!A3:C4 · 1 data rows");
+    expect([...el('#mapping-table').querySelectorAll('td.mapping-values')].map((c) => c.textContent)).toEqual([
       '2025-03-31',
       '1250000',
       '0.6145038167938931',
     ]);
-    expect(isHidden('#send-data')).toBe(true);
   });
 
   it("shows the backend's own refusal as it says it", async () => {
@@ -809,7 +851,8 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     await click('#send-data');
 
     expect(statusText()).toBe("'Q3 P&L — P&L' has 2001 data rows -- the limit is 2000.");
-    expect(isHidden('#parse-summary')).toBe(true);
+    expect(isHidden('#mapping-panel')).toBe(true);
+    expect(proposeMappingMock).not.toHaveBeenCalled();
   });
 
   it('a 401 from Send ends the session', async () => {
@@ -893,5 +936,357 @@ describe('backend label (non-production builds only)', () => {
     expect(document.querySelector('#backend-info')).toBeNull();
     expect(document.body.textContent).not.toContain('Backend:');
     expect(consoleInfo).toHaveBeenCalledWith('[sidepanel] Backend:', 'https://backend.invalid');
+  });
+});
+
+describe('mapping screen (session 4)', () => {
+  const googleToken = { accessToken: 'ya29.t', email: 'data@example.com', scope: '' };
+  const PROPOSAL = [
+    { csv_column: 'Period', proposed_role: 'period_end', rationale: 'ISO dates' },
+    { csv_column: 'Revenue', proposed_role: 'revenue', rationale: 'sales figures' },
+    { csv_column: 'Margin', proposed_role: 'unmapped', rationale: 'a ratio, not a concept' },
+  ];
+
+  function confirmResponse(overrides: Record<string, unknown> = {}) {
+    return {
+      confirmed: true,
+      cadence: 'quarterly',
+      warnings: [],
+      concepts_unavailable: ['net_income'],
+      errors: [],
+      requires_acknowledgement: false,
+      unparsed_cells: [],
+      ack_fingerprint: null,
+      scale: 'thousands',
+      currency: null,
+      ...overrides,
+    };
+  }
+
+  const roleSelect = (column: string) =>
+    el<HTMLSelectElement>(`#mapping-table tr[data-column="${column}"] select`);
+
+  function choose(selector: string | HTMLSelectElement, value: string): void {
+    const select = typeof selector === 'string' ? el<HTMLSelectElement>(selector) : selector;
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
+  }
+
+  async function openMapping(): Promise<void> {
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+    await click('#send-data');
+  }
+
+  beforeEach(() => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    setActiveTabUrl(SHEET_URL);
+    getDataTokenMock.mockResolvedValue(googleToken);
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    parseCsvMock.mockResolvedValue({
+      csv_context_id: 'ctx-123',
+      columns: ['Period', 'Revenue', 'Margin'],
+      sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']],
+      parse_error: null,
+    });
+    proposeMappingMock.mockResolvedValue({ proposal: PROPOSAL, note: null });
+  });
+
+  it('fills roles from the suggestion, but leaves scale unchosen and currency not specified', async () => {
+    await openMapping();
+
+    expect(roleSelect('Period').value).toBe('period_end');
+    expect(roleSelect('Revenue').value).toBe('revenue');
+    expect(roleSelect('Margin').value).toBe('unmapped');
+    expect(el('#mapping-table tr[data-column="Revenue"] .mapping-rationale').textContent).toBe('sales figures');
+    expect(el<HTMLInputElement>('#entity-name').value).toBe('Q3 P&L');
+    expect(el<HTMLSelectElement>('#scale-select').value).toBe('');
+    expect(el<HTMLSelectElement>('#currency-select').value).toBe('');
+    expect(el<HTMLSelectElement>('#currency-select').selectedOptions[0]!.textContent).toBe('Not specified');
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(true);
+    expect(el('#mapping-errors').textContent).toContain('Choose the units the numbers are in.');
+  });
+
+  it('confirms with the scale sent explicitly, stores the active statement and shows it', async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await openMapping();
+
+    choose('#scale-select', 'thousands');
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(false);
+    await click('#confirm-mapping');
+
+    expect(confirmMappingMock).toHaveBeenCalledWith('old-token', 'ctx-123', {
+      mapping: { Period: 'period_end', Revenue: 'revenue', Margin: 'unmapped' },
+      entity_name: 'Q3 P&L',
+      scale: 'thousands',
+      currency: null,
+      accept_unparsed_cells: false,
+      ack_fingerprint: null,
+    });
+    expect(setActiveStatementMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        csvContextId: 'ctx-123',
+        entityName: 'Q3 P&L',
+        label: "Q3 P&L · 'P&L'!A3:C4",
+        cadence: 'quarterly',
+        scale: 'thousands',
+        currency: null,
+      }),
+    );
+    expect(isHidden('#mapping-panel')).toBe(true);
+    expect(isHidden('#statement-card')).toBe(false);
+    expect(el('#statement-summary').textContent).toContain('numbers in thousands; currency not specified');
+    expect(isHidden('#change-mapping')).toBe(false);
+    expect(statusText()).toBe('Statement confirmed.');
+  });
+
+  it('flags a role chosen for two columns and keeps Confirm disabled', async () => {
+    await openMapping();
+    choose('#scale-select', 'ones');
+
+    choose(roleSelect('Margin'), 'revenue');
+
+    expect(el('#mapping-table tr[data-column="Margin"] .mapping-conflict').textContent).toContain('“Revenue”');
+    expect(el('#mapping-table tr[data-column="Revenue"] .mapping-conflict').textContent).toContain('“Margin”');
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(true);
+  });
+
+  it('lists unparsed cells, and Confirm anyway sends their fingerprint back', async () => {
+    const cell = {
+      cell: "'P&L'!B4", source_row: 0, column: 'Revenue', role: 'revenue', period_end: '2025-03-31', value: '#DIV/0!',
+    };
+    confirmMappingMock
+      .mockResolvedValueOnce(
+        confirmResponse({
+          confirmed: false, cadence: null, requires_acknowledgement: true,
+          unparsed_cells: [cell], ack_fingerprint: 'fp-1',
+        }),
+      )
+      .mockResolvedValueOnce(confirmResponse({ unparsed_cells: [cell] }));
+    await openMapping();
+    choose('#scale-select', 'ones');
+
+    await click('#confirm-mapping');
+
+    expect(isHidden('#ack-panel')).toBe(false);
+    expect(isHidden('#mapping-actions')).toBe(true);
+    expect(el('#ack-cells').textContent).toBe("'P&L'!B4 — “#DIV/0!” (Revenue, 2025-03-31)");
+    expect(setActiveStatementMock).not.toHaveBeenCalled();
+
+    await click('#confirm-anyway');
+
+    expect(confirmMappingMock.mock.calls[1]![2]).toMatchObject({ accept_unparsed_cells: true, ack_fingerprint: 'fp-1' });
+    expect(setActiveStatementMock).toHaveBeenCalled();
+    expect(el('#statement-warnings').textContent).toContain("No value for: 'P&L'!B4 (“#DIV/0!”)");
+  });
+
+  it('changing anything after the list is shown drops the acknowledgement', async () => {
+    confirmMappingMock.mockResolvedValue(
+      confirmResponse({
+        confirmed: false, requires_acknowledgement: true, ack_fingerprint: 'fp-1',
+        unparsed_cells: [{ cell: "'P&L'!B4", source_row: 0, column: 'Revenue', role: 'revenue', period_end: '2025-03-31', value: 'x' }],
+      }),
+    );
+    await openMapping();
+    choose('#scale-select', 'ones');
+    await click('#confirm-mapping');
+    expect(isHidden('#ack-panel')).toBe(false);
+
+    choose('#scale-select', 'millions');
+
+    expect(isHidden('#ack-panel')).toBe(true);
+    await click('#confirm-mapping');
+    expect(confirmMappingMock.mock.calls[1]![2]).toMatchObject({ scale: 'millions', accept_unparsed_cells: false, ack_fingerprint: null });
+  });
+
+  it("shows the backend's refusal as it words it, and stays on the mapping screen", async () => {
+    confirmMappingMock.mockResolvedValue(
+      confirmResponse({ confirmed: false, cadence: null, errors: ['Period 2025-03-31 appears in more than one row.'] }),
+    );
+    await openMapping();
+    choose('#scale-select', 'ones');
+
+    await click('#confirm-mapping');
+
+    expect(el('#mapping-errors').textContent).toContain('Period 2025-03-31 appears in more than one row.');
+    expect(isHidden('#mapping-panel')).toBe(false);
+    expect(setActiveStatementMock).not.toHaveBeenCalled();
+  });
+
+  it('a 429 from the suggestion leaves every column for the person to map', async () => {
+    proposeMappingMock.mockRejectedValue(
+      new BackendApiError('failed', 429, { error: 'mapping_cap_reached', resets_at: null }),
+    );
+    await openMapping();
+
+    expect(isHidden('#mapping-panel')).toBe(false);
+    expect(el('#mapping-note').textContent).toBe(
+      "You've used today's suggested mappings. Choose what each column is yourself.",
+    );
+    expect(roleSelect('Period').value).toBe('unmapped');
+    expect(isHidden('#reset-mapping')).toBe(true);
+
+    choose(roleSelect('Period'), 'period_end');
+    choose(roleSelect('Revenue'), 'revenue');
+    choose('#scale-select', 'ones');
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(false);
+  });
+
+  it('a failed suggestion (502) also falls back to mapping by hand', async () => {
+    proposeMappingMock.mockRejectedValue(new BackendApiError('failed', 502, 'Anthropic API error.'));
+    await openMapping();
+
+    expect(el('#mapping-note').textContent).toBe("Couldn't suggest a mapping. Choose what each column is yourself.");
+    expect(isHidden('#mapping-panel')).toBe(false);
+  });
+
+  it('an expired selection (404) goes back to the preview and says to send again', async () => {
+    proposeMappingMock.mockRejectedValue(new BackendApiError('failed', 404, 'csv context not found'));
+    await openMapping();
+
+    expect(isHidden('#mapping-panel')).toBe(true);
+    expect(isHidden('#read-panel')).toBe(false);
+    expect(isHidden('#send-data')).toBe(false);
+    expect(statusText()).toBe('This selection expired or is no longer available. Send it again.');
+  });
+
+  it('a 401 on confirm ends the session', async () => {
+    confirmMappingMock.mockRejectedValue(new BackendApiError('failed', 401, 'x'));
+    await openMapping();
+    choose('#scale-select', 'ones');
+
+    await click('#confirm-mapping');
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(isHidden('#signed-out-view')).toBe(false);
+    expect(isHidden('#mapping-panel')).toBe(true);
+  });
+
+  it('a 409 on confirm is reported as a bug, not retried', async () => {
+    confirmMappingMock.mockRejectedValue(new BackendApiError('failed', 409, 'csv context already confirmed'));
+    await openMapping();
+    choose('#scale-select', 'ones');
+
+    await click('#confirm-mapping');
+
+    expect(statusText()).toBe('This selection was already confirmed. This is a bug; please report it.');
+    expect(confirmMappingMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('Reset to suggestion restores the suggested roles with no network call', async () => {
+    await openMapping();
+    choose(roleSelect('Revenue'), 'unmapped');
+
+    await click('#reset-mapping');
+
+    expect(roleSelect('Revenue').value).toBe('revenue');
+    expect(proposeMappingMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a suggestion that arrives after the panel signed out elsewhere is dropped', async () => {
+    let resolveProposal: (value: unknown) => void = () => {};
+    proposeMappingMock.mockReturnValue(new Promise((resolve) => (resolveProposal = resolve)));
+    await openMapping();
+    expect(isHidden('#mapping-panel')).toBe(false);
+
+    const onChange = onStoredSessionChangedMock.mock.calls[0]![0] as (s: StoredSession | null) => void;
+    onChange(null);
+    resolveProposal({ proposal: PROPOSAL, note: null });
+    await flushAsync();
+
+    expect(isHidden('#mapping-panel')).toBe(true);
+    expect(el('#mapping-table').children).toHaveLength(0);
+  });
+
+  it('Change mapping re-sends the same rows and starts from the confirmed choices, with no suggestion call', async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    parseCsvMock
+      .mockResolvedValueOnce({
+        csv_context_id: 'ctx-123', columns: ['Period', 'Revenue', 'Margin'],
+        sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']], parse_error: null,
+      })
+      .mockResolvedValueOnce({
+        csv_context_id: 'ctx-456', columns: ['Period', 'Revenue', 'Margin'],
+        sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']], parse_error: null,
+      });
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    choose('#currency-select', 'EUR');
+    await click('#confirm-mapping');
+
+    await click('#change-mapping');
+
+    expect(parseCsvMock).toHaveBeenCalledTimes(2);
+    expect(parseCsvMock.mock.calls[1]![1]).toEqual(parseCsvMock.mock.calls[0]![1]);
+    expect(proposeMappingMock).toHaveBeenCalledTimes(1);
+    expect(isHidden('#mapping-panel')).toBe(false);
+    expect(roleSelect('Revenue').value).toBe('revenue');
+    expect(el<HTMLSelectElement>('#scale-select').value).toBe('thousands');
+    expect(el<HTMLSelectElement>('#currency-select').value).toBe('EUR');
+  });
+
+  it('Back returns to the preview without confirming anything', async () => {
+    await openMapping();
+
+    await click('#cancel-mapping');
+
+    expect(isHidden('#mapping-panel')).toBe(true);
+    expect(isHidden('#read-panel')).toBe(false);
+    expect(confirmMappingMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('active statement across panel loads and sign-ins (session 4)', () => {
+  const stored = {
+    csvContextId: 'ctx-9',
+    entityName: 'Spike Co',
+    label: "FA Spike Test · 'P&L'!A3:C9",
+    confirmedAt: '2026-10-03T12:00:00Z',
+    cadence: 'annual',
+    scale: 'millions',
+    currency: 'GBP',
+  };
+
+  it('a panel load restores the card from storage, with no network call', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+
+    await loadSidepanel();
+
+    expect(isHidden('#statement-card')).toBe(false);
+    expect(el('#statement-summary').textContent).toBe(
+      "Spike Co — FA Spike Test · 'P&L'!A3:C9. Annual periods; numbers in millions; currency GBP. Ready for questions.",
+    );
+    // Change mapping needs the rows this panel sent; after a reload it has none.
+    expect(isHidden('#change-mapping')).toBe(true);
+    expect(parseCsvMock).not.toHaveBeenCalled();
+    expect(proposeMappingMock).not.toHaveBeenCalled();
+  });
+
+  it('a new sign-in clears the active statement', async () => {
+    getActiveStatementMock.mockResolvedValue(stored);
+    launchAuthFlowMock.mockResolvedValue({ provider: 'microsoft', oauthToken: 't' });
+    exchangeTokenMock.mockResolvedValue({
+      session_token: 'new-token', account_id: 'account-new', expires_at: '2026-12-31T00:00:00Z',
+    });
+    await loadSidepanel();
+
+    getActiveStatementMock.mockResolvedValue(null);
+    await click('#signin-microsoft');
+
+    expect(clearActiveStatementMock).toHaveBeenCalled();
+    expect(isHidden('#statement-card')).toBe(true);
+  });
+
+  it('signing out hides the card', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    await loadSidepanel();
+
+    await click('#signout');
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(isHidden('#statement-card')).toBe(true);
   });
 });

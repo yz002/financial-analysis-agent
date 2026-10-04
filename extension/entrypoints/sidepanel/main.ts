@@ -1,12 +1,29 @@
 import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
 import {
+  confirmMapping,
   exchangeToken,
   logout,
   parseCsv,
+  proposeMapping,
   revokeAllSessions,
   BackendApiError,
-  type CsvParseResponse,
+  type ConfirmMappingResponse,
+  type UnparsedCell,
 } from '../../lib/backendApi';
+import {
+  buildConfirmRequest,
+  carryOver,
+  CURRENCY_OPTIONS,
+  newDraft,
+  ROLE_OPTIONS,
+  roleLabel,
+  rolesFromProposal,
+  SCALE_OPTIONS,
+  validateDraft,
+  type MappingDraft,
+  type ProposalEntry,
+  type Scale,
+} from '../../lib/mappingModel';
 import {
   bodySizeError,
   buildParseRequest,
@@ -29,6 +46,10 @@ import {
   setStoredSession,
   clearStoredSession,
   onStoredSessionChanged,
+  getActiveStatement,
+  setActiveStatement,
+  clearActiveStatement,
+  type ActiveStatement,
   type StoredSession,
 } from '../../lib/sessionStorage';
 import { BACKEND_BASE_URL, type AuthProvider } from '../../lib/authConfig';
@@ -76,14 +97,67 @@ const readNotices = document.querySelector<HTMLElement>('#read-notices');
 const previewCaption = document.querySelector<HTMLElement>('#preview-caption');
 const previewTable = document.querySelector<HTMLTableElement>('#preview-table');
 const sendDataButton = document.querySelector<HTMLButtonElement>('#send-data');
-const parseSummary = document.querySelector<HTMLElement>('#parse-summary');
-const parseSummaryText = document.querySelector<HTMLElement>('#parse-summary-text');
-const parseSampleTable = document.querySelector<HTMLTableElement>('#parse-sample-table');
+const mappingPanel = document.querySelector<HTMLElement>('#mapping-panel');
+const mappingCaption = document.querySelector<HTMLElement>('#mapping-caption');
+const mappingNote = document.querySelector<HTMLElement>('#mapping-note');
+const mappingTable = document.querySelector<HTMLTableElement>('#mapping-table');
+const entityNameInput = document.querySelector<HTMLInputElement>('#entity-name');
+const scaleSelect = document.querySelector<HTMLSelectElement>('#scale-select');
+const currencySelect = document.querySelector<HTMLSelectElement>('#currency-select');
+const mappingErrors = document.querySelector<HTMLElement>('#mapping-errors');
+const ackPanel = document.querySelector<HTMLElement>('#ack-panel');
+const ackText = document.querySelector<HTMLElement>('#ack-text');
+const ackCells = document.querySelector<HTMLElement>('#ack-cells');
+const confirmAnywayButton = document.querySelector<HTMLButtonElement>('#confirm-anyway');
+const ackBackButton = document.querySelector<HTMLButtonElement>('#ack-back');
+const mappingActions = document.querySelector<HTMLElement>('#mapping-actions');
+const confirmMappingButton = document.querySelector<HTMLButtonElement>('#confirm-mapping');
+const resetMappingButton = document.querySelector<HTMLButtonElement>('#reset-mapping');
+const cancelMappingButton = document.querySelector<HTMLButtonElement>('#cancel-mapping');
+const statementCard = document.querySelector<HTMLElement>('#statement-card');
+const statementSummary = document.querySelector<HTMLElement>('#statement-summary');
+const statementWarnings = document.querySelector<HTMLElement>('#statement-warnings');
+const changeMappingButton = document.querySelector<HTMLButtonElement>('#change-mapping');
 
 // The connected spreadsheet and the grid last previewed from it -- panel memory only.
 let connectedFile: ConnectedFile | null = null;
 let connectedEmail = '';
 let previewGrid: NormalizedGrid | null = null;
+
+/** Where a confirmed mapping came from: enough to re-send the same rows for Change mapping. */
+interface MappingOrigin {
+  grid: NormalizedGrid;
+  file: Pick<ConnectedFile, 'name' | 'platform' | 'modifiedAt'>;
+}
+
+/** What "Change mapping" starts from: the last mapping confirmed in this panel. */
+interface ConfirmedChoices extends MappingOrigin {
+  roles: Record<string, string>;
+  entityName: string;
+  scale: Scale;
+  currency: string | null;
+}
+
+/**
+ * The mapping screen for one csv_context_id (Phase D session 4). Every response is checked
+ * against the session that started it, so a reply for a context that's no longer on screen
+ * is dropped rather than applied.
+ */
+interface MappingSession extends MappingOrigin {
+  csvContextId: string;
+  columns: string[];
+  sampleRows: string[][];
+  proposal: ProposalEntry[] | null;
+  draft: MappingDraft;
+  serverErrors: string[];
+  acknowledgement: { fingerprint: string; cells: UnparsedCell[] } | null;
+}
+
+let mapping: MappingSession | null = null;
+let lastConfirmed: ConfirmedChoices | null = null;
+let busy = false;
+
+const SAMPLE_VALUES_SHOWN = 3;
 
 const PREVIEW_DATA_ROWS = 10;
 
@@ -113,8 +187,6 @@ function clearPreview(): void {
   if (previewCaption) previewCaption.textContent = '';
   previewTable?.replaceChildren();
   sendDataButton?.setAttribute('hidden', '');
-  parseSummary?.setAttribute('hidden', '');
-  parseSampleTable?.replaceChildren();
 }
 
 function resetReadPanel(): void {
@@ -208,34 +280,191 @@ function renderPreview(grid: NormalizedGrid): void {
   }
 }
 
-function renderParseSummary(response: CsvParseResponse, grid: NormalizedGrid): void {
-  const dataRows = grid.rows.length - 1;
-  if (parseSummaryText) {
-    parseSummaryText.textContent =
-      `Sent ${quoteSheetName(grid.sheetName)}!${formatA1Range(grid.range)}: ${dataRows} data ` +
-      `rows × ${response.columns.length} columns. Mapping columns to financial concepts is the ` +
-      `next step (coming soon). Reference ${response.csv_context_id}, kept for one hour.`;
-  }
+function rangeLabel(grid: NormalizedGrid): string {
+  return `${quoteSheetName(grid.sheetName)}!${formatA1Range(grid.range)}`;
+}
+
+function option(value: string, label: string): HTMLOptionElement {
+  const el = document.createElement('option');
+  el.value = value;
+  el.textContent = label;
+  return el;
+}
+
+function listItems(items: string[]): HTMLLIElement[] {
+  return items.map((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    return li;
+  });
+}
+
+/** The mapping table: one row per column, with its first values, a role menu and the
+ * suggestion's reason. Rebuilt whenever a role changes. */
+function renderMappingTable(m: MappingSession): void {
   const head = document.createElement('tr');
-  head.append(...response.columns.map((column) => headerCell(column)));
-  const body = response.sample_rows.map((row) => {
+  head.append(headerCell('Column'), headerCell('Values'), headerCell('Is'), headerCell('Why suggested'));
+  const rows = m.columns.map((column, index) => {
     const tr = document.createElement('tr');
-    tr.append(
-      ...row.map((value) => {
-        const td = document.createElement('td');
-        td.textContent = value;
-        return td;
-      }),
-    );
+    tr.dataset.column = column;
+    const role = m.draft.roles[column] ?? 'unmapped';
+    if (role === 'unmapped') tr.className = 'mapping-row--unused';
+
+    const name = document.createElement('th');
+    name.textContent = column;
+    name.title = cellAddress(m.grid.range.startRow, m.grid.range.startCol + index);
+
+    const values = document.createElement('td');
+    values.className = 'mapping-values';
+    values.textContent = m.sampleRows
+      .slice(0, SAMPLE_VALUES_SHOWN)
+      .map((row) => row[index] ?? '')
+      .join(' · ');
+
+    const roleCell = document.createElement('td');
+    const select = document.createElement('select');
+    select.className = 'role-select';
+    select.setAttribute('aria-label', `What “${column}” is`);
+    select.append(...ROLE_OPTIONS.map((o) => option(o.value, o.label)));
+    select.value = role;
+    select.disabled = busy;
+    select.addEventListener('change', () => {
+      if (mapping !== m) return;
+      m.draft.roles[column] = select.value;
+      draftChanged(m);
+      renderMappingTable(m);
+    });
+    const conflict = document.createElement('p');
+    conflict.className = 'mapping-conflict';
+    roleCell.append(select, conflict);
+
+    const why = document.createElement('td');
+    why.className = 'mapping-rationale';
+    why.textContent = m.draft.rationales[column] ?? '';
+
+    tr.append(name, values, roleCell, why);
     return tr;
   });
-  parseSampleTable?.replaceChildren(head, ...body);
-  sendDataButton?.setAttribute('hidden', '');
-  parseSummary?.removeAttribute('hidden');
+  mappingTable?.replaceChildren(head, ...rows);
+  updateMappingValidation(m);
+}
+
+/** Any edit invalidates an earlier acknowledgement and the server's last refusal. */
+function draftChanged(m: MappingSession): void {
+  m.acknowledgement = null;
+  m.serverErrors = [];
+  renderAcknowledgement(m);
+  updateMappingValidation(m);
+}
+
+function updateMappingValidation(m: MappingSession): void {
+  const result = validateDraft(m.draft);
+  mappingErrors?.replaceChildren(...listItems([...m.serverErrors, ...result.formErrors]));
+  mappingTable?.querySelectorAll<HTMLTableRowElement>('tr[data-column]').forEach((tr) => {
+    const message = result.columnErrors[tr.dataset.column!] ?? '';
+    const conflict = tr.querySelector<HTMLElement>('.mapping-conflict');
+    if (conflict) conflict.textContent = message;
+    tr.classList.toggle('mapping-row--conflict', message !== '');
+  });
+  if (confirmMappingButton) confirmMappingButton.disabled = busy || !result.canConfirm;
+  if (resetMappingButton) resetMappingButton.hidden = m.proposal === null;
+}
+
+function renderAcknowledgement(m: MappingSession): void {
+  const ack = m.acknowledgement;
+  if (!ack) {
+    ackPanel?.setAttribute('hidden', '');
+    mappingActions?.removeAttribute('hidden');
+    ackCells?.replaceChildren();
+    return;
+  }
+  const n = ack.cells.length;
+  if (ackText) {
+    ackText.textContent =
+      `${n} cell${n === 1 ? '' : 's'} in mapped columns ${n === 1 ? "isn't a number" : "aren't numbers"}. ` +
+      'If you confirm anyway, those periods will have no value for that item.';
+  }
+  ackCells?.replaceChildren(
+    ...listItems(
+      ack.cells.map(
+        (c) =>
+          `${c.cell ?? `Data row ${c.source_row + 1}`} — “${c.value}” (${roleLabel(c.role)}, ${c.period_end})`,
+      ),
+    ),
+  );
+  ackPanel?.removeAttribute('hidden');
+  mappingActions?.setAttribute('hidden', '');
+}
+
+function showMappingPanel(m: MappingSession): void {
+  if (mappingCaption) {
+    mappingCaption.textContent =
+      `${m.file.name} · ${rangeLabel(m.grid)} · ${m.grid.rows.length - 1} data rows. ` +
+      'Choose what each column is. Nothing is used until you confirm.';
+  }
+  if (entityNameInput) entityNameInput.value = m.draft.entityName;
+  scaleSelect?.replaceChildren(
+    option('', 'Choose…'),
+    ...SCALE_OPTIONS.map((o) => option(o.value, o.label)),
+  );
+  if (scaleSelect) scaleSelect.value = m.draft.scale ?? '';
+  currencySelect?.replaceChildren(...CURRENCY_OPTIONS.map((o) => option(o.value ?? '', o.label)));
+  if (currencySelect) currencySelect.value = m.draft.currency ?? '';
+  renderAcknowledgement(m);
+  renderMappingTable(m);
+  readPanel?.setAttribute('hidden', '');
+  mappingPanel?.removeAttribute('hidden');
+}
+
+function closeMappingPanel(): void {
+  mapping = null;
+  mappingPanel?.setAttribute('hidden', '');
+  mappingTable?.replaceChildren();
+  mappingErrors?.replaceChildren();
+  ackCells?.replaceChildren();
+  if (mappingNote) mappingNote.textContent = '';
+}
+
+/** Back to the read panel, with the preview that was sent still shown when there is one. */
+function returnToReadPanel(): void {
+  closeMappingPanel();
+  if (connectedFile) {
+    readPanel?.removeAttribute('hidden');
+    if (previewGrid) renderPreview(previewGrid);
+  }
+}
+
+function describeScale(scale: string): string {
+  return SCALE_OPTIONS.find((o) => o.value === scale)?.label ?? scale;
+}
+
+function renderStatementCard(statement: ActiveStatement | null, details: string[] = []): void {
+  if (!statement) {
+    statementCard?.setAttribute('hidden', '');
+    statementWarnings?.replaceChildren();
+    return;
+  }
+  if (statementSummary) {
+    const cadence = statement.cadence ? `${statement.cadence} periods` : 'a single period';
+    statementSummary.textContent =
+      `${statement.entityName} — ${statement.label}. ${cadence[0]!.toUpperCase()}${cadence.slice(1)}; ` +
+      `numbers in ${describeScale(statement.scale).toLowerCase()}; currency ` +
+      `${statement.currency ?? 'not specified'}. Ready for questions.`;
+  }
+  statementWarnings?.replaceChildren(...listItems(details));
+  if (changeMappingButton) changeMappingButton.hidden = lastConfirmed === null;
+  statementCard?.removeAttribute('hidden');
+}
+
+async function refreshStatementCard(): Promise<void> {
+  renderStatementCard(await getActiveStatement());
 }
 
 function renderSignedOut(errorMessage?: string): void {
   resetReadPanel();
+  closeMappingPanel();
+  lastConfirmed = null;
+  renderStatementCard(null);
   setDataConnection('');
   signedOutView?.removeAttribute('hidden');
   signedInView?.setAttribute('hidden', '');
@@ -257,9 +486,32 @@ function renderSignedIn(session: StoredSession, errorMessage?: string): void {
   } else {
     clearStatus();
   }
+  // Restored from storage on every render, with no network call; the card's details from
+  // the confirm response itself exist only in the panel that confirmed.
+  if (statementCard?.hasAttribute('hidden')) void refreshStatementCard();
 }
 
-function setBusy(busy: boolean): void {
+function setBusy(isBusy: boolean): void {
+  busy = isBusy;
+  for (const control of [
+    entityNameInput,
+    scaleSelect,
+    currencySelect,
+    resetMappingButton,
+    cancelMappingButton,
+    confirmAnywayButton,
+    ackBackButton,
+    changeMappingButton,
+  ]) {
+    if (control) control.disabled = isBusy;
+  }
+  mappingTable?.querySelectorAll<HTMLSelectElement>('select').forEach((s) => (s.disabled = isBusy));
+  if (mapping) updateMappingValidation(mapping);
+  else if (confirmMappingButton) confirmMappingButton.disabled = true;
+  setReadBusy(isBusy);
+}
+
+function setReadBusy(busy: boolean): void {
   if (signinGoogleButton) signinGoogleButton.disabled = busy;
   if (signinMicrosoftButton) signinMicrosoftButton.disabled = busy;
   if (signoutButton) signoutButton.disabled = busy;
@@ -309,9 +561,14 @@ async function handleSignIn(provider: AuthProvider): Promise<void> {
     // succeeded (launchAuthFlow/exchangeToken above throw first otherwise), so a
     // cancelled or failed sign-in never touches an existing session.
     const previousSession = await getStoredSession();
-    // A new sign-in may be a different person on the same browser profile: no data token or
-    // data-account email (a login_hint) may carry over from whoever was signed in before.
+    // A new sign-in may be a different person on the same browser profile: no data token,
+    // data-account email (a login_hint) or active statement may carry over from whoever was
+    // signed in before.
     await clearAllDataAccess();
+    await clearActiveStatement();
+    lastConfirmed = null;
+    closeMappingPanel();
+    renderStatementCard(null);
     await setStoredSession(session);
     renderSignedIn(session);
     if (previousSession && previousSession.sessionToken !== session.sessionToken) {
@@ -468,6 +725,7 @@ async function handleConnectData(click: MouseEvent): Promise<void> {
   setStatus('Connecting…');
   setDataConnection('');
   resetReadPanel();
+  closeMappingPanel();
   let provider: AuthProvider | null = null;
   let dataEmail = '';
   try {
@@ -546,21 +804,21 @@ async function handleReadRange(click: MouseEvent): Promise<void> {
   }
 }
 
-/** Send to analysis: POST /v1/csv/parse with the previewed grid and its sheet source. */
-async function handleSendData(): Promise<void> {
-  const file = connectedFile;
-  const grid = previewGrid;
-  if (!file || !grid) return;
+const SHAPE_BUG_MESSAGE = 'The data was sent in a shape the server rejected. This is a bug; please report it.';
+const EXPIRED_MESSAGE = 'This selection expired or is no longer available. Send it again.';
+
+/**
+ * Send to analysis: POST /v1/csv/parse with the grid and its sheet source, then straight into
+ * the mapping screen. A fresh send asks for a suggested mapping; "Change mapping" (`previous`)
+ * re-sends the same rows and starts from the choices confirmed before, with no model call.
+ */
+async function sendForMapping(origin: MappingOrigin, previous: ConfirmedChoices | null): Promise<void> {
   const session = await getStoredSession();
   if (!session) {
     renderSignedOut();
     return;
   }
-  const request = buildParseRequest(grid, {
-    name: file.name,
-    platform: file.platform,
-    modifiedAt: file.modifiedAt,
-  });
+  const request = buildParseRequest(origin.grid, origin.file);
   const sizeError = bodySizeError(request);
   if (sizeError) {
     setStatus(sizeError, true);
@@ -575,8 +833,27 @@ async function handleSendData(): Promise<void> {
       setStatus(response.parse_error ?? 'The data could not be read.', true);
       return;
     }
-    clearStatus();
-    renderParseSummary(response, grid);
+    const m: MappingSession = {
+      ...origin,
+      csvContextId: response.csv_context_id,
+      columns: response.columns,
+      sampleRows: response.sample_rows,
+      proposal: null,
+      draft: newDraft(response.columns, null, origin.file.name),
+      serverErrors: [],
+      acknowledgement: null,
+    };
+    mapping = m;
+    if (mappingNote) mappingNote.textContent = '';
+    if (previous) {
+      m.draft = carryOver(m.draft, previous);
+      clearStatus();
+      showMappingPanel(m);
+      return;
+    }
+    showMappingPanel(m);
+    setStatus('Suggesting a mapping…');
+    await suggestMapping(session.sessionToken, m);
   } catch (err) {
     if (err instanceof BackendApiError && err.status === 401) {
       await handleUnauthorized();
@@ -585,13 +862,167 @@ async function handleSendData(): Promise<void> {
     console.error('[sidepanel] send data failed', err);
     setStatus(
       err instanceof BackendApiError && err.status === 422
-        ? 'The data was sent in a shape the server rejected. This is a bug; please report it.'
+        ? SHAPE_BUG_MESSAGE
         : 'Could not send the data — please try again.',
       true,
     );
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * POST /v1/csv/{id}/propose-mapping into `m`. Any failure other than a 401 or an expired
+ * context leaves every column "Not used" for the person to map by hand: a suggestion is a
+ * convenience, never required to confirm.
+ */
+async function suggestMapping(sessionToken: string, m: MappingSession): Promise<void> {
+  try {
+    const response = await proposeMapping(sessionToken, m.csvContextId);
+    if (mapping !== m) return;
+    m.proposal = response.proposal;
+    m.draft = { ...m.draft, ...newDraft(m.columns, response.proposal, m.draft.entityName) };
+    if (mappingNote) mappingNote.textContent = response.note ?? '';
+    clearStatus();
+  } catch (err) {
+    if (mapping !== m) return;
+    if (err instanceof BackendApiError && err.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+    if (err instanceof BackendApiError && err.status === 404) {
+      returnToReadPanel();
+      setStatus(EXPIRED_MESSAGE, true);
+      return;
+    }
+    console.error('[sidepanel] propose mapping failed', err);
+    if (mappingNote) mappingNote.textContent = suggestionFailureNote(err);
+    clearStatus();
+  }
+  renderMappingTable(m);
+}
+
+function suggestionFailureNote(err: unknown): string {
+  if (err instanceof BackendApiError && err.status === 429) {
+    const resetsAt =
+      err.detail && typeof err.detail === 'object' && 'resets_at' in err.detail
+        ? (err.detail as { resets_at: string | null }).resets_at
+        : null;
+    return (
+      "You've used today's suggested mappings" +
+      (resetsAt ? ` (more from ${new Date(resetsAt).toLocaleString()})` : '') +
+      '. Choose what each column is yourself.'
+    );
+  }
+  if (err instanceof BackendApiError && err.status === 409) {
+    return 'This selection was already confirmed. This is a bug; please report it.';
+  }
+  return "Couldn't suggest a mapping. Choose what each column is yourself.";
+}
+
+async function handleSendData(): Promise<void> {
+  const file = connectedFile;
+  const grid = previewGrid;
+  if (!file || !grid) return;
+  await sendForMapping({ grid, file: { name: file.name, platform: file.platform, modifiedAt: file.modifiedAt } }, null);
+}
+
+async function handleChangeMapping(): Promise<void> {
+  if (!lastConfirmed) return;
+  await sendForMapping(lastConfirmed, lastConfirmed);
+}
+
+/** Confirm, or (`acknowledge`) Confirm anyway for the unparsed cells just shown. */
+async function handleConfirmMapping(acknowledge: boolean): Promise<void> {
+  const m = mapping;
+  if (!m || !validateDraft(m.draft).canConfirm) return;
+  const session = await getStoredSession();
+  if (!session) {
+    renderSignedOut();
+    return;
+  }
+  const body = buildConfirmRequest(
+    m.draft,
+    acknowledge && m.acknowledgement ? { fingerprint: m.acknowledgement.fingerprint } : null,
+  );
+  setBusy(true);
+  setStatus('Confirming…');
+  try {
+    const response = await confirmMapping(session.sessionToken, m.csvContextId, body);
+    if (mapping !== m) return;
+    if (response.confirmed) {
+      await statementConfirmed(m, response);
+    } else if (response.requires_acknowledgement && response.ack_fingerprint) {
+      m.serverErrors = [];
+      m.acknowledgement = { fingerprint: response.ack_fingerprint, cells: response.unparsed_cells };
+      renderAcknowledgement(m);
+      updateMappingValidation(m);
+      clearStatus();
+    } else {
+      // The backend's own refusal (period spacing, duplicate dates, ...), shown as it says it.
+      m.acknowledgement = null;
+      m.serverErrors = response.errors.length ? response.errors : ['The mapping was not accepted.'];
+      renderAcknowledgement(m);
+      updateMappingValidation(m);
+      setStatus("The mapping wasn't accepted — see the problems listed.", true);
+    }
+  } catch (err) {
+    if (mapping !== m) return;
+    if (err instanceof BackendApiError && err.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+    if (err instanceof BackendApiError && err.status === 404) {
+      returnToReadPanel();
+      setStatus(EXPIRED_MESSAGE, true);
+      return;
+    }
+    console.error('[sidepanel] confirm mapping failed', err);
+    if (err instanceof BackendApiError && err.status === 409) {
+      setStatus('This selection was already confirmed. This is a bug; please report it.', true);
+    } else if (err instanceof BackendApiError && err.status === 422) {
+      setStatus(SHAPE_BUG_MESSAGE, true);
+    } else {
+      setStatus('Could not confirm — please try again.', true);
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function statementConfirmed(m: MappingSession, response: ConfirmMappingResponse): Promise<void> {
+  const scale = m.draft.scale!;
+  const statement: ActiveStatement = {
+    csvContextId: m.csvContextId,
+    entityName: m.draft.entityName.trim(),
+    label: `${m.file.name} · ${rangeLabel(m.grid)}`,
+    confirmedAt: new Date().toISOString(),
+    cadence: response.cadence,
+    scale,
+    currency: m.draft.currency,
+  };
+  await setActiveStatement(statement);
+  lastConfirmed = {
+    grid: m.grid,
+    file: m.file,
+    roles: { ...m.draft.roles },
+    entityName: statement.entityName,
+    scale,
+    currency: m.draft.currency,
+  };
+  closeMappingPanel();
+  readPanel?.setAttribute('hidden', '');
+
+  const details = [...response.warnings];
+  if (response.unparsed_cells.length) {
+    details.push(
+      `No value for: ${response.unparsed_cells
+        .map((c) => `${c.cell ?? `data row ${c.source_row + 1}`} (“${c.value}”)`)
+        .join(', ')}.`,
+    );
+  }
+  renderStatementCard(statement, details);
+  setStatus('Statement confirmed.');
 }
 
 connectDataButton?.addEventListener('click', (event) => {
@@ -602,6 +1033,45 @@ readRangeButton?.addEventListener('click', (event) => {
 });
 sendDataButton?.addEventListener('click', () => {
   void handleSendData();
+});
+confirmMappingButton?.addEventListener('click', () => {
+  void handleConfirmMapping(false);
+});
+confirmAnywayButton?.addEventListener('click', () => {
+  void handleConfirmMapping(true);
+});
+ackBackButton?.addEventListener('click', () => {
+  if (mapping) draftChanged(mapping);
+});
+resetMappingButton?.addEventListener('click', () => {
+  // Back to the stored suggestion -- no network call.
+  const m = mapping;
+  if (!m || !m.proposal) return;
+  m.draft.roles = rolesFromProposal(m.columns, m.proposal);
+  draftChanged(m);
+  renderMappingTable(m);
+});
+cancelMappingButton?.addEventListener('click', () => {
+  clearStatus();
+  returnToReadPanel();
+});
+changeMappingButton?.addEventListener('click', () => {
+  void handleChangeMapping();
+});
+entityNameInput?.addEventListener('input', () => {
+  if (!mapping) return;
+  mapping.draft.entityName = entityNameInput.value;
+  draftChanged(mapping);
+});
+scaleSelect?.addEventListener('change', () => {
+  if (!mapping) return;
+  mapping.draft.scale = scaleSelect.value === '' ? null : (scaleSelect.value as Scale);
+  draftChanged(mapping);
+});
+currencySelect?.addEventListener('change', () => {
+  if (!mapping) return;
+  mapping.draft.currency = currencySelect.value === '' ? null : currencySelect.value;
+  draftChanged(mapping);
 });
 sheetSelect?.addEventListener('change', () => {
   // A range belongs to the sheet it was entered or linked for, so any sheet switch clears it.

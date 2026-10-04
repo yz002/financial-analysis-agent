@@ -46,10 +46,45 @@
           <p id="preview-caption"></p>
           <div class="table-scroll"><table id="preview-table"></table></div>
           <button id="send-data" type="button" hidden>Send to analysis</button>
-          <div id="parse-summary" hidden>
-            <p id="parse-summary-text"></p>
-            <div class="table-scroll"><table id="parse-sample-table"></table></div>
+        </section>
+
+        <section id="mapping-panel" aria-label="Map columns" hidden>
+          <h2>Map columns</h2>
+          <p id="mapping-caption"></p>
+          <p id="mapping-note"></p>
+          <div class="table-scroll"><table id="mapping-table"></table></div>
+          <div class="field">
+            <label for="entity-name">Business name</label>
+            <input id="entity-name" type="text" maxlength="200" autocomplete="off" spellcheck="false" />
           </div>
+          <div class="field">
+            <label for="scale-select">Numbers are in</label>
+            <select id="scale-select"></select>
+          </div>
+          <div class="field">
+            <label for="currency-select">Currency</label>
+            <select id="currency-select"></select>
+          </div>
+          <p id="mapping-cadence">Quarterly or annual cadence is detected when you confirm.</p>
+          <ul id="mapping-errors"></ul>
+          <div id="ack-panel" hidden>
+            <p id="ack-text"></p>
+            <ul id="ack-cells"></ul>
+            <button id="confirm-anyway" type="button">Confirm anyway</button>
+            <button id="ack-back" type="button">Back to mapping</button>
+          </div>
+          <div id="mapping-actions">
+            <button id="confirm-mapping" type="button" disabled>Confirm mapping</button>
+            <button id="reset-mapping" type="button">Reset to suggestion</button>
+            <button id="cancel-mapping" type="button">Back</button>
+          </div>
+        </section>
+
+        <section id="statement-card" aria-label="Active statement" hidden>
+          <h2>Active statement</h2>
+          <p id="statement-summary"></p>
+          <ul id="statement-warnings"></ul>
+          <button id="change-mapping" type="button" hidden>Change mapping</button>
         </section>
 
         <button id="signout" type="button">Sign out</button>

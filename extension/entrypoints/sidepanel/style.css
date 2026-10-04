@@ -222,3 +222,149 @@ button:disabled {
   color: var(--color-ink-mute);
   text-align: center;
 }
+
+/* Mapping screen and active statement (Phase D session 4). Same card look as the read panel. */
+#mapping-panel,
+#statement-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+  background: var(--color-canvas-soft);
+}
+
+#mapping-panel h2,
+#statement-card h2 {
+  margin: 0;
+  font-size: var(--text-button-size);
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+#mapping-panel .field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+#mapping-panel label,
+#app #mapping-caption,
+#app #mapping-cadence,
+#mapping-panel .mapping-rationale,
+#mapping-panel .mapping-values {
+  font-size: var(--text-meta-size);
+  font-weight: var(--text-meta-weight);
+  line-height: var(--text-meta-line-height);
+  letter-spacing: var(--text-meta-letter-spacing);
+  color: var(--color-ink-mute);
+}
+
+#mapping-panel .mapping-rationale {
+  white-space: normal;
+  min-width: 10em;
+}
+
+#mapping-panel select,
+#mapping-panel input {
+  font-family: var(--font-family);
+  font-size: var(--text-button-size);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-hairline-input);
+  border-radius: var(--radius-input);
+  min-width: 0;
+}
+
+#mapping-panel select:focus-visible,
+#mapping-panel input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* A column that won't be used is shown dimmed, but stays editable. */
+#mapping-panel tr.mapping-row--unused th,
+#mapping-panel tr.mapping-row--unused .mapping-values {
+  color: var(--color-ink-mute);
+}
+
+#mapping-panel tr.mapping-row--conflict .role-select {
+  border-color: var(--color-error);
+}
+
+#mapping-panel .mapping-conflict,
+#mapping-errors,
+#app #mapping-note {
+  margin: 0;
+  font-size: var(--text-meta-size);
+  color: var(--color-error);
+  white-space: normal;
+}
+
+#app #mapping-note {
+  color: var(--color-ink-secondary);
+}
+
+#mapping-panel .mapping-conflict:empty,
+#mapping-errors:empty,
+#app #mapping-note:empty,
+#statement-warnings:empty {
+  display: none;
+}
+
+#mapping-errors,
+#ack-cells,
+#statement-warnings {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+#ack-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-card);
+  background: var(--color-canvas);
+}
+
+#ack-cells,
+#statement-warnings {
+  font-size: var(--text-meta-size);
+  color: var(--color-ink-secondary);
+}
+
+#mapping-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+#confirm-mapping,
+#confirm-anyway {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+}
+
+#confirm-mapping:hover:not(:disabled),
+#confirm-anyway:hover:not(:disabled) {
+  background: var(--color-primary-press);
+}
+
+#reset-mapping,
+#cancel-mapping,
+#ack-back,
+#change-mapping {
+  background: var(--color-canvas);
+  color: var(--color-primary);
+  border-color: var(--color-hairline-input);
+}
+
+#change-mapping,
+#confirm-anyway,
+#ack-back {
+  align-self: flex-start;
+}
