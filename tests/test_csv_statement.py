@@ -20,7 +20,9 @@ from src.analysis import ratios
 from src.analysis.csv_statement import (
     ALL_CONCEPTS,
     DURATION_CONCEPTS,
+    find_unparsed_cells,
     normalize,
+    validate_mapping,
 )
 from src.data.csv_ingest import RawCsv, parse_csv
 
@@ -361,6 +363,107 @@ def test_spreadsheet_source_adds_sheet_qualified_source_cell():
     prov = df.attrs["csv_provenance"]["revenue"]
     assert prov["2024-03-31"] == {"source_row": 0, "source_column": "Revenue", "source_cell": "'P&L'!D4"}
     assert prov["2024-06-30"]["source_cell"] == "'P&L'!D5"
+
+
+_SHEET_SOURCE = {
+    "platform": "google_sheets", "sheet_name": "P&L", "range": "A3:C9",
+    "file_name": "FA Spike Test", "modified_at": None,
+}
+
+
+def _sheet_raw(revenue, net_income=None, dates=None):
+    dates = dates or ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30"]
+    net_income = net_income or ["1"] * len(dates)
+    df_raw = pd.DataFrame({"Date": dates, "Revenue": revenue, "Net Income": net_income})
+    return RawCsv(df=df_raw, filename="FA Spike Test — P&L", uploaded_at=_UPLOADED_AT, source=_SHEET_SOURCE)
+
+
+_SHEET_MAPPING = {"Date": "period_end", "Revenue": "revenue", "Net Income": "net_income"}
+
+
+def test_unparsed_cells_are_listed_by_cell_address_and_blanks_are_not():
+    raw = _sheet_raw(["61.5%", "#DIV/0!", "TRUE", "€1,250", "1 250 000", ""])
+    cells = find_unparsed_cells(raw, _SHEET_MAPPING)
+    assert [(c["cell"], c["value"]) for c in cells] == [
+        ("'P&L'!B4", "61.5%"),
+        ("'P&L'!B5", "#DIV/0!"),
+        ("'P&L'!B6", "TRUE"),
+        ("'P&L'!B7", "€1,250"),
+        ("'P&L'!B8", "1 250 000"),
+    ]  # the blank B9 is "not reported", not a parse failure
+    assert cells[0] == {
+        "cell": "'P&L'!B4", "source_row": 0, "column": "Revenue", "role": "revenue",
+        "period_end": "2024-03-31", "value": "61.5%",
+    }
+
+    df, errors, warnings = normalize(raw, _SHEET_MAPPING, entity_name="Spike Co")
+    assert errors == []
+    assert df["revenue"].isna().all()
+    assert any("revenue ('Revenue') is blank for 1 of 6" in w for w in warnings)
+
+
+def test_unparsed_cells_skip_rows_dropped_for_a_bad_date_and_need_a_valid_mapping():
+    raw = _sheet_raw(
+        ["100", "oops", "300", "400", "500", "600"],
+        dates=["2024-03-31", "not-a-date", "2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30"],
+    )
+    assert find_unparsed_cells(raw, _SHEET_MAPPING) == []  # "oops" sits in a dropped row
+    assert find_unparsed_cells(raw, {"Date": "period_end"}) == []  # no revenue: invalid mapping
+
+
+def test_unparsed_cell_value_is_capped_at_50_characters():
+    raw = _sheet_raw(["x" * 80, "1", "2", "3", "4", "5"])
+    assert find_unparsed_cells(raw, _SHEET_MAPPING)[0]["value"] == "x" * 50
+
+
+def test_validate_mapping_refuses_unknown_columns_and_roles_instead_of_crashing():
+    raw = _sheet_raw(["1", "2", "3", "4", "5", "6"])
+    errors = validate_mapping(raw, {"Nope": "period_end", "Revenue": "revenue", "Date": "reveneu"})
+    joined = " ".join(errors)
+    assert "'Nope'" in joined and "aren't in this data" in joined
+    assert "'reveneu'" in joined
+    # normalize() refuses in-band rather than raising KeyError on the unknown column.
+    df, errors, _ = normalize(raw, {"Nope": "period_end", "Revenue": "revenue"}, entity_name="Co")
+    assert df is None and errors
+
+
+def test_scale_converts_to_ones_exactly_and_is_recorded():
+    raw = _sheet_raw(["1250", "0.1", "(45)", "1e+3", "2.5", "3"])
+    df, errors, _ = normalize(raw, _SHEET_MAPPING, entity_name="Co", scale="thousands", currency="USD")
+    assert errors == []
+    assert df["revenue"].tolist() == [1250000.0, 100.0, -45000.0, 1000000.0, 2500.0, 3000.0]
+    assert df.attrs["csv_source"]["scale"] == "thousands"
+    assert df.attrs["csv_source"]["currency"] == "USD"
+
+    df, _, _ = normalize(raw, _SHEET_MAPPING, entity_name="Co", scale="billions")
+    assert df["revenue"].iloc[0] == 1.25e12
+    assert df.attrs["csv_source"]["currency"] is None
+
+
+def test_default_scale_is_ones_for_callers_that_predate_it():
+    raw = _sheet_raw(["1250", "1", "2", "3", "4", "5"])
+    df, errors, _ = normalize(raw, _SHEET_MAPPING, entity_name="Co")
+    assert errors == []
+    assert df["revenue"].iloc[0] == 1250.0
+    assert df.attrs["csv_source"]["scale"] == "ones"
+
+
+def test_unknown_scale_is_refused():
+    raw = _sheet_raw(["1", "2", "3", "4", "5", "6"])
+    df, errors, _ = normalize(raw, _SHEET_MAPPING, entity_name="Co", scale="hundreds")
+    assert df is None
+    assert "hundreds" in errors[0]
+
+
+def test_dropped_date_row_names_its_cell_when_the_data_came_from_a_sheet():
+    raw = _sheet_raw(
+        ["1", "2", "3", "4", "5", "6"],
+        dates=["2024-03-31", "2024-06-30", "Q3?", "2024-12-31", "2025-03-31", "2025-06-30"],
+    )
+    _, errors, warnings = normalize(raw, _SHEET_MAPPING, entity_name="Co")
+    assert errors == []
+    drop = [w for w in warnings if "dropped" in w]
+    assert drop == ["Row 2 ('P&L'!A6) was dropped: 'Date' value 'Q3?' could not be parsed as a date."]
 
 
 def test_no_source_means_no_source_cell():

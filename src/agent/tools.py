@@ -208,7 +208,36 @@ def _csv_citation(df_attrs: dict, concept: str, period_end_iso: str) -> dict:
     # Spreadsheet-sourced uploads also know the exact cell, e.g. 'P&L'!B4 (see normalize()).
     if "source_cell" in prov:
         citation["source_cell"] = prov["source_cell"]
+    # The scale the cell was typed in, so a value converted to ones can be reconciled with
+    # what the sheet shows ('P&L'!B4 shows 1,250 in thousands -> 1,250,000 here).
+    if source.get("scale"):
+        citation["sheet_scale"] = source["scale"]
     return citation
+
+
+def _csv_units(df_attrs: dict) -> dict:
+    """The statement's units (Phase D session 4): every CSV value a tool returns is already
+    converted to ones by normalize(), so the model reports it as-is and never multiplies.
+    `currency` is a label the person chose, or None when they didn't state one. A statement
+    confirmed before scale/currency existed reads as ones with no currency stated."""
+    source = df_attrs.get("csv_source", {})
+    scale = source.get("scale") or "ones"
+    currency = source.get("currency")
+    if scale == "ones":
+        note = "Values are as entered in the sheet (scale: ones)."
+    else:
+        note = (
+            f"The sheet's figures were entered in {scale}; every value here has already been "
+            "converted to ones. Report them as given -- don't rescale them."
+        )
+    if currency is None:
+        note += (
+            " No currency was specified: report these figures without a currency symbol or "
+            "code."
+        )
+    else:
+        note += f" Currency: {currency}."
+    return {"currency": currency, "scale": scale, "note": note}
 
 
 def get_financial_statement(
@@ -611,6 +640,7 @@ def get_csv_statement(periods: int | None = DEFAULT_PERIODS) -> str:
     result = {
         "business_name": business_name,
         "cadence": cadence,
+        "units": _csv_units(full_df.attrs),
         "periods_returned": len(periods_out),
         "concepts_unavailable": unavailable,
         "notes": notes,
@@ -712,6 +742,7 @@ def get_csv_ratios(
     result = {
         "business_name": business_name,
         "cadence": cadence,
+        "units": _csv_units(full_df.attrs),
         "notes": notes,
         "ratios": ratios_out,
     }

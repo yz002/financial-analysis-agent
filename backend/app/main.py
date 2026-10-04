@@ -67,6 +67,7 @@ from src.agent.agent import DEFAULT_MODEL, run_agent  # noqa: E402 -- see sys.pa
 from src.analysis.csv_statement import (  # noqa: E402 -- see sys.path note above
     MAPPABLE_ROLES,
     RECOMMENDED_CONCEPTS,
+    find_unparsed_cells,
     normalize,
     statement_from_records,
     validate_mapping,
@@ -82,7 +83,7 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
 
 from . import billing, oauth_providers
 from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
-from .gating import evaluate_ask_gate
+from .gating import MAPPING_PROPOSAL_OUTCOME, evaluate_ask_gate, evaluate_mapping_proposal_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
@@ -231,6 +232,15 @@ def _get_owned_csv_statement(session, csv_context_id: uuid.UUID, account_id: uui
     """
     row = session.get(CsvStatement, csv_context_id)
     if row is None or row.account_id != account_id:
+        raise HTTPException(status_code=404, detail="csv context not found")
+    # An unconfirmed context past its ~1-hour expires_at is gone as far as any route is
+    # concerned, even before the retention cron physically deletes it (Phase D session 4) --
+    # the same 404, so expiry isn't distinguishable from never-existed either.
+    if (
+        row.status == "unconfirmed"
+        and row.expires_at is not None
+        and row.expires_at <= datetime.now(timezone.utc)
+    ):
         raise HTTPException(status_code=404, detail="csv context not found")
     return row
 
@@ -585,10 +595,40 @@ def propose_mapping(
     csv_context_id: uuid.UUID,
     account: Account = Depends(get_current_account),
 ) -> ProposeMappingResponse:
+    """
+    Phase D session 4: idempotent per context -- a stored proposal is returned without a second
+    model call. A fresh model call is gated by a per-account daily cap counted from usage_events
+    ('mapping_proposal', never part of the question caps), and the row is written before the
+    call so a failed call still counts. A confirmed context can't be re-proposed (409).
+    """
     session = get_session()
     try:
         row = _get_owned_csv_statement(session, csv_context_id, account.id)
+        if row.status == "confirmed":
+            raise HTTPException(status_code=409, detail="csv context already confirmed")
+
+        stored = _stored_proposal(row.proposed_mapping)
+        if stored is not None:
+            return stored
+
         raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
+
+        now = datetime.now(timezone.utc)
+        decision = evaluate_mapping_proposal_gate(session, account.id, now)
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "mapping_cap_reached",
+                    "resets_at": decision.resets_at.isoformat() if decision.resets_at else None,
+                },
+            )
+        session.add(
+            UsageEvent(
+                account_id=account.id, occurred_at=now, turn_id=None, outcome=MAPPING_PROPOSAL_OUTCOME
+            )
+        )
+        session.commit()
 
         try:
             result = generate_mapping_proposal(raw, roles=MAPPABLE_ROLES)
@@ -603,23 +643,57 @@ def propose_mapping(
             logger.exception("generate_mapping_proposal failed unexpectedly")
             raise HTTPException(status_code=500, detail="propose_mapping failed unexpectedly.") from e
 
-        row.proposed_mapping = [
+        proposal = [
             {"csv_column": c.csv_column, "proposed_role": c.proposed_role, "rationale": c.rationale}
             for c in result.columns
         ]
-        session.commit()
+        # Only a usable proposal is kept for reuse. When the model's output couldn't be used
+        # (result.note set, every column "unmapped"), nothing is stored, so asking again makes
+        # a fresh -- counted -- attempt rather than replaying the failure forever.
+        if result.note is None:
+            row.proposed_mapping = {"proposal": proposal, "note": None}
+            session.commit()
 
         return ProposeMappingResponse(
-            proposal=[
-                MappingProposalEntry(
-                    csv_column=c.csv_column, proposed_role=c.proposed_role, rationale=c.rationale
-                )
-                for c in result.columns
-            ],
-            note=result.note,
+            proposal=[MappingProposalEntry(**entry) for entry in proposal], note=result.note
         )
     finally:
         session.close()
+
+
+def _stored_proposal(stored) -> ProposeMappingResponse | None:
+    """A csv_statements.proposed_mapping value as a response, or None if nothing reusable is
+    stored. Reads both shapes: {"proposal": [...], "note": ...} (Phase D session 4 on) and the
+    bare list rows written before it."""
+    if not stored:
+        return None
+    if isinstance(stored, list):
+        entries, note = stored, None
+    else:
+        entries, note = stored.get("proposal") or [], stored.get("note")
+    if not entries:
+        return None
+    return ProposeMappingResponse(
+        proposal=[MappingProposalEntry(**entry) for entry in entries], note=note
+    )
+
+
+def _ack_fingerprint(mapping: dict, scale: str, unparsed_cells: list[dict]) -> str:
+    """Binds an acknowledgement of unparsed cells to exactly what the person saw (Phase D
+    session 4): SHA-256 of the canonical JSON of the mapping, the scale and the sorted unparsed-
+    cell list. A confirm whose mapping, scale or underlying cells changed since then gets a
+    different fingerprint, so an old acknowledgement can't carry over to a new list."""
+    canonical = json.dumps(
+        {
+            "mapping": mapping,
+            "scale": scale,
+            "unparsed_cells": sorted(unparsed_cells, key=lambda c: (c["role"], c["source_row"])),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @app.post("/v1/csv/{csv_context_id}/confirm", response_model=ConfirmResponse)
@@ -628,22 +702,47 @@ def confirm_mapping(
     request: ConfirmRequest,
     account: Account = Depends(get_current_account),
 ) -> ConfirmResponse:
+    """
+    Phase D session 4: a confirmed context is immutable (409) -- re-mapping means a new
+    /csv/parse and a new id, so conversations that used the old statement keep citing what
+    they saw. Non-blank mapped cells that don't parse as numbers block confirmation until the
+    person acknowledges that exact list (accept_unparsed_cells plus the ack_fingerprint this
+    route returned for it).
+    """
     session = get_session()
     try:
         row = _get_owned_csv_statement(session, csv_context_id, account.id)
+        if row.status == "confirmed":
+            raise HTTPException(status_code=409, detail="csv context already confirmed")
         raw = raw_csv_from_json(row.raw_columns, row.filename, row.uploaded_at)
-
-        serial_reason = find_period_serial_number_value(raw, request.mapping)
-        if serial_reason is not None:
-            return ConfirmResponse(confirmed=False, errors=[serial_reason], warnings=[])
+        units = {"scale": request.scale, "currency": request.currency}
 
         errors = validate_mapping(raw, request.mapping)
         if errors:
-            return ConfirmResponse(confirmed=False, errors=errors, warnings=[])
+            return ConfirmResponse(confirmed=False, errors=errors, warnings=[], **units)
 
-        df, errors, warnings = normalize(raw, request.mapping, request.entity_name)
+        serial_reason = find_period_serial_number_value(raw, request.mapping)
+        if serial_reason is not None:
+            return ConfirmResponse(confirmed=False, errors=[serial_reason], warnings=[], **units)
+
+        df, errors, warnings = normalize(
+            raw, request.mapping, request.entity_name, scale=request.scale, currency=request.currency
+        )
         if errors:
-            return ConfirmResponse(confirmed=False, errors=errors, warnings=warnings)
+            return ConfirmResponse(confirmed=False, errors=errors, warnings=warnings, **units)
+
+        unparsed = find_unparsed_cells(raw, request.mapping)
+        if unparsed:
+            fingerprint = _ack_fingerprint(request.mapping, request.scale, unparsed)
+            if not (request.accept_unparsed_cells and request.ack_fingerprint == fingerprint):
+                return ConfirmResponse(
+                    confirmed=False,
+                    requires_acknowledgement=True,
+                    unparsed_cells=unparsed,
+                    ack_fingerprint=fingerprint,
+                    warnings=warnings,
+                    **units,
+                )
 
         concepts_unavailable = [
             concept for concept in RECOMMENDED_CONCEPTS if concept not in request.mapping.values()
@@ -665,6 +764,8 @@ def confirm_mapping(
             warnings=warnings,
             concepts_unavailable=concepts_unavailable,
             errors=[],
+            unparsed_cells=unparsed,
+            **units,
         )
     finally:
         session.close()

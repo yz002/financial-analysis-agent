@@ -402,3 +402,246 @@ def test_missing_auth_is_401_even_with_an_oversize_body():
         "/v1/csv/parse", content=_oversize_body(), headers={"Content-Type": "application/json"}
     )
     assert resp.status_code == 401
+
+
+# --- Phase D session 4: propose/confirm amendments ------------------------------------------
+
+_FULL_MAPPING = {"Quarter Ending": "period_end", "Total Revenue": "revenue", "Net Income": "net_income"}
+_GOOD_PROPOSAL = [
+    {"csv_column": "Quarter Ending", "proposed_role": "period_end", "rationale": "dates"},
+    {"csv_column": "Total Revenue", "proposed_role": "revenue", "rationale": "revenue"},
+    {"csv_column": "Net Income", "proposed_role": "net_income", "rationale": "net income"},
+]
+
+
+def _parse_with_source(headers, rows=None):
+    resp = client.post(
+        "/v1/csv/parse",
+        json={"rows": rows or _SAMPLE_ROWS, "filename": "FA Spike Test — P&L", "source": _SOURCE},
+        headers=headers,
+    )
+    assert resp.json()["parse_error"] is None, resp.text
+    return resp.json()["csv_context_id"]
+
+
+def _confirm(headers, csv_context_id, **overrides):
+    body = {"mapping": _FULL_MAPPING, "entity_name": "Spike Co", "scale": "ones", **overrides}
+    return client.post(f"/v1/csv/{csv_context_id}/confirm", json=body, headers=headers)
+
+
+def _count_proposal_events(account_id: str) -> int:
+    session = get_session()
+    try:
+        return session.execute(
+            text(
+                "SELECT count(*) FROM usage_events "
+                "WHERE account_id = :id AND outcome = 'mapping_proposal'"
+            ),
+            {"id": account_id},
+        ).scalar()
+    finally:
+        session.close()
+
+
+def _expire(csv_context_id: str) -> None:
+    session = get_session()
+    try:
+        session.execute(
+            text("UPDATE csv_statements SET expires_at = now() - interval '1 minute' WHERE id = :id"),
+            {"id": csv_context_id},
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
+def test_propose_is_idempotent_per_context_and_recorded_once(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    mock_client = MagicMock()
+    mock_client.messages.create = MagicMock(
+        return_value=_text_response(json.dumps({"mappings": _GOOD_PROPOSAL}))
+    )
+    monkeypatch.setattr(csv_ingest.anthropic, "Anthropic", MagicMock(return_value=mock_client))
+
+    first = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    second = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert mock_client.messages.create.call_count == 1
+    assert _count_proposal_events(account_id) == 1
+
+
+def test_unusable_model_output_is_not_cached(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    mock_client = MagicMock()
+    mock_client.messages.create = MagicMock(return_value=_text_response("not json"))
+    monkeypatch.setattr(csv_ingest.anthropic, "Anthropic", MagicMock(return_value=mock_client))
+
+    for _ in range(2):
+        resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["note"] is not None
+    assert mock_client.messages.create.call_count == 2
+    assert _count_proposal_events(account_id) == 2
+
+
+def test_proposals_never_count_toward_the_question_cap(auth_session, monkeypatch):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    _mock_anthropic_client_returning(monkeypatch, _GOOD_PROPOSAL)
+    assert client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers).status_code == 200
+    usage = client.get("/v1/usage", headers=headers).json()
+    assert usage["questions_today"] == 0
+
+
+def test_proposal_cap_is_429_and_deleting_the_csv_rows_does_not_reset_it(auth_session, monkeypatch):
+    from app.gating import MAPPING_PROPOSAL_DAILY_CAP
+
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        for _ in range(MAPPING_PROPOSAL_DAILY_CAP):
+            session.execute(
+                text(
+                    "INSERT INTO usage_events (account_id, occurred_at, outcome) "
+                    "VALUES (:id, now() - interval '1 hour', 'mapping_proposal')"
+                ),
+                {"id": account_id},
+            )
+        session.commit()
+    finally:
+        session.close()
+    _mock_anthropic_client_returning(monkeypatch, _GOOD_PROPOSAL)
+
+    csv_context_id = _parse_with_source(headers)
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["error"] == "mapping_cap_reached"
+    assert resp.json()["detail"]["resets_at"]
+
+    # What the retention cron does to expired unconfirmed rows: the count must survive it.
+    session = get_session()
+    try:
+        session.execute(text("DELETE FROM csv_statements WHERE account_id = :id"), {"id": account_id})
+        session.commit()
+    finally:
+        session.close()
+    csv_context_id = _parse_with_source(headers)
+    resp = client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers)
+    assert resp.status_code == 429
+
+
+def test_expired_context_is_404_for_propose_and_confirm(auth_session, monkeypatch):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    _expire(csv_context_id)
+    _mock_anthropic_client_returning(monkeypatch, _GOOD_PROPOSAL)
+    assert client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers).status_code == 404
+    assert _confirm(headers, csv_context_id).status_code == 404
+
+
+def test_confirmed_context_is_immutable(auth_session, monkeypatch):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    assert _confirm(headers, csv_context_id).json()["confirmed"] is True
+
+    resp = _confirm(headers, csv_context_id, mapping={**_FULL_MAPPING, "Net Income": "unmapped"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "csv context already confirmed"
+    _mock_anthropic_client_returning(monkeypatch, _GOOD_PROPOSAL)
+    assert client.post(f"/v1/csv/{csv_context_id}/propose-mapping", headers=headers).status_code == 409
+
+
+def test_blank_entity_name_is_a_422(auth_session):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    assert _confirm(headers, csv_context_id, entity_name="   ").status_code == 422
+
+
+def test_unknown_column_is_an_in_band_error_not_a_500(auth_session):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    resp = _confirm(headers, csv_context_id, mapping={"Nope": "period_end", "Total Revenue": "revenue"})
+    assert resp.status_code == 200
+    assert resp.json()["confirmed"] is False
+    assert any("Nope" in e for e in resp.json()["errors"])
+
+
+def test_scale_and_currency_are_applied_and_stored(auth_session):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers)
+    resp = _confirm(headers, csv_context_id, scale="thousands", currency="USD")
+    assert resp.json()["confirmed"] is True
+    assert (resp.json()["scale"], resp.json()["currency"]) == ("thousands", "USD")
+
+    session = get_session()
+    try:
+        data, attrs = session.execute(
+            text("SELECT statement_data, statement_attrs FROM csv_statements WHERE id = :id"),
+            {"id": csv_context_id},
+        ).one()
+    finally:
+        session.close()
+    assert data[0]["revenue"] == 100000000.0  # "100000" in thousands
+    assert attrs["csv_source"]["scale"] == "thousands"
+    assert attrs["csv_source"]["currency"] == "USD"
+
+
+_ROWS_WITH_DIV0 = [
+    ["Quarter Ending", "Total Revenue", "Net Income"],
+    ["2024-01-01", "100000", "#DIV/0!"],
+    ["2024-04-01", "110000", "13000"],
+]
+
+
+def test_unparsed_cells_need_an_acknowledgement_bound_to_what_was_shown(auth_session):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers, rows=_ROWS_WITH_DIV0)
+
+    first = _confirm(headers, csv_context_id).json()
+    assert first["confirmed"] is False
+    assert first["requires_acknowledgement"] is True
+    assert first["unparsed_cells"] == [
+        {
+            "cell": "'P&L'!C4", "source_row": 0, "column": "Net Income", "role": "net_income",
+            "period_end": "2024-01-01", "value": "#DIV/0!",
+        }
+    ]
+    fingerprint = first["ack_fingerprint"]
+    assert fingerprint
+
+    # Accepting without the fingerprint isn't enough.
+    resp = _confirm(headers, csv_context_id, accept_unparsed_cells=True).json()
+    assert resp["requires_acknowledgement"] is True and resp["confirmed"] is False
+
+    confirmed = _confirm(
+        headers, csv_context_id, accept_unparsed_cells=True, ack_fingerprint=fingerprint
+    ).json()
+    assert confirmed["confirmed"] is True, confirmed
+    assert confirmed["unparsed_cells"][0]["cell"] == "'P&L'!C4"
+
+
+def test_acknowledgement_for_a_different_scale_or_mapping_is_not_accepted(auth_session):
+    _, headers = auth_session()
+    csv_context_id = _parse_with_source(headers, rows=_ROWS_WITH_DIV0)
+    fingerprint = _confirm(headers, csv_context_id).json()["ack_fingerprint"]
+
+    # Same cells, but the person changed the scale since acknowledging: ask again.
+    resp = _confirm(
+        headers, csv_context_id, scale="thousands", accept_unparsed_cells=True,
+        ack_fingerprint=fingerprint,
+    ).json()
+    assert resp["confirmed"] is False
+    assert resp["requires_acknowledgement"] is True
+    assert resp["ack_fingerprint"] != fingerprint
+
+    # A different mapping (Net Income no longer mapped) means a different, here empty, list:
+    # nothing to acknowledge, so it confirms.
+    resp = _confirm(
+        headers, csv_context_id, mapping={**_FULL_MAPPING, "Net Income": "unmapped"},
+        accept_unparsed_cells=True, ack_fingerprint=fingerprint,
+    ).json()
+    assert resp["confirmed"] is True
+    assert resp["unparsed_cells"] == []

@@ -957,3 +957,25 @@
   audited every `logger.*`/`print(` call across the codebase *at the time*, but a route added
   or modified afterward isn't automatically covered by an audit that already happened — this
   fix closes the one instance of that gap found so far, not a guarantee no others exist.
+
+- **CSV/sheet statements carry units, and values are converted to ones in Python (Phase D
+  session 4).** `/v1/csv/{id}/confirm` takes a `scale` (`ones`/`thousands`/`millions`/
+  `billions`) and an optional `currency` label. `csv_statement.normalize` multiplies every mapped
+  value by the scale with exact `Decimal` arithmetic (so `0.1` thousands is exactly `100.0`) and
+  records both in `df.attrs["csv_source"]`. `get_csv_statement`/`get_csv_ratios` add a `units`
+  object, and each citation adds `sheet_scale`. The conversion happens in Python rather than
+  being left to the model with a "thousands" label, for the same no-model-arithmetic reason as
+  everything else: the model would have to multiply to say "$1.25 million", and
+  `check_figures` couldn't trace 1.25e6 to a tool value of 1250. A null currency means "not
+  specified", and the agent prompt then says to report the business's figures without any
+  currency symbol or code. **This is a deliberate behavior change, not a bug.** Streamlit CSV
+  uploads never set a currency, so their answers lost the "$" they used to get; that was
+  accepted in session 4 on the "no silent defaults" principle. Answers about a CSV with no
+  stated currency print "1.25 million", not "$1.25 million". EDGAR ticker answers are
+  unaffected.
+  The Chrome extension's scale selector deliberately has no default: a sheet typed in
+  thousands, silently confirmed as ones, is wrong by 1000x.
+  Separately, `find_unparsed_cells` reports every non-blank mapped cell that `normalize` would
+  turn into "no value" (`61.5%`, `#DIV/0!`), and `/confirm` refuses until that exact list is
+  acknowledged through a fingerprint over the mapping, the scale and the list. Before this,
+  those cells became NaN without a word.

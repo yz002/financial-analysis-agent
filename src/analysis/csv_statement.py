@@ -27,6 +27,7 @@ exact match, not just a same-set-different-order one.
 """
 
 import re
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
@@ -70,14 +71,36 @@ _ANNUAL_SPACING_DAYS_MIN, _ANNUAL_SPACING_DAYS_MAX = 350, 380
 
 _PAREN_NEGATIVE_RE = re.compile(r"^\((.*)\)$")
 
+# The scale a sheet's numbers were typed in (Phase D session 4, open item 8), chosen by the
+# person at confirm time. normalize() converts every mapped value to ones with exact Decimal
+# arithmetic, so tools and the agent only ever see ones -- the model never has to multiply to
+# say "$1.25 million", which would break the no-model-arithmetic rule and leave check_figures
+# unable to trace the figure. "ones" is the backward-compatible default for callers that predate
+# the setting (the Streamlit app); the Chrome extension always sends a scale explicitly, and
+# never defaults it, since a silent "ones" on a sheet typed in thousands is wrong by 1000x.
+SCALE_FACTORS = {
+    "ones": Decimal(1),
+    "thousands": Decimal(1_000),
+    "millions": Decimal(1_000_000),
+    "billions": Decimal(1_000_000_000),
+}
+DEFAULT_SCALE = "ones"
+
+# How much of an unparseable cell's text find_unparsed_cells echoes back.
+_UNPARSED_VALUE_MAX_CHARS = 50
+
 
 def validate_mapping(raw, mapping: dict) -> list[str]:
     """
     Check a human-confirmed {csv_column: role} mapping for the minimum-viable-shape gates,
     independent of parsing any actual values. Returns a list of plain-English violation
-    reasons (empty list = valid). Roles not in MAPPABLE_ROLES/UNMAPPED_ROLE are treated as
-    "unmapped" -- callers (the confirmation UI, normalize()) should already restrict widget
-    choices to valid roles, so this is a defensive floor, not the primary UI validation.
+    reasons (empty list = valid).
+
+    A mapping key that isn't one of `raw`'s columns, or a role outside MAPPABLE_ROLES/
+    UNMAPPED_ROLE, is a violation (Phase D session 4). Before that, an unknown column reached
+    normalize() and raised a bare KeyError (a 500 from the backend's /confirm), and an unknown
+    role (a typo like "reveneu") was silently ignored -- a mapping the person thought they'd
+    made, quietly not applied.
 
     Checks: exactly one column mapped to "period_end" (zero -> no date column identified;
     more than one -> ambiguous, pick one); exactly one column mapped to "revenue" (revenue is
@@ -88,9 +111,26 @@ def validate_mapping(raw, mapping: dict) -> list[str]:
     so a column has exactly one role in `mapping` -- so that ambiguity isn't checked here.
     """
     errors = []
+    known_columns = set(raw.df.columns)
+    unknown_columns = [column for column in mapping if column not in known_columns]
+    if unknown_columns:
+        errors.append(
+            "The mapping names column(s) that aren't in this data: "
+            f"{', '.join(repr(c) for c in unknown_columns)}."
+        )
+    valid_roles = set(MAPPABLE_ROLES) | {UNMAPPED_ROLE}
+    unknown_roles = sorted(
+        {role for role in mapping.values() if role is not None and role not in valid_roles}
+    )
+    if unknown_roles:
+        errors.append(
+            f"Unknown role(s) in the mapping: {', '.join(repr(r) for r in unknown_roles)}. "
+            "Use one of the listed concepts, period_end, or unmapped."
+        )
+
     role_columns: dict[str, list[str]] = {}
     for column, role in mapping.items():
-        if role in (UNMAPPED_ROLE, None):
+        if role in (UNMAPPED_ROLE, None) or role not in valid_roles or column not in known_columns:
             continue
         role_columns.setdefault(role, []).append(column)
 
@@ -130,35 +170,110 @@ def validate_mapping(raw, mapping: dict) -> list[str]:
     return errors
 
 
-def _clean_numeric_series(s: pd.Series) -> pd.Series:
+def _is_blank(v) -> bool:
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return True
+    return str(v).strip() == ""
+
+
+def _parse_numeric_cell(v) -> Decimal | None:
     """
-    Coerce a raw CSV column to numeric, tolerating common small-business bookkeeping
-    formatting: a leading "$", thousands commas, and parenthesized negatives (e.g.
-    "(1,234.56)" -> -1234.56). A cell that still isn't numeric after cleanup becomes None for
-    that cell (not a file-level refusal) -- the same "missing for this period, not fatal"
-    treatment get_statement() gives any other absent value.
+    One raw cell -> an exact Decimal, tolerating common small-business bookkeeping formatting:
+    a leading "$", thousands commas, and parenthesized negatives (e.g. "(1,234.56)" ->
+    -1234.56). None for a blank cell and for anything that still isn't a finite number after
+    cleanup ("N/A", "61.5%", "#DIV/0!", "NaN") -- find_unparsed_cells tells those two apart.
+    """
+    if _is_blank(v):
+        return None
+    text = str(v).strip()
+    m = _PAREN_NEGATIVE_RE.match(text)
+    negative = m is not None
+    if negative:
+        text = m.group(1)
+    text = text.replace("$", "").replace(",", "").strip()
+    if text == "":
+        return None
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not value.is_finite():
+        return None
+    return -value if negative else value
+
+
+def _clean_numeric_series(s: pd.Series, factor: Decimal = SCALE_FACTORS[DEFAULT_SCALE]) -> pd.Series:
+    """
+    Coerce a raw CSV column to numeric floats via _parse_numeric_cell, multiplied by `factor`
+    (a SCALE_FACTORS value) in exact Decimal arithmetic before the single conversion to float
+    -- so "0.1" in thousands is exactly 100.0, never 100.00000000000001. A cell that still
+    isn't numeric after cleanup becomes None for that cell (not a file-level refusal) -- the
+    same "missing for this period, not fatal" treatment get_statement() gives any other absent
+    value. find_unparsed_cells is what reports a non-blank one of those to the person.
     """
 
     def clean_one(v):
-        if pd.isna(v):
-            return None
-        text = str(v).strip()
-        if text == "":
-            return None
-        m = _PAREN_NEGATIVE_RE.match(text)
-        negative = m is not None
-        if negative:
-            text = m.group(1)
-        text = text.replace("$", "").replace(",", "").strip()
-        if text == "":
-            return None
-        try:
-            value = float(text)
-        except ValueError:
-            return None
-        return -value if negative else value
+        value = _parse_numeric_cell(v)
+        return None if value is None else float(value * factor)
 
     return s.map(clean_one)
+
+
+def _source_cell_for(raw, column: str, row_idx: int) -> str | None:
+    """The sheet-qualified cell address (e.g. 'P&L'!B4) of data row `row_idx` in `column`, or
+    None for a plain uploaded file with no spreadsheet `source`. Data row i sits one row below
+    the header, i.e. sheet row start_row + 1 + i."""
+    source = raw.source
+    origin = parse_a1_range(source["range"]) if source else None
+    if origin is None:
+        return None
+    start_row, start_col = origin[0], origin[1]
+    return cell_reference(
+        source["sheet_name"], start_row + 1 + row_idx, start_col + raw.df.columns.get_loc(column)
+    )
+
+
+def find_unparsed_cells(raw, mapping: dict) -> list[dict]:
+    """
+    Every non-blank cell in a column mapped to a concept that normalize() would turn into "no
+    value" because it doesn't parse as a number -- "61.5%" typed as text, "#DIV/0!", "TRUE",
+    "€1,250", "1 250 000" (Phase D session 4, chrome-extension-design.md SS10 open item 6).
+    Before this, those cells became None silently. Only rows whose period cell parses as a date
+    are checked: a row with a bad date is dropped whole, and normalize() already warns about
+    it. Blank cells aren't listed -- a blank means "not reported", not a parse failure.
+
+    Each entry: {"cell" (e.g. "'P&L'!B7", or None without a spreadsheet source),
+    "source_row" (0-based data-row index, as in csv_provenance), "column", "role",
+    "period_end" (ISO date), "value" (the raw text, capped at 50 characters)}, in concept then
+    row order. Returns [] for a mapping that fails validate_mapping.
+    """
+    if validate_mapping(raw, mapping):
+        return []
+    role_to_column = {role: col for col, role in mapping.items() if role not in (UNMAPPED_ROLE, None)}
+    parsed_dates = pd.to_datetime(raw.df[role_to_column[PERIOD_ROLE]], errors="coerce")
+
+    unparsed = []
+    for concept in ALL_CONCEPTS:
+        column = role_to_column.get(concept)
+        if column is None:
+            continue
+        for row_idx in raw.df.index:
+            if pd.isna(parsed_dates.loc[row_idx]):
+                continue
+            v = raw.df.loc[row_idx, column]
+            if _is_blank(v) or _parse_numeric_cell(v) is not None:
+                continue
+            unparsed.append(
+                {
+                    "cell": _source_cell_for(raw, column, int(row_idx)),
+                    "source_row": int(row_idx),
+                    "column": column,
+                    "role": concept,
+                    "period_end": parsed_dates.loc[row_idx].strftime("%Y-%m-%d"),
+                    "value": str(v)[:_UNPARSED_VALUE_MAX_CHARS],
+                }
+            )
+    return unparsed
 
 
 def _fits_step_or_one_missing(gap: int, lo: int, hi: int) -> bool:
@@ -238,10 +353,20 @@ def statement_from_records(records: list[dict], attrs: dict) -> pd.DataFrame:
     return df
 
 
-def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None, list, list]:
+def normalize(
+    raw,
+    mapping: dict,
+    entity_name: str,
+    scale: str = DEFAULT_SCALE,
+    currency: str | None = None,
+) -> tuple[pd.DataFrame | None, list, list]:
     """
     Build a get_statement()-shaped DataFrame from `raw` (a csv_ingest.RawCsv) and a
-    human-confirmed {csv_column: role} mapping. Returns (df, errors, warnings):
+    human-confirmed {csv_column: role} mapping. `scale` (a SCALE_FACTORS key) is the unit the
+    sheet's numbers were typed in: every mapped value is converted to ones exactly (see
+    SCALE_FACTORS). `currency` is an ISO-4217 label, or None when the person didn't state one --
+    a label only, never a conversion. Both are recorded in df.attrs["csv_source"].
+    Returns (df, errors, warnings):
       - On refusal: (None, errors, warnings) -- errors is non-empty, naming every violated
         gate; no partial/guessed DataFrame is ever returned alongside a refusal.
       - On success: (df, [], warnings) -- warnings may be non-empty (dropped bad-date rows,
@@ -253,8 +378,11 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
     spacing that isn't quarterly- or annual-cadence (see _detect_cadence).
 
     Drops (soft, row-level, not a file-level refusal): a row whose mapped date cell doesn't
-    parse -- reported by its row number and raw value in `warnings`, the surviving rows still
-    normalize.
+    parse -- reported by its cell address (with a spreadsheet `source`) or row number, and its
+    raw value, in `warnings`; the surviving rows still normalize. Blank cells in a mapped
+    concept column are summarized per concept in `warnings`; non-blank cells that don't parse
+    are reported separately by find_unparsed_cells, which the backend's /confirm requires the
+    person to acknowledge.
 
     Every EDGAR-only column is stubbed to a fixed default, never computed: {concept}_is_derived
     is always False, {concept}_derivation_method is always None, {concept}_q4_subtraction_value
@@ -269,7 +397,7 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
 
     df.attrs carries entity_name (as given), cik=None (never a fabricated placeholder),
     periods_available (the row count after date-parsing/dedup), csv_source
-    ({"filename", "uploaded_at", "cadence"}), and csv_provenance
+    ({"filename", "uploaded_at", "cadence", "scale", "currency"}), and csv_provenance
     ({concept: {period_end_iso: {"source_row", "source_column"}}}, entries only for periods
     where that concept has a real value, plus "source_cell" -- a sheet-qualified address like
     'P&L'!B4 -- when `raw.source` says which spreadsheet range the rows came from; source_row
@@ -281,18 +409,23 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
     CSV analog, and reusing its EDGAR-specific wording here would be actively misleading.
     """
     errors = validate_mapping(raw, mapping)
+    if scale not in SCALE_FACTORS:
+        errors.append(f"Unknown scale {scale!r}; use one of {', '.join(SCALE_FACTORS)}.")
     if errors:
         return None, errors, []
+    factor = SCALE_FACTORS[scale]
 
-    role_to_column = {role: col for col, role in mapping.items() if role != UNMAPPED_ROLE}
+    role_to_column = {role: col for col, role in mapping.items() if role not in (UNMAPPED_ROLE, None)}
     period_column = role_to_column[PERIOD_ROLE]
 
     warnings: list[str] = []
     parsed_dates = pd.to_datetime(raw.df[period_column], errors="coerce")
     valid_mask = parsed_dates.notna()
     for idx in raw.df.index[~valid_mask]:
+        cell = _source_cell_for(raw, period_column, int(idx))
+        where = f"Row {idx} ({cell})" if cell else f"Row {idx}"
         warnings.append(
-            f"Row {idx} was dropped: {period_column!r} value {raw.df.loc[idx, period_column]!r} "
+            f"{where} was dropped: {period_column!r} value {raw.df.loc[idx, period_column]!r} "
             "could not be parsed as a date."
         )
     if not valid_mask.any():
@@ -326,39 +459,34 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
     cleaned_columns: dict[str, pd.Series] = {}
     provenance: dict[str, dict] = {}
 
-    # A spreadsheet-sourced upload (sheet_ingest's `source`) can cite the exact cell: data row
-    # i of the range sits one row below the header, i.e. sheet row start_row + 1 + i.
-    source = raw.source
-    origin = parse_a1_range(source["range"]) if source else None
-
-    def source_cell(column: str, row_idx: int) -> str | None:
-        if origin is None:
-            return None
-        start_row, start_col = origin[0], origin[1]
-        return cell_reference(
-            source["sheet_name"], start_row + 1 + row_idx, start_col + raw.df.columns.get_loc(column)
-        )
-
     def values_for(concept: str) -> list:
         column = role_to_column.get(concept)
         if column is None:
             return [float("nan")] * n
         if column not in cleaned_columns:
-            cleaned_columns[column] = _clean_numeric_series(raw.df[column])
+            cleaned_columns[column] = _clean_numeric_series(raw.df[column], factor)
         cleaned = cleaned_columns[column]
         result = []
+        blanks = 0
         prov = provenance.setdefault(concept, {})
         for i, row_idx in enumerate(source_rows):
             v = cleaned.loc[row_idx]
             if v is None:
                 result.append(float("nan"))
+                blanks += _is_blank(raw.df.loc[row_idx, column])
             else:
                 result.append(v)
+                # A spreadsheet-sourced upload (sheet_ingest's `source`) also cites the cell.
                 entry = {"source_row": int(row_idx), "source_column": column}
-                cell = source_cell(column, int(row_idx))
+                cell = _source_cell_for(raw, column, int(row_idx))
                 if cell is not None:
                     entry["source_cell"] = cell
                 prov[period_end_iso[i]] = entry
+        if blanks:
+            warnings.append(
+                f"{concept} ({column!r}) is blank for {blanks} of {n} period(s); those periods "
+                "have no value for it."
+            )
         return result
 
     out: dict[str, list] = {
@@ -416,6 +544,8 @@ def normalize(raw, mapping: dict, entity_name: str) -> tuple[pd.DataFrame | None
         "filename": raw.filename,
         "uploaded_at": uploaded_at_ts.strftime("%Y-%m-%d %H:%M:%S"),
         "cadence": cadence,
+        "scale": scale,
+        "currency": currency,
     }
     df.attrs["csv_provenance"] = provenance
 

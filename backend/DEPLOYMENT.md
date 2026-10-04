@@ -68,6 +68,45 @@ The fake request fails before account resolution, so it creates no rows.
   every affected user has to re-register their key.
 - To rotate it, follow `SECURITY.md` §3.1 (hard cutover).
 
+## Database migrations
+
+**Render never runs migrations.** The web service runs `pip install -r requirements.txt` to
+build, has no Pre-Deploy command (that setting isn't available on the current plan), and its
+Start Command is uvicorn. Nothing in a deploy runs `alembic`. Every migration is applied by
+hand.
+
+**`backend/.env`'s `DATABASE_URL` is the production database.** So any `alembic` command run
+locally, including `upgrade`, `downgrade` and `stamp`, changes production **immediately**,
+before any code is pushed or deployed. See "Known risk / backlog" below.
+
+Procedure for a change that needs a migration:
+
+1. **Only additive migrations run ahead of code**: a new table, column, index or enum value
+   that the currently deployed code ignores. Check that the deployed code keeps working once it
+   has run. A migration that removes or renames something the deployed code uses needs its own
+   plan: deploy code that no longer depends on it first, then migrate.
+2. **Get explicit approval**, then run it once, from `backend/`, **before pushing** the code
+   that depends on it:
+   ```
+   .venv/Scripts/alembic.exe current
+   .venv/Scripts/alembic.exe upgrade head
+   .venv/Scripts/alembic.exe current
+   ```
+3. **Verify the change itself**, not only the revision. For an enum value, for example:
+   `SELECT unnest(enum_range(NULL::usage_event_outcome))`.
+4. **Record the applied revision** in the log below.
+5. Then run the backend tests and push.
+
+**Pre-push checklist:** Does this push need a migration? Has it been applied?
+
+### Applied revisions
+
+| Revision | Applied to production | Notes |
+|---|---|---|
+| `0004_mapping_proposal_outcome` | 2026-10-04 | Adds `usage_event_outcome` value `mapping_proposal` (Phase D session 4). Additive; applied before the code that writes it. Verified with `enum_range`. |
+
+Revisions 0001–0003 were applied by hand earlier and weren't recorded here.
+
 ## Known risk / backlog: no separate dev/test database
 
 The local backend (`backend/.env`'s `DATABASE_URL`) and the backend test suite both point at

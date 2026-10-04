@@ -286,6 +286,10 @@ roadmap for what's left (Phase 7 documentation and demo).
 - The agent layer's no-arithmetic constraint (`src/agent/agent.py`'s system prompt) is enforced
   by instruction only, with no automated check that a given answer's figures actually trace back
   to a tool result.
+- CSV/sheet statements carry `units` (Phase D session 4). Values are converted to ones in
+  Python (`csv_statement.normalize`'s `scale`), never by the model. A statement with no stated
+  currency is reported **without any currency symbol**, Streamlit CSV uploads included. That's
+  deliberate (no silent defaults), not a bug; see NOTES.md.
 - `agent/tools.py`'s `get_ratios` attaches provenance to ratio rows positionally (`zip`), not
   joined on `period_end` — correct today only because every `ratios.py` function preserves row
   order and count.

@@ -32,8 +32,43 @@ PAID_MONTHLY_CAP = 50
 
 # usage_events outcomes that represent a real attempt and so count toward a cap --
 # excludes the rejected_* outcomes, which record a rejection but shouldn't count against
-# the cap that rejection just enforced (design doc SS2/SS7.2).
+# the cap that rejection just enforced (design doc SS2/SS7.2). Also excludes
+# "mapping_proposal" (Phase D session 4): proposing a column mapping is setup, not a
+# question, so it never counts toward the question caps -- only toward its own cap below.
 _COUNTED_OUTCOMES = ("answered", "hit_iteration_cap", "error")
+
+# Fresh model calls from POST /v1/csv/{id}/propose-mapping, per account, in a rolling 24h
+# window, regardless of tier (a proposal always uses the master key). Counted from
+# usage_events rather than csv_statements: the retention cron deletes expired unconfirmed
+# csv_statements rows about an hour after parse, which would silently reset the count. A
+# placeholder to tune from real usage, like FREE_DAILY_CAP.
+MAPPING_PROPOSAL_DAILY_CAP = 30
+MAPPING_PROPOSAL_WINDOW = timedelta(hours=24)
+MAPPING_PROPOSAL_OUTCOME = "mapping_proposal"
+
+
+@dataclass
+class MappingProposalGateDecision:
+    allowed: bool
+    proposals_used: int
+    resets_at: datetime | None  # when the oldest proposal in the window ages out; None if allowed
+
+
+def evaluate_mapping_proposal_gate(session, account_id, now: datetime) -> MappingProposalGateDecision:
+    """Whether this account may make another fresh mapping proposal now. Pure, like
+    evaluate_ask_gate -- the route inserts the usage_events row itself when allowed."""
+    used, oldest = session.execute(
+        select(func.count(), func.min(UsageEvent.occurred_at)).where(
+            UsageEvent.account_id == account_id,
+            UsageEvent.occurred_at >= now - MAPPING_PROPOSAL_WINDOW,
+            UsageEvent.outcome == MAPPING_PROPOSAL_OUTCOME,
+        )
+    ).one()
+    if used < MAPPING_PROPOSAL_DAILY_CAP:
+        return MappingProposalGateDecision(allowed=True, proposals_used=used, resets_at=None)
+    return MappingProposalGateDecision(
+        allowed=False, proposals_used=used, resets_at=oldest + MAPPING_PROPOSAL_WINDOW
+    )
 
 
 @dataclass

@@ -421,6 +421,8 @@ Response (200 — always 200; structural failures are reported in-band, not via 
 }
 ```
 `csv_context_id` is short-lived (expires in 1 hour) until confirmed via `/confirm` below.
+(Amended Phase D session 4: the expiry is now enforced by propose-mapping and confirm
+themselves, as a `404`, not only by the cleanup job that later deletes the row.)
 
 ### `POST /v1/csv/{csv_context_id}/propose-mapping`
 Auth required. `csv_context_id` is a path parameter (from `/csv/parse`'s response). **No request
@@ -443,6 +445,23 @@ Errors: `502` (`{"detail": "Anthropic API error."}`) or `500`
 (`{"detail": "propose_mapping failed unexpectedly."}`) if the underlying mapping call fails —
 both generic, with no exception detail included, same hardening rule `/v1/ask` already applies
 below.
+
+(Amended Phase D session 4:
+- **Idempotent per context.** Once a usable proposal exists for a `csv_context_id`, calling
+  again returns it without a second model call. A proposal whose `note` is set (the model's
+  output couldn't be used, so every column is `unmapped`) isn't kept, so calling again makes a
+  fresh attempt.
+- **A daily cap on fresh proposals:** 30 per account in a rolling 24 hours, whatever the tier.
+  Each fresh model call, including one that then fails, is recorded as a usage event of its
+  own kind. Proposals **never count toward the question caps** in `/v1/usage` or `/v1/ask`'s
+  429, and always run on the master key, never a BYO key. Over the cap:
+  `429 {"detail": {"error": "mapping_cap_reached", "resets_at": "<ISO-8601>"}}`. A proposal
+  isn't required to confirm, so the extension offers manual mapping instead.
+- `404` (`"csv context not found"`) also covers an **expired** context: an unconfirmed one
+  past its 1-hour lifetime is refused even before the cleanup job deletes it.
+- `409` (`{"detail": "csv context already confirmed"}`) for a confirmed context.
+- Only the prompt is bounded: headers are cut to 200 characters and sample cells to 100 when
+  sent to the model. Proposed `csv_column` values are always the real, full header names.)
 
 ### `POST /v1/csv/{csv_context_id}/confirm`
 Auth required. `csv_context_id` is a path parameter.
@@ -470,6 +489,56 @@ Once confirmed, the CSV context becomes durable (no longer expires) and can be r
 Error: `404` (`{"detail": "csv context not found"}`) if `csv_context_id` doesn't exist or belongs
 to a different account — these two cases are deliberately indistinguishable, same
 anti-enumeration posture as §3's 401s.
+
+(Amended Phase D session 4: **units, unparseable cells, and immutability.** Every new field is
+optional, so older callers keep working.)
+- **Request additions:**
+  ```json
+  {
+    "mapping": {...},
+    "entity_name": "Acme Corp",          // 1-200 characters after trimming; blank is a 422
+    "scale": "thousands",                // "ones" | "thousands" | "millions" | "billions"
+    "currency": null,                    // ISO-4217 code like "USD", or null = not specified
+    "accept_unparsed_cells": false,
+    "ack_fingerprint": null              // echo of a previous response's ack_fingerprint
+  }
+  ```
+  - **`scale`** is the unit the sheet's numbers were typed in. The backend converts every mapped
+    value to ones, exactly, before anything else sees it: the agent and its figure check only
+    ever work in ones. It defaults to `"ones"` **only for callers that predate it. The
+    extension always sends it, and its selector has no default:** a sheet typed in thousands
+    and confirmed as ones would make every answer wrong by 1000x.
+  - **`currency`** is a label, never a conversion. `null` means not specified, and the agent then
+    reports the business's figures with no currency symbol or code.
+- **Unparseable cells need an acknowledgement.** When a column mapped to a concept has non-blank
+  cells that don't parse as numbers (`61.5%` typed as text, `#DIV/0!`, `TRUE`, `€1,250`), the
+  response is `confirmed: false`, `requires_acknowledgement: true`, with:
+  ```json
+  "unparsed_cells": [{"cell": "'P&L'!C4", "source_row": 0, "column": "Net Income",
+                      "role": "net_income", "period_end": "2024-01-01", "value": "#DIV/0!"}],
+  "ack_fingerprint": "<hex>"
+  ```
+  `cell` is `null` without a `source`, and `value` is cut to 50 characters. To go ahead, confirm
+  again with `accept_unparsed_cells: true` **and** that `ack_fingerprint`. The fingerprint
+  covers the mapping, the scale and the cell list. If any of them changed, the response is
+  `requires_acknowledgement` again, with the new list and a new fingerprint. On success, those
+  periods have no value for that concept, and `unparsed_cells` is returned again for the
+  record. Blank cells aren't listed (a blank means "not reported"); each mapped concept with
+  blanks gets one line in `warnings`.
+- **Other response additions:** `requires_acknowledgement` (default `false`),
+  `unparsed_cells` (default `[]`), `ack_fingerprint` (default `null`), and `scale`/`currency`
+  echoed back.
+- **Better refusals.** A `mapping` key that isn't a column, or a role that isn't a concept,
+  `period_end` or `unmapped`, is now an in-band `errors[]` entry. It used to be a 500, or for
+  roles, silently ignored. A dropped bad-date row's warning names its cell when there's a
+  `source`.
+- **Confirmed contexts are immutable:** `409` (`{"detail": "csv context already
+  confirmed"}`). To re-map, send the rows to `/v1/csv/parse` again and confirm the new
+  `csv_context_id`. Conversations that used the old statement keep pointing at it.
+- **`404` also covers an expired context** (an unconfirmed one past its 1-hour lifetime), as
+  for propose-mapping.
+- Tool results the agent sees for a confirmed statement now carry `units`, and each value's
+  citation carries `sheet_scale`. That's internal, not part of this HTTP contract.
 
 ### `POST /v1/ask`
 Auth required. The main question-answering endpoint.

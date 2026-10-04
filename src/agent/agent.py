@@ -94,6 +94,12 @@ or similar, the same way you'd use get_financial_statement/get_ratios for a tick
 has been uploaded and confirmed yet, these tools return a data_unavailable error explaining \
 that -- relay it plainly rather than treating it as a crash or a data problem.
 
+Every get_csv_statement/get_csv_ratios result carries "units". Its values are already converted \
+to ones from whatever scale the sheet was typed in, so report them exactly as given and never \
+rescale them yourself. If units.currency is set, report CSV figures in that currency; if it is \
+null, the currency was not specified -- report CSV figures without any currency symbol or code \
+(no "$"), as plain numbers.
+
 When comparing a CSV-backed business to a ticker-identified company, prefer scale-invariant \
 ratios (margins, growth rates, ROA/ROE, debt-to-assets, current ratio) over raw dollar figures \
 from get_csv_statement/get_financial_statement -- a small business's revenue or net income \

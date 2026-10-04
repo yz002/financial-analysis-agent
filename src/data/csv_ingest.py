@@ -41,6 +41,13 @@ DEFAULT_MODEL = "claude-opus-5"
 # rows to judge what a column *is* (a date? a dollar figure? which one?), not the whole file.
 MAX_SAMPLE_ROWS = 5
 
+# Prompt-only truncation (Phase D session 4): /v1/csv/parse accepts up to 200 columns of
+# 1,000-character cells, so an untruncated prompt could reach ~1.2M characters for one
+# proposal. A header or sample value this long says nothing more about which role a column
+# plays. The stored data is never truncated -- only what's sent to the model.
+MAX_PROMPT_HEADER_CHARS = 200
+MAX_PROMPT_CELL_CHARS = 100
+
 # The mapping roles a CSV column can be proposed/confirmed as: the 13 concepts
 # src/analysis/statements.py's get_statement() tracks, plus the one special "this is the
 # period/date column" role. Not imported from statements.py (out of scope this session) --
@@ -154,11 +161,23 @@ column that doesn't correspond to any listed role (e.g. an internal ID, a commen
 proposing which column is which -- never state, compute, or alter any value."""
 
 
+def _prompt_header(column: str) -> str:
+    return str(column)[:MAX_PROMPT_HEADER_CHARS]
+
+
 def _mapping_prompt(raw: RawCsv, roles: list[str]) -> str:
     sample = raw.df.head(MAX_SAMPLE_ROWS)
-    lines = [f"Columns: {', '.join(raw.df.columns)}", "", "Sample rows:"]
+    headers = [_prompt_header(c) for c in raw.df.columns]
+    lines = [f"Columns: {', '.join(headers)}", "", "Sample rows:"]
     for _, row in sample.iterrows():
-        lines.append(json.dumps({col: str(row[col]) for col in raw.df.columns}))
+        lines.append(
+            json.dumps(
+                {
+                    _prompt_header(col): str(row[col])[:MAX_PROMPT_CELL_CHARS]
+                    for col in raw.df.columns
+                }
+            )
+        )
     return "\n".join(lines)
 
 
@@ -209,15 +228,25 @@ def propose_mapping(
             ),
         )
 
+    # The model saw prompt-truncated headers (_prompt_header); map each back to the real column
+    # name so the proposal always names columns exactly as /confirm expects them.
+    real_column = {}
+    for c in raw.df.columns:
+        real_column.setdefault(_prompt_header(c), c)
+        real_column[c] = c
+
     by_column = {}
     for entry in raw_mappings:
         if not isinstance(entry, dict) or "csv_column" not in entry:
             continue
+        column = real_column.get(entry["csv_column"])
+        if column is None:
+            continue
         role = entry.get("proposed_role", UNMAPPED_ROLE)
         if role not in valid_roles:
             role = UNMAPPED_ROLE
-        by_column[entry["csv_column"]] = ColumnProposal(
-            csv_column=entry["csv_column"],
+        by_column[column] = ColumnProposal(
+            csv_column=column,
             proposed_role=role,
             rationale=str(entry.get("rationale", "")),
         )

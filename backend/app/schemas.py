@@ -14,7 +14,7 @@ response_model wants one consistent shape per route.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -79,8 +79,33 @@ class ProposeMappingResponse(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
+    """Phase D session 4 contract amendment: scale/currency/accept_unparsed_cells/ack_fingerprint
+    are optional so callers that predate them keep working. `scale` defaults to "ones" only for
+    those callers -- the Chrome extension always sends it explicitly and never defaults it."""
+
     mapping: dict[str, str]
-    entity_name: str
+    entity_name: str = Field(min_length=1, max_length=200)
+    scale: Literal["ones", "thousands", "millions", "billions"] = "ones"
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    accept_unparsed_cells: bool = False
+    ack_fingerprint: str | None = Field(default=None, max_length=128)
+
+    @field_validator("entity_name")
+    @classmethod
+    def _entity_name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("entity_name must not be blank")
+        return value
+
+
+class UnparsedCell(BaseModel):
+    cell: str | None  # e.g. "'P&L'!B7"; None for a plain upload with no spreadsheet source
+    source_row: int  # 0-based data-row index
+    column: str
+    role: str
+    period_end: str
+    value: str
 
 
 class ConfirmResponse(BaseModel):
@@ -89,6 +114,14 @@ class ConfirmResponse(BaseModel):
     warnings: list[str] = []
     concepts_unavailable: list[str] = []
     errors: list[str] = []
+    # Phase D session 4: set (with confirmed=false) when mapped columns hold non-blank cells
+    # that don't parse as numbers; confirm again with accept_unparsed_cells=true and this
+    # ack_fingerprint to go ahead. unparsed_cells is also returned on a successful confirm.
+    requires_acknowledgement: bool = False
+    unparsed_cells: list[UnparsedCell] = []
+    ack_fingerprint: str | None = None
+    scale: str | None = None
+    currency: str | None = None
 
 
 class UsageResponse(BaseModel):

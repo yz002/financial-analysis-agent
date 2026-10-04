@@ -484,6 +484,72 @@ def test_get_csv_statement_cites_the_sheet_cell_for_spreadsheet_sourced_data():
     assert by_period["2024-06-30"]["revenue"]["source_cell"] == "'P&L'!B5"
 
 
+def _sheet_statement_after_backend_round_trip(scale="ones", currency=None):
+    """A spreadsheet-sourced statement taken through the same JSON round trip the backend uses
+    between /confirm (df.to_json + df.attrs into csv_statements) and /v1/ask
+    (statement_from_records) -- so the tool output below is what the agent really sees."""
+    from src.data.sheet_ingest import rows_to_raw_csv
+
+    rows = [
+        ["Quarter Ending", "Total Revenue", "Net Income"],
+        ["2024-03-31", "1250", "100"],
+        ["2024-06-30", "1300", "0.1"],
+    ]
+    source = {
+        "platform": "google_sheets", "sheet_name": "P&L", "range": "A3:C5",
+        "file_name": "FA Spike Test", "modified_at": None,
+    }
+    raw, error = rows_to_raw_csv(rows, "FA Spike Test — P&L", source=source)
+    assert error is None, error
+    mapping = {"Quarter Ending": "period_end", "Total Revenue": "revenue", "Net Income": "net_income"}
+    df, errors, _ = csv_statement.normalize(
+        raw, mapping, entity_name="Spike Co", scale=scale, currency=currency
+    )
+    assert errors == [], errors
+    records = json.loads(df.to_json(orient="records", date_format="iso"))
+    attrs = json.loads(json.dumps(df.attrs))  # JSONB storage round trip
+    return csv_statement.statement_from_records(records, attrs)
+
+
+def test_source_cell_survives_the_backend_round_trip_into_get_csv_statement():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip())
+    result = json.loads(tools.get_csv_statement())
+    by_period = {p["period_end"]: p for p in result["periods"]}
+    assert by_period["2024-03-31"]["revenue"]["source_cell"] == "'P&L'!B4"
+    assert by_period["2024-06-30"]["net_income"]["source_cell"] == "'P&L'!C5"
+
+
+def test_source_cell_survives_the_backend_round_trip_into_get_csv_ratios():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
+    by_period = {r["period_end"]: r for r in result["ratios"]["net_margin"]}
+    provenance = by_period["2024-03-31"]["provenance"]
+    assert provenance["revenue"]["source_cell"] == "'P&L'!B4"
+    assert provenance["net_income"]["source_cell"] == "'P&L'!C4"
+
+
+def test_csv_tools_report_values_in_ones_with_units_and_sheet_scale():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip(scale="thousands", currency="EUR"))
+    statement = json.loads(tools.get_csv_statement())
+    assert statement["units"]["scale"] == "thousands"
+    assert statement["units"]["currency"] == "EUR"
+    by_period = {p["period_end"]: p for p in statement["periods"]}
+    revenue = by_period["2024-03-31"]["revenue"]
+    assert revenue["value"] == 1250000.0  # converted in Python, never by the model
+    assert revenue["sheet_scale"] == "thousands"
+    assert by_period["2024-06-30"]["net_income"]["value"] == 100.0  # "0.1" thousands, exactly
+
+    ratios_result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
+    assert ratios_result["units"] == statement["units"]
+
+
+def test_csv_tools_say_when_no_currency_was_specified():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip())
+    units = json.loads(tools.get_csv_statement())["units"]
+    assert units == {"currency": None, "scale": "ones", "note": units["note"]}
+    assert "without a currency symbol" in units["note"]
+
+
 def test_get_csv_ratios_shape_and_citation_fields():
     csv_session.set_active_csv(_normalized_csv_statement())
     result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin", "gross_margin"]))

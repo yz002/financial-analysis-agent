@@ -56,6 +56,9 @@ UsageEventOutcome = Enum(
     "error",
     "rejected_daily_cap",
     "rejected_monthly_cap",
+    # Phase D session 4 (migration 0004): one row per fresh /propose-mapping model call,
+    # counted only for the proposal cap -- never toward question caps (app/gating.py).
+    "mapping_proposal",
     name="usage_event_outcome",
 )
 CsvStatementStatus = Enum("unconfirmed", "confirmed", name="csv_statement_status")
