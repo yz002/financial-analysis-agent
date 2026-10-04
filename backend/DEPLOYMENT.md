@@ -119,6 +119,7 @@ Procedure for a change that needs a migration:
 | Revision | Applied to production | Notes |
 |---|---|---|
 | `0004_mapping_proposal_outcome` | 2026-10-04 | Adds `usage_event_outcome` value `mapping_proposal` (Phase D session 4). Additive; applied before the code that writes it. Verified with `enum_range`. |
+| `0005_ask_request_state` | 2026-10-04 | Phase D session 5. Additive. Applied manually from a single head (`0004_mapping_proposal_outcome -> 0005_ask_request_state`), before the code that uses it. Verified read-only on Postgres 18.6. `enum_range` now ends in `in_progress`. New nullable columns: `conversations.bound_csv_context_id` (uuid), `turns.citations` (jsonb), `usage_events.request_fingerprint` (text), `usage_events.request_id` (uuid). New index: `uq_usage_events_account_request` UNIQUE on `(account_id, request_id) WHERE request_id IS NOT NULL`. |
 
 Revisions 0001–0003 were applied by hand earlier and weren't recorded here.
 

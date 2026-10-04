@@ -702,7 +702,11 @@ the panel that asked it, so each question carries a `request_id`. Sending the sa
 | Running for over 60 minutes (e.g. a server restart killed it) | `409 {"detail": {"error": "answer_lost"}}`. Ask again with a new `request_id`. |
 | Sent before with a different question, `csv_context_id` or `conversation_id` | `422 {"detail": {"error": "request_id_reused"}}`. A bug in the caller; don't retry. |
 
-A `429` doesn't use up the `request_id`. The same id works again once the cap resets.
+A `429` doesn't use up the `request_id`. A cap rejection is recorded without the `request_id`
+or its fingerprint, because a `429` isn't an attempt that can be replayed. The same id
+therefore works again once the cap resets. And if a request with the same `request_id` is
+already running when a resend arrives, the resend gets the replay response
+(`answer_in_progress`), never a `429`.
 
 **Long answers and recovery.**
 - An answer can take several minutes. The extension waits up to 5 minutes on one request.

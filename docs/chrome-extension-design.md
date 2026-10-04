@@ -936,6 +936,18 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     `statement_attrs` exist in production, predating the current confirm code. One belongs to
     account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
     (`statement_from_records` reads the attrs), and decide on cleanup.
+    - **Session 5 counts** (read-only check, 2026-10-04, before migration 0005):
+      - 13 confirmed statements in total.
+      - 1 with NULL `confirmed_at`, 1 with NULL `statement_attrs`, 1 with NULL
+        `statement_data`, and 2 whose attrs have no `scale`.
+      - 3 accounts affected. No conversation points at any of them.
+    - **What `/v1/ask` did with them before session 5** (code-verified):
+      - NULL `statement_attrs` crashed with a bare 500, after the question had already been
+        counted.
+      - Attrs without `scale` were silently reported as "ones".
+    - **Decided in session 5: reject, never backfill.** Such a statement gets
+      `409 statement_needs_reconfirm` (`EXTENSION_INTEGRATION.md` §6, amended session 5),
+      checked before the question is counted. The rows stay as they are.
 12. **Newest-first sorts must put NULLs last.** Postgres sorts NULLs first in `DESC`, so
     `ORDER BY confirmed_at DESC LIMIT 1` picked one of the rows in item 11, from another
     account, during a read-only check. Audit every app query that picks "the latest" row; use
