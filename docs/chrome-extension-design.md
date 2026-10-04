@@ -770,7 +770,32 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
        into `POST /v1/csv/parse`.
      - Decide §5's two open questions first: ISO date normalization, and values vs display
        strings.
-4. **Mapping-confirmation screen.** Side-panel view swap from chat to a review table:
+4. *(Done. Live-tested locally on Google Sheets and on Excel through both personal URL shapes,
+   then in production (deploy `011226e`) on Google Sheets and on Excel through
+   `excel.cloud.microsoft`. Contract changes are in `EXTENSION_INTEGRATION.md` §6, amended
+   session 4; it closed §10 items 6 and 8.)*
+   - **Flow:** Send to analysis goes straight into a mapping screen: parse, then a suggested
+     mapping, one role menu per column, then confirm.
+   - **No silent defaults:** Confirm stays disabled until a period column, a revenue column, a
+     business name and a **scale** are chosen. The scale menu starts on "Choose…", and currency
+     starts on "Not specified".
+   - **Failures:** a failed or capped suggestion (429/502/500) leaves every column for the
+     person to map. An expired context (404) returns to the preview.
+   - **Immutable statements:** a confirmed statement can't be changed (409). Change mapping
+     re-sends the same rows as a new statement.
+   - **Active statement:** kept in `chrome.storage.local` (`fa_active_statement`, an id rather
+     than a credential) and shown as a card. It's restored after a panel reopen and a Chrome
+     restart, and cleared with the session (verified with a forced `401` mid-edit).
+   - **Proposal cap, verified in production:** each fresh proposal wrote exactly one
+     `mapping_proposal` usage event (3 proposals, 3 events). A repeat `propose-mapping` call on
+     an unconfirmed context returned the stored proposal with no new event.
+   - **Not live-tested; covered by unit tests:** re-confirm `409`, and a bad API key's `502`
+     falling back to manual mapping.
+   - **The backend side needed migration 0004** (`usage_event_outcome` value
+     `mapping_proposal`). Render never runs migrations, so it was applied by hand before the
+     push, per `backend/DEPLOYMENT.md` "Database migrations".
+
+   Original plan: **Mapping-confirmation screen.** Side-panel view swap from chat to a review table:
    `POST /v1/csv/{id}/propose-mapping`'s proposal rendered editable, then
    `POST /v1/csv/{id}/confirm` — per the contract, this proposal is never auto-accepted.
 5. **Chat interface.** Message list, `POST /v1/ask` wiring with `conversation_id` continuity,
@@ -788,10 +813,10 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
 
 ---
 
-## 10. Open items (from Phase D sessions 3a and 3b)
+## 10. Open items (from Phase D sessions 3a, 3b and 4)
 
 Recorded so they aren't rediscovered later. Items 1–5 come from 3a, and none of them blocked 3b.
-Items 6–9 come from 3b.
+Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from session 4.
 
 1. **Verify Microsoft identity with a validated ID token, not a Graph access token.** Today
    `/v1/auth/exchange` verifies Microsoft sign-in by calling Graph `/me` with an access token.
@@ -833,6 +858,16 @@ Items 6–9 come from 3b.
      - `1 250 000`.
    - The read panel already flags error cells, but the confirm step should warn when a cell
      in a *mapped* column comes back empty after parsing.
+   - **Closed in session 4: a two-step acknowledgement.**
+     - **What's reported:** `/confirm` lists every non-blank mapped cell that doesn't parse, by
+       address (`find_unparsed_cells`). Blank cells count as "not reported" and get only a
+       warning line.
+     - **How it's refused:** `/confirm` refuses until the person acknowledges that exact list.
+       The extension sends `accept_unparsed_cells` plus an `ack_fingerprint` over the mapping,
+       the scale and the cells. Any change produces a new list and a new fingerprint.
+     - **Live result:** the acknowledgement listed `'P&L'!B6 "61.5%"` (Revenue, 2025-09-30)
+       and `'P&L'!F5 "#DIV/0!"` (Net income, 2025-06-30). "Confirm anyway" confirmed the
+       statement, and the card showed "No value for: …".
 7. **Layouts with periods across columns aren't supported.** P&L sheets often put the dates in
    the header row and the line items down the rows. `normalize` needs one period per row. The
    preview warns when the header looks like dates, but nothing transposes the grid. If
@@ -841,10 +876,53 @@ Items 6–9 come from 3b.
    is lost. Sending underlying values fixes display scaling (`#,##0,`), but not a sheet whose
    numbers were *typed* in thousands. A typed `1,250` meaning $1.25M is stored as 1250. This
    needs unit metadata on the source or the mapping.
+   - **Closed in session 4: a scale chosen at confirm, applied in Python.**
+     - **The choice:** the person picks the scale (ones, thousands, millions or billions) with
+       **no default**, and Confirm is disabled until one is chosen. Currency is an optional
+       label that starts on "Not specified".
+     - **Where it's applied:** `normalize` converts every mapped value to ones with exact
+       `Decimal` arithmetic and records `scale` and `currency` in `csv_source`. The tools
+       report values in ones, with a `units` object and `sheet_scale` on each citation, so
+       the model never multiplies and `check_figures` needs no change.
+     - **Live result (read-only DB check):** for the same cell, `'P&L'!B4` (1,250,000),
+       revenue for 2025-03-31 was stored as `1250000` with scale ones and `1250000000` with
+       scale thousands. Both cite `source_cell 'P&L'!B4`.
+     - **A deliberate behavior change, not a bug:** a statement with no stated currency is
+       reported **without any currency symbol**. That includes Streamlit CSV uploads, which
+       used to get "$" (`NOTES.md`, `CLAUDE.md`).
+     - Not done: detecting a scale from a title row. Title rows aren't in the range that's
+       sent.
 9. **Google mid-edit freshness: "press Enter before reading."** A cell still being typed into
    isn't visible to the API. Committed edits are immediate, including recalculated formulas.
    The panel doesn't say this yet. A short hint near Preview (session 7 polish) would cover
    it.
+
+**From Phase D session 4** (items 10–12; details in `NOTES.md`):
+
+10. **Session 7 polish for the mapping screen and statement card**, from the live test:
+    - The card repeats the name when the business and file names match ("FA Spike Test — FA
+      Spike Test").
+    - Show the period count ("4 quarterly periods").
+    - Unmapped-concept warnings use internal names (`operating_cash_flow`). Use friendly
+      labels, grouped on one line.
+    - Change mapping's editor has no suggestion, so it has no Reset button. Offer "Reset to
+      confirmed mapping".
+    - Strip the file extension from the pre-filled business name.
+    - A restored card has no actions. Add "Read another range".
+11. **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
+    `statement_attrs` exist in production, predating the current confirm code. One belongs to
+    account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
+    (`statement_from_records` reads the attrs), and decide on cleanup.
+12. **Newest-first sorts must put NULLs last.** Postgres sorts NULLs first in `DESC`, so
+    `ORDER BY confirmed_at DESC LIMIT 1` picked one of the rows in item 11, from another
+    account, during a read-only check. Audit every app query that picks "the latest" row; use
+    `DESC NULLS LAST` or filter `IS NOT NULL`.
+
+**Migrations are manual** (session 4): Render never runs them. Its Pre-Deploy command isn't
+available on the current plan. Run an additive migration with `alembic upgrade head` against
+production before pushing the code that needs it, verify the change, and record it. The local
+`.env` points at production, so any local `alembic` command changes production immediately.
+See `backend/DEPLOYMENT.md` "Database migrations".
 
 Related, already tracked elsewhere: live-testing against the local backend writes to the shared
 production database, because there's no separate dev/test database (`backend/DEPLOYMENT.md`,
