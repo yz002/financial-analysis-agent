@@ -23,14 +23,46 @@ export async function setStoredSession(session: StoredSession): Promise<void> {
 }
 
 /**
- * Also clears every provider data token and data-account email (lib/dataAccessStorage.ts).
- * This is the single chokepoint, so sign-out, revoke-all, a 401, and any future path that
- * ends the session can't leave data-access state behind
+ * Also clears every provider data token and data-account email (lib/dataAccessStorage.ts) and
+ * the active statement. This is the single chokepoint, so sign-out, revoke-all, a 401, and any
+ * future path that ends the session can't leave data-access state behind
  * (chrome-extension-design.md SS6 3a).
  */
 export async function clearStoredSession(): Promise<void> {
   await browser.storage.local.remove(SESSION_STORAGE_KEY);
   await clearAllDataAccess();
+  await clearActiveStatement();
+}
+
+/**
+ * The statement confirmed last (Phase D session 4): what questions will be asked about from
+ * session 5 on. An identifier, not a credential -- the backend checks ownership on every use --
+ * so it lives in storage.local and survives a browser restart. It belongs to the signed-in
+ * account, so it's cleared with the session and on every new sign-in.
+ */
+export interface ActiveStatement {
+  csvContextId: string;
+  entityName: string;
+  label: string; // e.g. "FA Spike Test · 'P&L'!A3:C9"
+  confirmedAt: string; // ISO-8601
+  cadence: string | null;
+  scale: string;
+  currency: string | null;
+}
+
+const ACTIVE_STATEMENT_KEY = 'fa_active_statement';
+
+export async function getActiveStatement(): Promise<ActiveStatement | null> {
+  const result = await browser.storage.local.get(ACTIVE_STATEMENT_KEY);
+  return (result[ACTIVE_STATEMENT_KEY] as ActiveStatement | undefined) ?? null;
+}
+
+export async function setActiveStatement(statement: ActiveStatement): Promise<void> {
+  await browser.storage.local.set({ [ACTIVE_STATEMENT_KEY]: statement });
+}
+
+export async function clearActiveStatement(): Promise<void> {
+  await browser.storage.local.remove(ACTIVE_STATEMENT_KEY);
 }
 
 /**

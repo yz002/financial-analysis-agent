@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import {
+  clearActiveStatement,
   clearStoredSession,
+  getActiveStatement,
   getStoredSession,
   onStoredSessionChanged,
+  setActiveStatement,
   setStoredSession,
 } from './sessionStorage';
 import type { StoredSession } from './sessionStorage';
@@ -132,10 +135,46 @@ describe('clearStoredSession clears data access too (the single chokepoint)', ()
       'data@example.com',
     );
 
+    await setActiveStatement({
+      csvContextId: 'ctx-1',
+      entityName: 'Spike Co',
+      label: "FA Spike Test · 'P&L'!A3:C9",
+      confirmedAt: '2026-10-03T12:00:00Z',
+      cadence: 'quarterly',
+      scale: 'thousands',
+      currency: null,
+    });
+
     await clearStoredSession();
 
     expect(await getStoredSession()).toBeNull();
+    expect(await getActiveStatement()).toBeNull();
     expect(await fakeBrowser.storage.session.get(null)).toEqual({});
     expect(await fakeBrowser.storage.local.get(null)).toEqual({});
+  });
+});
+
+describe('active statement (session 4)', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+    vi.stubGlobal('browser', fakeBrowser);
+  });
+
+  it('round-trips in storage.local and clears on its own', async () => {
+    const statement = {
+      csvContextId: 'ctx-1',
+      entityName: 'Spike Co',
+      label: 'FA Spike Test',
+      confirmedAt: '2026-10-03T12:00:00Z',
+      cadence: null,
+      scale: 'ones',
+      currency: 'EUR',
+    };
+    expect(await getActiveStatement()).toBeNull();
+    await setActiveStatement(statement);
+    expect(await getActiveStatement()).toEqual(statement);
+    expect(await fakeBrowser.storage.local.get('fa_active_statement')).toEqual({ fa_active_statement: statement });
+    await clearActiveStatement();
+    expect(await getActiveStatement()).toBeNull();
   });
 });

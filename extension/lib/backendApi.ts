@@ -1,5 +1,6 @@
 import { BACKEND_BASE_URL } from './authConfig';
 import type { CsvParseRequest } from './cellGrid';
+import type { ConfirmRequestBody, ProposalEntry } from './mappingModel';
 
 export class BackendApiError extends Error {
   constructor(
@@ -119,6 +120,65 @@ export async function parseCsv(
   request: CsvParseRequest,
 ): Promise<CsvParseResponse> {
   return postJson<CsvParseResponse>('/v1/csv/parse', { sessionToken, body: request });
+}
+
+export interface ProposeMappingResponse {
+  proposal: ProposalEntry[];
+  note: string | null;
+}
+
+/**
+ * POST /v1/csv/{id}/propose-mapping (EXTENSION_INTEGRATION.md SS6, amended session 4). No
+ * body. Idempotent per context; 404 for a missing or expired context, 409 once confirmed,
+ * 429 `mapping_cap_reached`, 502/500 when the model call fails. A proposal is only a starting
+ * point: the person reviews every role before /confirm.
+ */
+export async function proposeMapping(
+  sessionToken: string,
+  csvContextId: string,
+): Promise<ProposeMappingResponse> {
+  return postJson<ProposeMappingResponse>(
+    `/v1/csv/${encodeURIComponent(csvContextId)}/propose-mapping`,
+    { sessionToken },
+  );
+}
+
+export interface UnparsedCell {
+  cell: string | null;
+  source_row: number;
+  column: string;
+  role: string;
+  period_end: string;
+  value: string;
+}
+
+export interface ConfirmMappingResponse {
+  confirmed: boolean;
+  cadence: string | null;
+  warnings: string[];
+  concepts_unavailable: string[];
+  errors: string[];
+  requires_acknowledgement: boolean;
+  unparsed_cells: UnparsedCell[];
+  ack_fingerprint: string | null;
+  scale: string | null;
+  currency: string | null;
+}
+
+/**
+ * POST /v1/csv/{id}/confirm (amended session 4). A validation failure is an in-band 200 with
+ * `confirmed: false`: `errors[]`, or `requires_acknowledgement` with the cells to show and the
+ * fingerprint to send back. 404 for a missing or expired context, 409 once confirmed.
+ */
+export async function confirmMapping(
+  sessionToken: string,
+  csvContextId: string,
+  body: ConfirmRequestBody,
+): Promise<ConfirmMappingResponse> {
+  return postJson<ConfirmMappingResponse>(`/v1/csv/${encodeURIComponent(csvContextId)}/confirm`, {
+    sessionToken,
+    body,
+  });
 }
 
 /** No request body per the contract. Always resolves {revoked: true} on 2xx. */

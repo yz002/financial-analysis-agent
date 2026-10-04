@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BackendApiError,
+  confirmMapping,
   exchangeGoogleDataToken,
   exchangeToken,
   logout,
+  proposeMapping,
   revokeAllSessions,
 } from './backendApi';
 import { BACKEND_BASE_URL } from './authConfig';
@@ -186,5 +188,62 @@ describe('exchangeGoogleDataToken', () => {
     await expect(
       exchangeGoogleDataToken('session-123', { code: 'c', codeVerifier: 'v', redirectUri: 'r' }),
     ).rejects.toMatchObject({ status: 400, detail: 'Google authorization could not be exchanged.' });
+  });
+});
+
+describe('mapping calls (session 4)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('proposeMapping posts no body to the context, with the bearer token', async () => {
+    const proposal = { proposal: [{ csv_column: 'Q', proposed_role: 'period_end', rationale: 'r' }], note: null };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => proposal });
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await proposeMapping('session-123', 'ctx-1')).toEqual(proposal);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/csv/ctx-1/propose-mapping`);
+    expect(init.body).toBeUndefined();
+    expect(init.headers['Content-Type']).toBeUndefined();
+    expect(init.headers['Authorization']).toBe('Bearer session-123');
+  });
+
+  it('proposeMapping surfaces a 429 with its detail object', async () => {
+    const detail = { error: 'mapping_cap_reached', resets_at: '2026-10-04T10:00:00+00:00' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 429, json: async () => ({ detail }) }));
+    await expect(proposeMapping('s', 'ctx-1')).rejects.toMatchObject({ status: 429, detail });
+  });
+
+  it('confirmMapping posts the body as given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ confirmed: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const body = {
+      mapping: { Q: 'period_end', R: 'revenue' },
+      entity_name: 'Co',
+      scale: 'thousands' as const,
+      currency: null,
+      accept_unparsed_cells: false,
+      ack_fingerprint: null,
+    };
+
+    await confirmMapping('session-123', 'ctx-1', body);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/csv/ctx-1/confirm`);
+    expect(init.headers['Authorization']).toBe('Bearer session-123');
+    expect(JSON.parse(init.body as string)).toEqual(body);
+  });
+
+  it('confirmMapping throws BackendApiError on a 409', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ detail: 'csv context already confirmed' }) }),
+    );
+    await expect(
+      confirmMapping('s', 'ctx-1', {
+        mapping: {}, entity_name: 'Co', scale: 'ones', currency: null,
+        accept_unparsed_cells: false, ack_fingerprint: null,
+      }),
+    ).rejects.toBeInstanceOf(BackendApiError);
   });
 });
