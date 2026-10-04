@@ -979,3 +979,29 @@
   turn into "no value" (`61.5%`, `#DIV/0!`), and `/confirm` refuses until that exact list is
   acknowledged through a fingerprint over the mapping, the scale and the list. Before this,
   those cells became NaN without a word.
+
+- **Phase D session 4 follow-ups, from the local live test (2026-10-04).** The mapping
+  screen passed live on Google Sheets and on Excel through both personal URL shapes. These
+  were left for later on purpose.
+  *Session 7 polish (extension UI, not fixed in session 4):*
+  1. The statement card reads "FA Spike Test — FA Spike Test" when the business name and file
+     name match. Show the name once.
+  2. Show the period count on the card ("4 quarterly periods").
+  3. Unmapped-concept warnings use internal names (`operating_cash_flow`). Use the friendly
+     labels, grouped on one line.
+  4. Change mapping's editor has no suggestion, so it has no Reset button. Offer "Reset to
+     confirmed mapping" there.
+  5. Strip the file extension from the pre-filled business name ("FA Spike Test.xlsx" →
+     "FA Spike Test").
+  6. A card restored after a panel reopen or Chrome restart has no actions. Add "Read another
+     range".
+
+  *Backlog (backend):*
+  - **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
+    `statement_attrs` exist in production. They predate the current confirm code; one belongs
+    to account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
+    (`statement_from_records` reads `statement_attrs`), and decide on cleanup.
+  - **Newest-first sorts must put NULLs last.** Postgres sorts NULLs first in `DESC`, so
+    `ORDER BY confirmed_at DESC LIMIT 1` picked one of those legacy rows, from another
+    account, in a read-only check. Audit any app query that picks "the latest" row; use
+    `DESC NULLS LAST` or filter `IS NOT NULL`.
