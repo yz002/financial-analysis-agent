@@ -68,6 +68,21 @@ The fake request fails before account resolution, so it creates no rows.
   every affected user has to re-register their key.
 - To rotate it, follow `SECURITY.md` §3.1 (hard cutover).
 
+## `/v1/ask` timeouts and the per-call log (Phase D session 5, pending live verification)
+
+- **Anthropic client timeout: 120 s per model call**, set explicitly for both the master key and
+  BYO keys. The SDK's own default is 600 s, with 2 retries.
+- **Run budget: 45 minutes.** `run_agent` checks it before each model call and each tool call.
+  When it's exceeded, `/v1/ask` returns
+  `504 {"detail": {"error": "answer_time_budget_exceeded"}}`.
+- **Stale cutoff: 60 minutes.** A `request_id` still marked in progress after that is reported
+  as `answer_lost`. The budget sits below the cutoff so a normal run can't be mistaken for a
+  lost one. Render itself allows HTTP requests up to 100 minutes.
+- **Per-call duration log.** Each model call logs one INFO line from `src.agent.agent` to
+  stderr: iteration, `duration_ms`, stop reason and model. These appear in the Render service's
+  logs. Use them to check the 120 s timeout against real call times before changing it. The
+  lines carry metadata only, never question or answer text (`SECURITY.md` §4).
+
 ## Database migrations
 
 **Render never runs migrations.** The web service runs `pip install -r requirements.txt` to

@@ -802,6 +802,20 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    rendering `final_answer`/`figure_check`/`hit_iteration_cap`, and the documented error-type
    handling (404 on a stale/foreign `conversation_id`/`csv_context_id`, 429 cap responses, 502/500
    generic-message handling) — all per contract §6, nothing invented beyond what it specifies.
+   *(Amended Phase D session 5 (pending live verification): planning found that the contract
+   needed changes before a chat panel could be correct. They're specified in
+   `EXTENSION_INTEGRATION.md` §6 `/v1/ask`, amended session 5:*
+   - *Citations: each figure links to its cell, or to the cells and formula behind a derived
+     value. A figure that matches several cells shows all of them.*
+   - *Binding: a conversation stays bound to its statement, with a `409` instead of a silent
+     switch.*
+   - *Legacy statements: they're rejected with a request to re-confirm.*
+   - *Replay: a `request_id` makes a slow answer recoverable after the panel closes, and never
+     charges a question twice.*
+   - *The extension requires a confirmed statement before it offers chat. It keeps the
+     conversation and pending question in `chrome.storage.session`.*
+   - *Click-to-cell navigation is deferred, because neither platform's cell-selection URL
+     behavior is verified.)*
 6. **Usage and billing surfacing.** `GET /v1/usage` display; the 429 body's
    `prompt_byo_key`/`prompt_upgrade` fields driving which upsell to show;
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the

@@ -71,6 +71,26 @@ isolation).
   guard at the second-session re-fetch, and a comment at the `Turn` query
   tying it to the earlier check, next time this code is touched.
 
+**Phase D session 5 (pending live verification): `/v1/ask` binding, replay and citations.**
+- **Ownership on every turn.** `/v1/ask` checks that the caller owns the conversation
+  (`_get_owned_conversation`) and the statement (`_load_confirmed_csv_statement`) on every
+  turn. This was already true before session 5.
+- **Re-fetch guard.** The tightening recommended above is done: the persist step re-checks
+  `account_id` when it re-fetches the conversation.
+- **Statement binding is enforced.** A conversation's statement is fixed at creation
+  (`conversations.bound_csv_context_id`). It deliberately has no foreign key, so it can never
+  be nulled. Because of that, a bound id is only ever loaded through the account-scoped,
+  confirmed-only loader. If that loader refuses a bound id, the caller gets
+  `statement_needs_reconfirm` and never another account's data, and the response doesn't say
+  whether that id exists.
+- **`request_id` replay is account-scoped.** It's looked up only after authentication, by
+  `(account_id, request_id)`, with a unique index per account, so one account can't read or
+  replay another's request. A reused id with a different request body is refused (`422`)
+  rather than returning another request's stored answer.
+- **Citations carry spreadsheet content.** `read_value`, `column` and `cell` come from the
+  person's own sheet. The extension renders them, like the answer text, with
+  `textContent`/`createElement` only, never `innerHTML`.
+
 ---
 
 ## 2. `X-Install-Id` had no real authentication
@@ -276,6 +296,16 @@ added across sessions 3-9, not just this session's) and `src/` (imported by
   rendering — for a `Turn` insert, that's raw `question`/`final_answer`
   text — the moment real log aggregation is wired up on Render. Fixed now
   rather than only once that changes.
+- **Phase D session 5 (pending live verification): two new log lines, metadata only.**
+  - `src/agent/agent.py` logs each model call at INFO: iteration, duration in ms, stop reason
+    and model. When the 45-minute run budget stops a run, it adds the elapsed time.
+  - `backend/app/main.py` logs a WARNING when a run finishes after its request was already
+    marked failed, and when a `request_id`'s stored state is unexpected. Those carry only the
+    `usage_event_id`, the outcome label and timings.
+  - None of these lines ever includes the question, the answer, tool inputs or outputs, or
+    any key. A unit test asserts this.
+  - The `src.agent.agent` logger has its own stderr handler, with `propagate = False`, so its
+    lines aren't duplicated if uvicorn or Render configures the root logger.
 
 ---
 
