@@ -14,6 +14,8 @@ and awkward to guarantee through the tool runner's internals.
 """
 
 import json
+import logging
+import time
 
 import anthropic
 
@@ -22,6 +24,32 @@ from . import guardrails, tools
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MAX_ITERATIONS = 8
 DEFAULT_MAX_TOKENS = 4096
+
+# Per model-call HTTP timeout for the default client (the SDK's own default is 600s). Callers
+# that build their own client -- the backend's BYO-key path -- pass the same value.
+MODEL_CALL_TIMEOUT_SECONDS = 120
+
+# Wall-clock budget for one run_agent call, checked before every model call and every tool call.
+# It must stay comfortably below backend/app/ask_rules.py's STALE_IN_PROGRESS_AFTER (60 min), the
+# age at which /v1/ask reports a still-running request as lost: the check can't interrupt a call
+# already in flight, so a run can overshoot by one model call (up to 3 attempts x 120s plus SDK
+# backoff) or one tool call (EDGAR requests time out at 30s each). 45 + that overshoot stays
+# under 60. Correctness doesn't rest on this alone -- /v1/ask's completion is a conditional
+# UPDATE that refuses a run already marked lost -- the budget just keeps "lost" rare.
+RUN_BUDGET_SECONDS = 45 * 60
+
+# Metadata only -- iteration, durations, stop reason, model. Never the question, the answer,
+# tool inputs/results or any key (backend/SECURITY.md SS4).
+logger = logging.getLogger(__name__)
+
+
+class AgentTimeBudgetExceeded(Exception):
+    """run_agent stopped because RUN_BUDGET_SECONDS ran out. No partial answer is returned: a
+    half-finished run is never presented as an answer."""
+
+    def __init__(self, elapsed_seconds: float):
+        super().__init__(f"run_agent exceeded its {RUN_BUDGET_SECONDS}s budget")
+        self.elapsed_seconds = elapsed_seconds
 
 SYSTEM_PROMPT = """You are an FP&A copilot that answers questions about public companies' \
 financials using SEC EDGAR filings and market data, via the tools available to you.
@@ -98,7 +126,9 @@ Every get_csv_statement/get_csv_ratios result carries "units". Its values are al
 to ones from whatever scale the sheet was typed in, so report them exactly as given and never \
 rescale them yourself. If units.currency is set, report CSV figures in that currency; if it is \
 null, the currency was not specified -- report CSV figures without any currency symbol or code \
-(no "$"), as plain numbers.
+(no "$"), as plain numbers. Write a scaled CSV figure with a scale word ("1.25 million"), never a \
+bare suffix ("1.25M"): a suffix without a currency symbol can't be checked against the tool \
+results.
 
 When comparing a CSV-backed business to a ticker-identified company, prefer scale-invariant \
 ratios (margins, growth rates, ROA/ROE, debt-to-assets, current ratio) over raw dollar figures \
@@ -125,6 +155,8 @@ def run_agent(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     prior_messages: list[dict] | None = None,
+    prior_tool_calls: list[dict] | None = None,
+    clock=time.monotonic,
 ) -> dict:
     """
     Answer `question` using the Claude API with tool calling.
@@ -149,6 +181,17 @@ def run_agent(
     carries a clear note (plus any text Claude had already produced), so a
     caller can't mistake a capped run for a complete one.
 
+    `prior_tool_calls` are the tool calls of exactly the earlier turns whose
+    messages are in `prior_messages`, each carrying its "turn_id". They're
+    passed straight to guardrails.check_figures, so the one figure check
+    covers everything the model saw, and a figure restated from an earlier
+    turn's tool result traces to that turn. Never pass a wider window than
+    was replayed.
+
+    The run stops with AgentTimeBudgetExceeded once RUN_BUDGET_SECONDS of
+    `clock` time has passed, checked before every model call and every tool
+    call.
+
     Returns a dict: question, tool_calls (each: iteration, tool_name,
     tool_input, tool_result, is_error), final_answer, hit_iteration_cap,
     iterations_used, stop_reason (of the last model response), figure_check
@@ -160,7 +203,15 @@ def run_agent(
         # one model call, so raise loudly rather than return a result with no `iterations_used`.
         raise ValueError("max_iterations must be at least 1")
 
-    client = client or anthropic.Anthropic()
+    started = clock()
+
+    def check_budget() -> None:
+        elapsed = clock() - started
+        if elapsed > RUN_BUDGET_SECONDS:
+            logger.warning("run_agent budget exceeded elapsed_ms=%d", int(elapsed * 1000))
+            raise AgentTimeBudgetExceeded(elapsed)
+
+    client = client or anthropic.Anthropic(timeout=MODEL_CALL_TIMEOUT_SECONDS)
     # `+` builds a new list -- prior_messages itself is never mutated by this loop's
     # subsequent .append() calls, so a caller can safely reuse/inspect it afterward.
     messages = (prior_messages or []) + [{"role": "user", "content": question}]
@@ -170,6 +221,8 @@ def run_agent(
     stop_reason = None
 
     for iteration in range(1, max_iterations + 1):
+        check_budget()
+        call_started = clock()
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -178,6 +231,13 @@ def run_agent(
             messages=messages,
         )
         stop_reason = response.stop_reason
+        logger.info(
+            "model call iteration=%d duration_ms=%d stop_reason=%s model=%s",
+            iteration,
+            int((clock() - call_started) * 1000),
+            stop_reason,
+            model,
+        )
 
         text_blocks = [b.text for b in response.content if b.type == "text"]
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
@@ -190,6 +250,7 @@ def run_agent(
 
         tool_results = []
         for block in tool_use_blocks:
+            check_budget()
             # Checked up front (rather than relying on the KeyError execute_tool raises for an
             # unknown name) so that case gets its own error_type instead of being indistinguishable
             # from a genuine crash inside a tool function -- both used to surface as the same bare
@@ -255,5 +316,5 @@ def run_agent(
         "iterations_used": iteration,
         "stop_reason": stop_reason,
     }
-    result["figure_check"] = guardrails.check_figures(result)
+    result["figure_check"] = guardrails.check_figures(result, prior_tool_calls)
     return result

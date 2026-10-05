@@ -259,3 +259,110 @@ def test_system_prompt_covers_csv_comparison_and_market_data_scope():
     assert "get_csv_ratios" in prompt
     assert "scale-invariant" in prompt
     assert "get_market_data" in prompt and "never apply" in prompt
+
+
+# --- Phase D session 5: run budget, duration log, prior_tool_calls ------------------------
+
+
+class _FakeClock:
+    """A monotonic clock the test advances by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_budget_exceeded_before_a_model_call_raises_without_calling_the_model():
+    client = _client_with_responses([])
+    clock = _FakeClock()
+
+    def ticking_clock():
+        # Each reading jumps past the whole budget, so the check before the very first model
+        # call already finds it spent.
+        value = clock.now
+        clock.now += agent.RUN_BUDGET_SECONDS + 1
+        return value
+
+    with pytest.raises(agent.AgentTimeBudgetExceeded) as excinfo:
+        agent.run_agent("Q?", client=client, clock=ticking_clock)
+    assert excinfo.value.elapsed_seconds > agent.RUN_BUDGET_SECONDS
+    client.messages.create.assert_not_called()
+
+
+def test_budget_exceeded_before_a_tool_call_raises_without_running_the_tool(monkeypatch):
+    clock = _FakeClock()
+    ran = []
+    monkeypatch.setattr(tools, "execute_tool", lambda name, tool_input: ran.append(name) or "{}")
+
+    def create(**kwargs):
+        clock.now += agent.RUN_BUDGET_SECONDS + 1  # the model call itself used up the budget
+        return _response([_tool_use_block("get_market_data", {"ticker": "MSFT"})], "tool_use")
+
+    client = MagicMock()
+    client.messages.create = MagicMock(side_effect=create)
+
+    with pytest.raises(agent.AgentTimeBudgetExceeded):
+        agent.run_agent("Q?", client=client, clock=clock)
+    assert ran == []
+
+
+def test_run_within_budget_is_unaffected():
+    clock = _FakeClock()
+    client = _client_with_responses([_response([_text_block("Done.")], "end_turn")])
+    result = agent.run_agent("Q?", client=client, clock=clock)
+    assert result["final_answer"] == "Done."
+
+
+def test_model_call_log_is_metadata_only(caplog, monkeypatch):
+    monkeypatch.setattr(tools, "execute_tool", lambda name, tool_input: json.dumps({"revenue": 4242}))
+    question = "What was SECRET-QUESTION-TEXT revenue?"
+    answer = "SECRET-ANSWER-TEXT was 4,242."
+    client = _client_with_responses([
+        _response([_tool_use_block("get_market_data", {"ticker": "SECRET-TOOL-INPUT"})], "tool_use"),
+        _response([_text_block(answer)], "end_turn"),
+    ])
+
+    with caplog.at_level("INFO", logger="src.agent.agent"):
+        agent.run_agent(question, client=client)
+
+    records = [r for r in caplog.records if r.name == "src.agent.agent"]
+    assert len(records) == 2  # one line per model call
+    for record in records:
+        message = record.getMessage()
+        assert "duration_ms=" in message and "iteration=" in message
+        for secret in ("SECRET-QUESTION-TEXT", "SECRET-ANSWER-TEXT", "SECRET-TOOL-INPUT", "4242", "4,242"):
+            assert secret not in message
+
+
+def test_prior_tool_calls_reach_the_one_figure_check():
+    client = _client_with_responses([_response([_text_block("Revenue was $90.0 billion.")], "end_turn")])
+    prior = [{
+        "iteration": 1, "tool_name": "get_financial_statement", "tool_input": {},
+        "tool_result": json.dumps({"periods": [{"revenue": {"value": 90007000000.0}}]}),
+        "is_error": False, "turn_id": "turn-a",
+    }]
+
+    result = agent.run_agent("And revenue?", client=client, prior_tool_calls=prior)
+
+    assert result["figure_check"]["all_traced"] is True
+    assert result["figure_check"]["figures"][0]["match"]["turn_id"] == "turn-a"
+    assert result["tool_calls"] == []  # replayed calls are context, not this turn's calls
+
+
+def test_default_client_uses_the_explicit_model_call_timeout(monkeypatch):
+    seen = {}
+
+    def fake_anthropic(**kwargs):
+        seen.update(kwargs)
+        return _client_with_responses([_response([_text_block("Done.")], "end_turn")])
+
+    monkeypatch.setattr(agent.anthropic, "Anthropic", fake_anthropic)
+    agent.run_agent("Q?")
+    assert seen == {"timeout": agent.MODEL_CALL_TIMEOUT_SECONDS}
+
+
+def test_system_prompt_asks_for_scale_words_not_bare_suffixes():
+    assert "scale word" in agent.SYSTEM_PROMPT
+    assert "bare suffix" in agent.SYSTEM_PROMPT

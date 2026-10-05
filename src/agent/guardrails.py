@@ -209,21 +209,30 @@ def _is_bare_year(m: re.Match) -> bool:
     return 1900 <= int(mantissa) <= 2099
 
 
-def _extract_candidates(text: str) -> list[re.Match]:
+def _extract(text: str) -> tuple[list[re.Match], list[re.Match]]:
+    """(candidates, skipped): every number-like token check_figures checks, plus the bare-suffix
+    tokens it deliberately can't (see below), so those are reported rather than silently lost."""
     excluded = _excluded_spans(text)
-    candidates = []
+    candidates, skipped = [], []
     for m in _NUMBER_RE.finditer(text):
         if _overlaps((m.start(), m.end()), excluded):
             continue
-        # A bare suffix with no leading "$" ("3M", "10K") is dropped outright, not reinterpreted
-        # as an unscaled number -- resolves the "3M-the-company" vs "3-million-dollars"
-        # ambiguity without a ticker/company-name detector.
+        # A bare suffix with no leading "$" ("3M", "10K") is not reinterpreted as an unscaled
+        # number -- resolves the "3M-the-company" vs "3-million-dollars" ambiguity without a
+        # ticker/company-name detector. It can't be checked either way, so it's reported in
+        # figures_skipped: a figure written "1.25M" (no "$", as a statement with no stated
+        # currency requires) would otherwise vanish from the check entirely.
         if m.group("suffix") and not m.group("dollar"):
+            skipped.append(m)
             continue
         if _is_bare_year(m):
             continue
         candidates.append(m)
-    return candidates
+    return candidates, skipped
+
+
+def _extract_candidates(text: str) -> list[re.Match]:
+    return _extract(text)[0]
 
 
 def _format_label(m: re.Match) -> str:
@@ -280,7 +289,7 @@ def _walk_json_numbers(obj, path: str = ""):
         yield float(obj), path
 
 
-def _collect_tool_values(tool_calls: list[dict]) -> list[dict]:
+def _collect_from(tool_calls: list[dict], turn_id) -> list[dict]:
     collected = []
     for idx, call in enumerate(tool_calls):
         raw = call.get("tool_result")
@@ -298,28 +307,60 @@ def _collect_tool_values(tool_calls: list[dict]) -> list[dict]:
                     "tool_call_index": idx,
                     "tool_name": call.get("tool_name"),
                     "iteration": call.get("iteration"),
+                    "turn_id": turn_id,
                 }
             )
     return collected
+
+
+def collect_tool_values(tool_calls: list[dict], prior_tool_calls: list[dict] | None = None) -> list[dict]:
+    """Every numeric leaf in this run's tool results (`turn_id` None), then in the earlier turns'
+    tool results replayed into the model's context (`prior_tool_calls`, each call carrying its
+    own "turn_id"). A figure the model restates from an earlier turn's tool result is grounded
+    in what it actually saw, so it has to trace. The caller passes exactly the replayed turns,
+    never a wider window: every extra value is one more chance of a coincidental match.
+    `tool_call_index` indexes into whichever list the value came from, so (turn_id,
+    tool_call_index) together identify the call. Current-turn values come first, so on an exact
+    tie the current turn's value wins."""
+    collected = _collect_from(tool_calls, None)
+    by_turn: dict = {}
+    for call in prior_tool_calls or []:
+        by_turn.setdefault(call.get("turn_id"), []).append(call)
+    for turn_id, calls in by_turn.items():
+        collected.extend(_collect_from(calls, turn_id))
+    return collected
+
+
+def _collect_tool_values(tool_calls: list[dict]) -> list[dict]:
+    return collect_tool_values(tool_calls)
+
+
+def find_all_matches(value: float, ndigits: int, tool_values: list[dict]) -> list[dict]:
+    """Every tool value that rounds to `value` at the candidate's own stated precision,
+    closest first (by absolute distance to the exact stated value; a stable sort, so equally
+    close entries keep their collection order). `abs_tol` guards only float-representation noise
+    around the two round() calls -- it's not a tolerance widening. Shared by check_figures
+    (which keeps the closest) and src/agent/citations.py (which needs all of them, to show an
+    ambiguous figure's every possible source rather than silently picking one)."""
+    target = round(value, ndigits)
+    hits = [
+        entry
+        for entry in tool_values
+        if math.isclose(round(entry["value"], ndigits), target, abs_tol=1e-6)
+    ]
+    return sorted(hits, key=lambda entry: abs(entry["value"] - value))
 
 
 def _find_match(value: float, ndigits: int, tool_values: list[dict]) -> dict | None:
     """The *closest* tool value -- by absolute distance to the candidate's own exact stated
     value, not merely the first one encountered in tool_calls/JSON-traversal order -- among
     every entry that rounds to the candidate's value at the candidate's own stated precision.
-    `abs_tol` guards only float-representation noise around the two round() calls; picking the
-    closest of several qualifying candidates is a separate, deliberate step, not a tolerance
-    widening. This alone doesn't prevent a coincidental match at coarse (whole-number) precision
-    -- see the module docstring and `_WEAK_PRECISION_FORMATS` in `check_figures` for that."""
-    target = round(value, ndigits)
-    best, best_diff = None, None
-    for entry in tool_values:
-        if not math.isclose(round(entry["value"], ndigits), target, abs_tol=1e-6):
-            continue
-        diff = abs(entry["value"] - value)
-        if best is None or diff < best_diff:
-            best, best_diff = entry, diff
-    return best
+    Picking the closest of several qualifying candidates is a separate, deliberate step, not a
+    tolerance widening. This alone doesn't prevent a coincidental match at coarse
+    (whole-number) precision -- see the module docstring and `_WEAK_PRECISION_FORMATS` in
+    `check_figures` for that."""
+    hits = find_all_matches(value, ndigits, tool_values)
+    return hits[0] if hits else None
 
 
 def _negation_match(
@@ -345,6 +386,26 @@ def _negation_match(
     return _find_match(-value, ndigits, tool_values)
 
 
+def _is_parenthesized(text: str, m: re.Match) -> bool:
+    """The token sits directly inside parentheses -- "($45,000)", accounting's negative
+    notation -- with nothing else inside them."""
+    return m.start() > 0 and text[m.start() - 1] == "(" and text[m.end() : m.end() + 1] == ")"
+
+
+def _paren_negative_match(
+    text: str, m: re.Match, value: float, ndigits: int, tool_values: list[dict]
+) -> dict | None:
+    """A fallback, never the primary reading, for a positive candidate that failed to trace as
+    stated: if it's written in parentheses, retry it as a negative. Parentheses are far more
+    often an aside ("gross margin (61.5%)") than an accounting negative, so a parenthesized
+    figure is always checked as positive first and flipped only when that fails and a tool value
+    actually matches the negative at the stated precision. Like _negation_match, only reached
+    for an unsigned, positive candidate."""
+    if not _is_parenthesized(text, m):
+        return None
+    return _find_match(-value, ndigits, tool_values)
+
+
 # A bare or dollar-prefixed whole number ("21", "$5" -- `_format_label` returns "plain_integer"/
 # "dollar_integer" only when there's no percent sign, scale suffix/word, or comma grouping) is
 # the lowest-discriminating-power shape `_NUMBER_RE` produces: it states nothing beyond "nearest
@@ -359,26 +420,33 @@ def _negation_match(
 _WEAK_PRECISION_FORMATS = frozenset({"plain_integer", "dollar_integer"})
 
 
-def check_figures(result: dict) -> dict:
+def check_figures(result: dict, prior_tool_calls: list[dict] | None = None) -> dict:
     """Verify every numeric figure in result["final_answer"] traces back to a value present in
-    result["tool_calls"][*]["tool_result"]. Flags, never modifies the answer. Returns a report:
-    figures_checked/traced/untraced counts, all_traced, and a per-figure breakdown with the
-    matched tool call and JSON path when traced. A figure whose only matching evidence is a
-    coincidence-prone whole-number match (see `_WEAK_PRECISION_FORMATS`) reports `traced: False`
-    and `weak_match: True` -- its near-miss `match` is still included for transparency, but it
-    doesn't count toward `figures_traced`/`all_traced`."""
+    result["tool_calls"][*]["tool_result"] -- or, when `prior_tool_calls` is given, in the
+    earlier turns' tool results that were replayed into the model's context (see
+    collect_tool_values; each such call carries its "turn_id", which the match reports). Flags,
+    never modifies the answer. Returns a report: figures_checked/traced/untraced counts,
+    all_traced, a per-figure breakdown with the matched tool call and JSON path when traced, and
+    figures_skipped -- tokens like a bare "1.25M" that can't be checked at all (see _extract). A
+    figure whose only matching evidence is a coincidence-prone whole-number match (see
+    `_WEAK_PRECISION_FORMATS`) reports `traced: False` and `weak_match: True` -- its near-miss
+    `match` is still included for transparency, but it doesn't count toward
+    `figures_traced`/`all_traced`."""
     final_answer = result.get("final_answer") or ""
     tool_calls = result.get("tool_calls") or []
-    tool_values = _collect_tool_values(tool_calls)
+    tool_values = collect_tool_values(tool_calls, prior_tool_calls)
+    candidates, skipped = _extract(final_answer)
 
     figures = []
-    for m in _extract_candidates(final_answer):
+    for m in candidates:
         normalized_value, ndigits = _normalize(m)
         fmt = _format_label(m)
         match = _find_match(normalized_value, ndigits, tool_values)
         sign_inferred = False
         if match is None and not m.group("sign") and normalized_value > 0:
-            match = _negation_match(final_answer, m, normalized_value, ndigits, tool_values)
+            match = _paren_negative_match(final_answer, m, normalized_value, ndigits, tool_values)
+            if match is None:
+                match = _negation_match(final_answer, m, normalized_value, ndigits, tool_values)
             if match is not None:
                 normalized_value = -normalized_value
                 sign_inferred = True
@@ -401,6 +469,7 @@ def check_figures(result: dict) -> dict:
                         "iteration": match["iteration"],
                         "json_path": match["json_path"],
                         "matched_value": match["value"],
+                        "turn_id": match["turn_id"],
                     }
                     if match is not None
                     else None
@@ -416,4 +485,8 @@ def check_figures(result: dict) -> dict:
         "figures_untraced": total - traced,
         "all_traced": total == traced,
         "figures": figures,
+        "figures_skipped": [
+            {"raw_text": m.group(0), "start": m.start(), "end": m.end(), "reason": "bare_scale_suffix"}
+            for m in skipped
+        ],
     }

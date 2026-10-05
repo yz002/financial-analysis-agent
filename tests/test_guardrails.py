@@ -812,3 +812,76 @@ def test_skips_null_ratio_values_without_crash_or_spurious_match():
     )
     assert report["figures_checked"] == 0
     assert report["figures"] == []
+
+
+# --- Phase D session 5: parentheses, skipped suffix tokens, replayed earlier turns ---------
+
+
+def test_parenthesized_figure_falls_back_to_negative_when_positive_fails():
+    call = _statement_call({"value": -45000.0, "tag": "NetIncomeLoss", "filed": "2025-08-01"})
+    report = guardrails.check_figures(_result("Net income was ($45,000) this quarter.", [call]))
+
+    fig = report["figures"][0]
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is True
+    assert fig["normalized_value"] == -45000.0
+
+
+def test_parenthesized_aside_still_reads_as_positive_first():
+    # "(61.5%)" is far more often an aside than an accounting negative: with a matching
+    # positive value present, the positive reading wins and nothing is flipped.
+    report = guardrails.check_figures(
+        _result("Gross margin (61.5%) improved.", [_ratios_call(0.6145038167938931)])
+    )
+    fig = report["figures"][0]
+    assert fig["traced"] is True
+    assert fig["sign_inferred"] is False
+    assert fig["normalized_value"] > 0
+
+
+def test_parenthesized_figure_with_no_negative_match_stays_untraced():
+    call = _statement_call({"value": 45000.0, "tag": "Revenues", "filed": "2025-08-01"})
+    report = guardrails.check_figures(_result("Costs were (12,345) for the year.", [call]))
+    assert report["figures"][0]["traced"] is False
+
+
+def test_bare_suffix_tokens_are_reported_in_figures_skipped():
+    report = guardrails.check_figures(_result("Revenue was 1.25M, up from $1.1M.", []))
+
+    assert [f["raw_text"] for f in report["figures"]] == ["$1.1M"]
+    assert report["figures_skipped"] == [
+        {"raw_text": "1.25M", "start": 12, "end": 17, "reason": "bare_scale_suffix"}
+    ]
+
+
+def test_figures_skipped_is_empty_when_nothing_is_skipped():
+    report = guardrails.check_figures(_result("No figures here.", []))
+    assert report["figures_skipped"] == []
+
+
+def test_figure_restated_from_a_replayed_turn_traces_to_that_turn():
+    prior = {**_statement_call({"value": 90007000000.0, "tag": "Revenues", "filed": "2025-08-01"}),
+             "turn_id": "turn-a"}
+    without = guardrails.check_figures(_result("Revenue was $90.0 billion.", []))
+    with_prior = guardrails.check_figures(_result("Revenue was $90.0 billion.", []), [prior])
+
+    assert without["figures"][0]["traced"] is False
+    assert with_prior["figures"][0]["traced"] is True
+    assert with_prior["figures"][0]["match"]["turn_id"] == "turn-a"
+
+
+def test_current_turn_value_wins_a_tie_with_a_replayed_turn():
+    current = _statement_call({"value": 90007000000.0, "tag": "Revenues", "filed": "2025-08-01"})
+    prior = {**current, "turn_id": "turn-a"}
+    report = guardrails.check_figures(_result("Revenue was $90.0 billion.", [current]), [prior])
+    assert report["figures"][0]["match"]["turn_id"] is None
+
+
+def test_find_all_matches_returns_every_qualifying_value_closest_first():
+    values = [
+        {"value": 90040000000.0, "json_path": "a"},
+        {"value": 91000000000.0, "json_path": "b"},
+        {"value": 90010000000.0, "json_path": "c"},
+    ]
+    hits = guardrails.find_all_matches(90000000000.0, -8, values)
+    assert [h["json_path"] for h in hits] == ["c", "a"]

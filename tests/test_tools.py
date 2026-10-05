@@ -828,3 +828,77 @@ def test_execute_tool_unknown_name_raises_keyerror():
 def test_tool_definitions_names_match_tool_names():
     defined_names = {d["name"] for d in tools.TOOL_DEFINITIONS}
     assert defined_names == tools.TOOL_NAMES
+
+
+# --- Phase D session 5: growth window and prior-period/TTM provenance ---------------------
+
+
+def _ten_quarter_sheet_statement():
+    """Ten quarters, more than DEFAULT_PERIODS (8), so get_csv_ratios works on a tail window."""
+    from src.data.sheet_ingest import rows_to_raw_csv
+
+    quarter_ends = [
+        "2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31",
+        "2024-06-30", "2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30",
+    ]
+    rows = [["Quarter Ending", "Total Revenue", "Net Income", "Total Assets"]]
+    for i, end in enumerate(quarter_ends):
+        rows.append([end, str(1000 + 100 * i), str(10 + i), "5000"])
+    source = {
+        "platform": "google_sheets", "sheet_name": "P&L", "range": "A1:D11",
+        "file_name": "Ten Quarters", "modified_at": None,
+    }
+    raw, error = rows_to_raw_csv(rows, "Ten Quarters — P&L", source=source)
+    assert error is None, error
+    mapping = {
+        "Quarter Ending": "period_end", "Total Revenue": "revenue",
+        "Net Income": "net_income", "Total Assets": "total_assets",
+    }
+    df, errors, _ = csv_statement.normalize(raw, mapping, entity_name="Ten Co")
+    assert errors == [], errors
+    return df
+
+
+def test_get_csv_ratios_growth_on_a_tail_window_compares_against_the_true_prior_quarter():
+    """Regression: the default window is the last 8 of 10 quarters. Before session 5 the tail
+    kept its original labels, and ratios.py's calendar lookup returned a label that _growth then
+    used as a position -- on this statement, an IndexError, which reached the model as a
+    crashed tool."""
+    csv_session.set_active_csv(_ten_quarter_sheet_statement())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["revenue_growth_qoq"]))
+    rows = {r["period_end"]: r for r in result["ratios"]["revenue_growth_qoq"]}
+
+    q = rows["2024-06-30"]  # revenue 1500 vs 2024-03-31's 1400
+    assert q["inputs"]["revenue"] == 1500.0
+    assert q["inputs"]["revenue_prior"] == 1400.0
+    assert q["value"] == pytest.approx(100 / 1400)
+    assert q["provenance"]["revenue_prior"]["period_end"] == "2024-03-31"
+    assert q["provenance"]["revenue_prior"]["source_cell"] == "'P&L'!B6"
+    assert q["provenance"]["revenue"]["source_cell"] == "'P&L'!B7"
+
+
+def test_get_csv_ratios_growth_prior_provenance_is_null_without_a_prior_period():
+    csv_session.set_active_csv(_ten_quarter_sheet_statement())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["revenue_growth_qoq"]))
+    first = result["ratios"]["revenue_growth_qoq"][0]  # the window's first row has no prior
+    assert first["value"] is None
+    assert first["provenance"]["revenue_prior"] is None
+
+
+def test_get_csv_ratios_roa_cites_every_quarter_of_its_ttm_window():
+    csv_session.set_active_csv(_ten_quarter_sheet_statement())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["roa"]))
+    rows = {r["period_end"]: r for r in result["ratios"]["roa"]}
+
+    window = rows["2025-06-30"]["provenance"]["net_income_ttm"]
+    assert [w["period_end"] for w in window] == ["2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30"]
+    assert [w["source_cell"] for w in window] == ["'P&L'!C8", "'P&L'!C9", "'P&L'!C10", "'P&L'!C11"]
+    # The window's first three rows have no full trailing window.
+    assert result["ratios"]["roa"][0]["provenance"]["net_income_ttm"] is None
+
+
+def test_get_csv_ratios_non_growth_ratios_carry_no_prior_provenance():
+    csv_session.set_active_csv(_ten_quarter_sheet_statement())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
+    provenance = result["ratios"]["net_margin"][0]["provenance"]
+    assert set(provenance) == {"net_income", "revenue"}

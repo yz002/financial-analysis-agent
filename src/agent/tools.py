@@ -22,6 +22,7 @@ import pandas as pd
 from . import csv_session
 from ..analysis import forecast as forecast_mod
 from ..analysis import ratios as ratios_mod
+from ..analysis.periods import chained_trailing_window, prior_period_series
 from ..analysis.statements import DURATION_CONCEPTS, INSTANT_CONCEPTS, get_statement
 from ..analysis.trends import detect_anomalies as _detect_anomalies_raw
 from ..analysis.trends import growth_anomalies
@@ -213,6 +214,31 @@ def _csv_citation(df_attrs: dict, concept: str, period_end_iso: str) -> dict:
     if source.get("scale"):
         citation["sheet_scale"] = source["scale"]
     return citation
+
+
+def _csv_period_provenance(df_attrs: dict, stmt: pd.DataFrame, row: int, concept: str) -> dict:
+    """`concept`'s provenance at positional row `row` of `stmt`: its period_end, tag/filed and
+    citation fields -- the same shape as a get_csv_ratios provenance entry, plus period_end,
+    since this one isn't the row's own period."""
+    srow = stmt.iloc[row]
+    period_end_iso = _iso(srow["period_end"])
+    prov = {
+        "period_end": period_end_iso,
+        "tag": srow[f"{concept}_tag"],
+        "filed": _iso(srow[f"{concept}_filed"]),
+    }
+    prov.update(_csv_citation(df_attrs, concept, period_end_iso))
+    return prov
+
+
+# Growth ratio -> (the concept it grows, how many quarters back its comparison period is),
+# mirroring the lag each ratios.py growth function passes to _growth.
+_GROWTH_RATIO_LAGS = {
+    "revenue_growth_qoq": ("revenue", 1),
+    "revenue_growth_yoy": ("revenue", 4),
+    "earnings_growth_qoq": ("net_income", 1),
+    "earnings_growth_yoy": ("net_income", 4),
+}
 
 
 def _csv_units(df_attrs: dict) -> dict:
@@ -685,7 +711,11 @@ def get_csv_ratios(
     ratio_period_length = cadence or "annual"
 
     effective_periods, capped = _cap_periods(periods)
-    stmt = full_df.tail(effective_periods)
+    # reset_index: ratios.py's growth/TTM lookups (periods.find_prior_period) need a 0-based
+    # positional index. A bare tail() keeps the original labels, and _growth uses the label the
+    # lookup returns as a position -- so on a CSV longer than `periods` rows, growth ratios
+    # raised IndexError (or, for a smaller offset, would have read the wrong prior row).
+    stmt = full_df.tail(effective_periods).reset_index(drop=True)
 
     notes = []
     if capped:
@@ -709,8 +739,18 @@ def get_csv_ratios(
         else:
             ratio_df = func(stmt)
 
+        # The cells behind the inputs that aren't the current period's own: the prior period
+        # a growth rate compares against, and the four quarters a trailing-twelve-month
+        # numerator sums. Found with the same calendar lookups ratios.py itself uses, so the
+        # cells cited are the cells the value was computed from.
+        prior_lookup = None
+        if name in _GROWTH_RATIO_LAGS:
+            growth_concept, lag = _GROWTH_RATIO_LAGS[name]
+            prior_lookup = prior_period_series(stmt["period_end"], quarters_back=lag)
+        uses_ttm = name in ("roa", "roe") and ratio_period_length == "quarterly"
+
         rows = []
-        for srow, rrow in zip(stmt.itertuples(), ratio_df.itertuples()):
+        for i, (srow, rrow) in enumerate(zip(stmt.itertuples(), ratio_df.itertuples())):
             def _input_value(col):
                 raw = getattr(rrow, col)
                 if col.endswith("_reason"):
@@ -729,6 +769,23 @@ def get_csv_ratios(
                 }
                 prov.update(_csv_citation(full_df.attrs, c, period_end_iso))
                 provenance[c] = prov
+            if prior_lookup is not None:
+                prior_idx = prior_lookup["prior_index"].iloc[i]
+                provenance[f"{growth_concept}_prior"] = (
+                    None
+                    if pd.isna(prior_idx)
+                    else _csv_period_provenance(full_df.attrs, stmt, int(prior_idx), growth_concept)
+                )
+            if uses_ttm:
+                window, _reason = chained_trailing_window(stmt["period_end"], i, hops=3)
+                provenance["net_income_ttm"] = (
+                    None
+                    if window is None
+                    else [
+                        _csv_period_provenance(full_df.attrs, stmt, j, "net_income")
+                        for j in window + [i]
+                    ]
+                )
             rows.append(
                 {
                     "period_end": period_end_iso,
