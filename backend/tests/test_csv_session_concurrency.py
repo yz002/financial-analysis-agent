@@ -22,9 +22,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 import app.main as app_main
 from app.main import app
+from db.base import get_session
 from src.agent import csv_session
 
 client = TestClient(app)
@@ -72,6 +74,17 @@ def _ask(headers: dict, csv_context_id: str, question: str = "How is revenue tre
     )
 
 
+def _usage_event_count(account_id: str) -> int:
+    """Phase D session 5: a refused statement is refused before the charge, so it costs nothing."""
+    session = get_session()
+    try:
+        return session.execute(
+            text("SELECT COUNT(*) FROM usage_events WHERE account_id = :id"), {"id": account_id}
+        ).scalar()
+    finally:
+        session.close()
+
+
 # --- the concurrency regression test ------------------------------------------------------
 
 
@@ -83,7 +96,7 @@ def test_concurrent_ask_calls_never_cross_accounts_csv_data(auth_session, monkey
 
     barrier = threading.Barrier(2, timeout=10)
 
-    def fake_run_agent(question, prior_messages=None):
+    def fake_run_agent(question, prior_messages=None, prior_tool_calls=None):
         # Read this request's context-local active CSV once immediately...
         before_df = csv_session.get_active_csv()
         before_entity = before_df.attrs["entity_name"] if before_df is not None else None
@@ -132,7 +145,7 @@ def test_concurrent_ask_calls_never_cross_accounts_csv_data(auth_session, monkey
 
 
 def test_ask_with_unconfirmed_csv_context_id_is_refused(auth_session, monkeypatch):
-    _, headers = auth_session()
+    account_id, headers = auth_session()
     resp = client.post(
         "/v1/csv/parse",
         json={"rows": _rows_for("Gamma Consulting"), "filename": "gamma.csv"},
@@ -144,36 +157,39 @@ def test_ask_with_unconfirmed_csv_context_id_is_refused(auth_session, monkeypatc
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(headers, csv_context_id)
     assert resp.status_code == 404, resp.text
+    assert _usage_event_count(account_id) == 0
 
 
 def test_ask_with_foreign_csv_context_id_is_refused(auth_session, monkeypatch):
     _, owner_headers = auth_session()
-    _, other_headers = auth_session()
+    other_account_id, other_headers = auth_session()
     csv_context_id = _create_confirmed_csv(owner_headers, "Delta Retail")
 
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(other_headers, csv_context_id)
     assert resp.status_code == 404, resp.text
+    assert _usage_event_count(other_account_id) == 0
 
 
 def test_ask_with_nonexistent_csv_context_id_is_refused(auth_session, monkeypatch):
-    _, headers = auth_session()
+    account_id, headers = auth_session()
 
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(headers, str(uuid.uuid4()))
     assert resp.status_code == 404, resp.text
+    assert _usage_event_count(account_id) == 0

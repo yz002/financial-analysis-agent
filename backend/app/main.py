@@ -19,7 +19,9 @@ import logging
 import os
 import secrets
 import sys
+import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,7 +31,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
-from sqlalchemy import select, text, update
+from sqlalchemy import exists, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from db.base import get_session
@@ -53,6 +55,20 @@ from db.models import (
 # call-site change.
 logger = logging.getLogger(__name__)
 
+# src/agent/agent.py's per-model-call INFO line (iteration, duration_ms, stop reason, model --
+# metadata only, never question/answer text: backend/SECURITY.md SS4). The last-resort handler
+# above only shows WARNING and up, so this logger gets its own stderr handler, which Render's
+# service logs capture. propagate=False keeps lines from appearing twice if uvicorn or Render
+# configures the root logger; the handler check keeps a --reload re-import from stacking them.
+AGENT_LOGGER_NAME = "src.agent.agent"
+_agent_logger = logging.getLogger(AGENT_LOGGER_NAME)
+if not _agent_logger.handlers:
+    _agent_handler = logging.StreamHandler()
+    _agent_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _agent_logger.addHandler(_agent_handler)
+_agent_logger.setLevel(logging.INFO)
+_agent_logger.propagate = False
+
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
 # directory (see the run instructions above), so `src` isn't importable
@@ -63,7 +79,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.agent import csv_session  # noqa: E402 -- see sys.path note above
-from src.agent.agent import DEFAULT_MODEL, run_agent  # noqa: E402 -- see sys.path note above
+from src.agent.agent import (  # noqa: E402 -- see sys.path note above
+    DEFAULT_MODEL,
+    MODEL_CALL_TIMEOUT_SECONDS,
+    AgentTimeBudgetExceeded,
+    run_agent,
+)
+from src.agent.citations import build_citations  # noqa: E402 -- see sys.path note above
 from src.analysis.csv_statement import (  # noqa: E402 -- see sys.path note above
     MAPPABLE_ROLES,
     RECOMMENDED_CONCEPTS,
@@ -82,6 +104,21 @@ from src.data.sheet_ingest import (  # noqa: E402 -- see sys.path note above
 )
 
 from . import billing, oauth_providers
+from .ask_rules import (
+    DONE,
+    FAILED,
+    IN_PROGRESS,
+    LOST,
+    MISMATCH,
+    NEEDS_RECONFIRM,
+    REUSED,
+    RUNNING,
+    ask_error,
+    binding_decision,
+    replay_state,
+    request_fingerprint,
+    statement_problem,
+)
 from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
 from .gating import MAPPING_PROPOSAL_OUTCOME, evaluate_ask_gate, evaluate_mapping_proposal_gate
 from .history import MAX_PRIOR_TURNS, build_prior_messages
@@ -271,40 +308,277 @@ def _get_owned_conversation(session, conversation_id: uuid.UUID, account_id: uui
     return row
 
 
-def _update_usage_event_outcome(usage_event_id: int, turn_id: uuid.UUID | None, outcome: str) -> None:
-    """
-    Updates a usage_events row's turn_id/outcome after run_agent resolves (success,
-    hit_iteration_cap, or a handled failure). The row itself is inserted with a
-    placeholder outcome before run_agent is even called (see ask() below), matching
-    design doc SS7.2's "counts against the cap even on a mid-run crash" rationale -- a
-    crash this update never runs for simply leaves that placeholder in place, still
-    correctly counted toward the cap (mislabeled, not miscounted).
-    """
+def _failed_transition(usage_event_id: int):
+    """IN_PROGRESS -> FAILED, conditionally (app/ask_rules.py's request state machine): a row
+    that already left 'in_progress' -- answered, or marked lost by a replay -- is left alone."""
+    return (
+        update(UsageEvent)
+        .where(UsageEvent.id == usage_event_id, UsageEvent.outcome == IN_PROGRESS)
+        .values(outcome="error")
+    )
+
+
+def _completion_transition(usage_event_id: int, turn_id: uuid.UUID, outcome: str):
+    """IN_PROGRESS -> DONE, conditionally, in the same transaction as the Turn insert. Zero rows
+    updated means a replay already marked this request lost (then failed) while the run was
+    still going: the caller rolls the whole transaction back, so no orphan Turn is left."""
+    return (
+        update(UsageEvent)
+        .where(UsageEvent.id == usage_event_id, UsageEvent.outcome == IN_PROGRESS)
+        .values(turn_id=turn_id, outcome=outcome)
+    )
+
+
+def _mark_failed(usage_event_id: int) -> None:
+    """Records a failed attempt: still counted toward the cap ('error' is a counted outcome),
+    exactly once, and never over a row that already finished or was marked lost."""
     session = get_session()
     try:
-        usage_event = session.get(UsageEvent, usage_event_id)
-        if usage_event is not None:
-            usage_event.turn_id = turn_id
-            usage_event.outcome = outcome
-            session.commit()
+        session.execute(_failed_transition(usage_event_id))
+        session.commit()
     finally:
         session.close()
 
 
-@app.post("/v1/ask", response_model=AskResponse)
-def ask(
-    request: AskRequest,
-    account: Account = Depends(get_current_account),
+def _tool_calls_summary(tool_calls: list[dict]) -> list[dict]:
+    return [{"tool_name": call["tool_name"], "is_error": call["is_error"]} for call in tool_calls]
+
+
+def _find_request(session, account_id: uuid.UUID, request_id: uuid.UUID) -> UsageEvent | None:
+    """The usage_events row for (account_id, request_id) -- the only replay lookup key, always
+    scoped by account, so one account can never see or replay another's request."""
+    return session.execute(
+        select(UsageEvent).where(
+            UsageEvent.account_id == account_id, UsageEvent.request_id == request_id
+        )
+    ).scalar_one_or_none()
+
+
+def _replay_response(
+    session, row: UsageEvent, fingerprint: str | None, account_id: uuid.UUID, now: datetime
 ) -> AskResponse:
-    gate_now = datetime.now(timezone.utc)
+    """The response for a request_id that already has a row, by app/ask_rules.replay_state:
+    the stored answer, exactly as it was returned, for a finished request; the structured
+    409/422 otherwise. A LOST row is moved to 'error' in `session`; the caller commits."""
+    state = replay_state(
+        row.outcome, row.turn_id, row.occurred_at, row.request_fingerprint, fingerprint, now
+    )
+    if state == REUSED:
+        raise HTTPException(status_code=422, detail=ask_error(REUSED))
+    if state == RUNNING:
+        raise HTTPException(status_code=409, detail=ask_error(RUNNING))
+    if state == LOST:
+        session.execute(_failed_transition(row.id))
+        raise HTTPException(status_code=409, detail=ask_error(LOST))
+    if state == FAILED:
+        raise HTTPException(status_code=409, detail=ask_error(FAILED))
+    if state == DONE:
+        turn = session.get(Turn, row.turn_id)
+        conversation = session.get(Conversation, turn.conversation_id) if turn is not None else None
+        if conversation is not None and conversation.account_id == account_id:
+            return AskResponse(
+                conversation_id=str(conversation.id),
+                turn_id=str(turn.id),
+                final_answer=turn.final_answer,
+                hit_iteration_cap=turn.hit_iteration_cap,
+                figure_check=turn.figure_check,
+                citations=turn.citations or [],
+                tool_calls_summary=_tool_calls_summary(turn.tool_calls or []),
+            )
+    logger.warning(
+        "unexpected /v1/ask request state usage_event_id=%s outcome=%s has_turn_id=%s",
+        row.id,
+        row.outcome,
+        row.turn_id is not None,
+    )
+    raise HTTPException(status_code=409, detail=ask_error(FAILED))
+
+
+def _replay_if_known(
+    account_id: uuid.UUID, request_id: uuid.UUID, fingerprint: str | None
+) -> AskResponse | None:
+    """None when this request_id is new; otherwise its replay response (or raised error). Never
+    takes the account lock, so a replay never waits on a question being charged."""
     session = get_session()
     try:
-        decision = evaluate_ask_gate(session, account, gate_now)
+        row = _find_request(session, account_id, request_id)
+        if row is None:
+            return None
+        try:
+            return _replay_response(session, row, fingerprint, account_id, datetime.now(timezone.utc))
+        finally:
+            session.commit()  # persists a LOST row's move to 'error'; otherwise a no-op
+    finally:
+        session.close()
+
+
+@dataclass
+class _AskContext:
+    """Everything /v1/ask needs from the database before it charges and runs, copied into plain
+    values while the loading session is open, so no session stays open across run_agent."""
+
+    conversation_id: uuid.UUID | None
+    prior_messages: list[dict] | None
+    prior_tool_calls: list[dict] | None
+    statement_id: uuid.UUID | None  # used this turn; a new conversation is bound to it
+    statement_data: list | None
+    statement_attrs: dict | None
+    statement_raw: dict | None
+
+
+def _parse_uuid(value: str | None, not_found_detail: str) -> uuid.UUID | None:
+    """A request id as a UUID. Malformed by construction can't match any row, so it gets the
+    same 404 as a well-formed id that doesn't exist -- never a silent fallback."""
+    if value is None:
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=not_found_detail) from e
+
+
+def _recent_turns(session, conversation_id: uuid.UUID) -> list[Turn]:
+    """The last MAX_PRIOR_TURNS turns, oldest first. Only called right after
+    _get_owned_conversation has checked the conversation belongs to the caller."""
+    turns = (
+        session.query(Turn)
+        .filter(Turn.conversation_id == conversation_id)
+        .order_by(Turn.created_at.desc())
+        .limit(MAX_PRIOR_TURNS)
+        .all()
+    )
+    turns.reverse()
+    return turns
+
+
+def _csv_tool_turns_exist(conversation_id: uuid.UUID):
+    """EXISTS: did any turn of this conversation -- all of them, not only the replayed ones --
+    call a CSV tool? turns.tool_calls is the JSONB list run_agent returns, so array containment
+    (@>) finds a call by tool_name. Used only for conversations created before migration 0005,
+    to tell "bound to a statement that's since gone" from "never bound"."""
+    return select(
+        exists().where(
+            Turn.conversation_id == conversation_id,
+            or_(
+                Turn.tool_calls.contains([{"tool_name": "get_csv_statement"}]),
+                Turn.tool_calls.contains([{"tool_name": "get_csv_ratios"}]),
+            ),
+        )
+    )
+
+
+def _load_ask_context(
+    account_id: uuid.UUID,
+    conversation_uuid: uuid.UUID | None,
+    requested_csv_uuid: uuid.UUID | None,
+) -> _AskContext:
+    """Conversation history, the statement binding (app/ask_rules.binding_decision) and the
+    statement itself -- all before anything is charged, so a refusal here costs nothing. The
+    statement is only ever loaded through the account-scoped, confirmed-only loader: for a
+    continuing conversation, a statement it refuses (gone, or not this account's) is
+    statement_needs_reconfirm, never another account's data."""
+    session = get_session()
+    try:
+        prior_messages = prior_tool_calls = None
+        statement_id = requested_csv_uuid
+        continuing = conversation_uuid is not None
+        if continuing:
+            conversation = _get_owned_conversation(session, conversation_uuid, account_id)
+            turns = _recent_turns(session, conversation_uuid)
+            prior_messages = build_prior_messages(turns)
+            # Exactly the replayed turns' calls, tagged with their turn, for the figure check
+            # and citations -- never a wider window.
+            prior_tool_calls = [
+                {**call, "turn_id": str(turn.id)} for turn in turns for call in (turn.tool_calls or [])
+            ]
+            decision = binding_decision(
+                conversation.bound_csv_context_id,
+                conversation.csv_context_id,
+                requested_csv_uuid,
+                lambda: bool(session.execute(_csv_tool_turns_exist(conversation_uuid)).scalar()),
+            )
+            if decision.kind in (MISMATCH, NEEDS_RECONFIRM):
+                raise HTTPException(status_code=409, detail=ask_error(decision.kind))
+            statement_id = decision.statement_id
+
+        statement_data = statement_attrs = statement_raw = None
+        if statement_id is not None:
+            try:
+                row = _load_confirmed_csv_statement(session, statement_id, account_id)
+            except HTTPException:
+                if continuing:
+                    raise HTTPException(
+                        status_code=409, detail=ask_error(NEEDS_RECONFIRM)
+                    ) from None
+                raise
+            if statement_problem(row.status, row.statement_data, row.statement_attrs) is not None:
+                raise HTTPException(status_code=409, detail=ask_error(NEEDS_RECONFIRM))
+            statement_data = row.statement_data
+            statement_attrs = row.statement_attrs
+            statement_raw = row.raw_columns
+
+        return _AskContext(
+            conversation_id=conversation_uuid,
+            prior_messages=prior_messages,
+            prior_tool_calls=prior_tool_calls,
+            statement_id=statement_id,
+            statement_data=statement_data,
+            statement_attrs=statement_attrs,
+            statement_raw=statement_raw,
+        )
+    finally:
+        session.close()
+
+
+@dataclass
+class _Charge:
+    """The outcome of the gate: either a replay response (the request_id appeared while
+    waiting for the lock) or a charged, in-progress question."""
+
+    response: AskResponse | None = None
+    usage_event_id: int | None = None
+    byo_client: anthropic.Anthropic | None = None
+    tier: str | None = None
+
+
+def _lock_account(session, account_id: uuid.UUID) -> None:
+    """Row-locks the account until the caller's transaction commits, so the gate check and the
+    usage insert are serialized per account: two simultaneous questions can't both pass a cap
+    with one question left. Held for milliseconds -- _charge commits before run_agent -- and
+    never taken by a replay lookup."""
+    session.execute(select(Account.id).where(Account.id == account_id).with_for_update())
+
+
+def _charge(
+    account: Account, request_id: uuid.UUID | None, fingerprint: str | None
+) -> _Charge:
+    """In one short, locked transaction: re-check the request_id (a resend may have arrived
+    first), run the gate, then insert the 'in_progress' row that counts this question. Commits
+    -- releasing the lock -- before returning, and copies the row id before the commit so
+    nothing reads an expired attribute afterwards."""
+    now = datetime.now(timezone.utc)
+    session = get_session()
+    try:
+        _lock_account(session, account.id)
+
+        if request_id is not None:
+            existing = _find_request(session, account.id, request_id)
+            if existing is not None:
+                try:
+                    return _Charge(
+                        response=_replay_response(session, existing, fingerprint, account.id, now)
+                    )
+                finally:
+                    session.commit()  # releases the lock (and persists a LOST row's move)
+
+        decision = evaluate_ask_gate(session, account, now)
         if not decision.allowed:
+            # Never tied to the request: a 429 isn't a replayable attempt, and the same
+            # request_id must work again once the cap resets.
             session.add(
                 UsageEvent(
                     account_id=account.id,
-                    occurred_at=gate_now,
+                    occurred_at=now,
                     turn_id=None,
                     outcome=decision.reject_outcome,
                 )
@@ -335,7 +609,7 @@ def ask(
                 # rotated out from under this ciphertext (backend/SECURITY.md's Fernet
                 # rotation runbook is a hard cutover -- old ciphertext is unrecoverable by
                 # design). Deactivate the row so this doesn't repeat on every subsequent
-                # request: the next /v1/ask for this install falls through
+                # request: the next /v1/ask for this account falls through
                 # gating.evaluate_ask_gate's byo_key.is_active check straight to the
                 # paid/free tier instead of hitting this same dead end again.
                 deactivate_session = get_session()
@@ -353,131 +627,75 @@ def ask(
                         "please re-register it."
                     ),
                 ) from e
-            byo_client = anthropic.Anthropic(api_key=raw_key)
-            byo_key.last_used_at = gate_now
+            byo_client = anthropic.Anthropic(api_key=raw_key, timeout=MODEL_CALL_TIMEOUT_SECONDS)
+            byo_key.last_used_at = now
 
-        # Placeholder row, inserted before run_agent runs -- see _update_usage_event_outcome.
+        # Counted from here, even if the run crashes later (it then moves to 'error').
         usage_event = UsageEvent(
-            account_id=account.id, occurred_at=gate_now, turn_id=None, outcome="answered"
+            account_id=account.id,
+            occurred_at=now,
+            turn_id=None,
+            outcome=IN_PROGRESS,
+            request_id=request_id,
+            request_fingerprint=fingerprint,
         )
         session.add(usage_event)
+        try:
+            session.flush()
+        except IntegrityError:
+            # The backstop for a resend that slipped in despite the in-lock re-check.
+            session.rollback()
+            raise HTTPException(status_code=409, detail=ask_error(RUNNING)) from None
+        usage_event_id = usage_event.id  # copied before commit: reading it after would autobegin
         session.commit()
-        usage_event_id = usage_event.id
+        return _Charge(usage_event_id=usage_event_id, byo_client=byo_client, tier=decision.tier)
     finally:
         session.close()
 
-    conversation_uuid: uuid.UUID | None = None
-    prior_messages: list[dict] | None = None
-    if request.conversation_id is not None:
-        try:
-            conversation_uuid = uuid.UUID(request.conversation_id)
-        except ValueError as e:
-            # Same "fail clearly, don't silently proceed" contract as csv_context_id below.
-            raise HTTPException(status_code=404, detail="conversation not found") from e
-        session = get_session()
-        try:
-            _get_owned_conversation(session, conversation_uuid, account.id)
-            recent_turns = (
-                session.query(Turn)
-                .filter(Turn.conversation_id == conversation_uuid)
-                .order_by(Turn.created_at.desc())
-                .limit(MAX_PRIOR_TURNS)
-                .all()
-            )
-            recent_turns.reverse()  # oldest to newest, for seeding order
-            prior_messages = build_prior_messages(recent_turns)
-        finally:
-            session.close()
 
-    csv_context_uuid: uuid.UUID | None = None
-    csv_token = None
-    if request.csv_context_id is not None:
-        try:
-            csv_context_uuid = uuid.UUID(request.csv_context_id)
-        except ValueError as e:
-            # Malformed by construction can't match any row's PK -- same "fail clearly, don't
-            # silently proceed with no active CSV" contract as a well-formed but nonexistent id.
-            raise HTTPException(status_code=404, detail="csv context not found") from e
-        session = get_session()
-        try:
-            csv_row = _load_confirmed_csv_statement(session, csv_context_uuid, account.id)
-            df = statement_from_records(csv_row.statement_data, csv_row.statement_attrs)
-        finally:
-            session.close()
-        csv_token = csv_session.set_active_csv_with_token(df)
-
-    try:
-        try:
-            # client is only passed when a BYO key applies -- omitting the kwarg entirely
-            # otherwise (rather than passing client=None) keeps run_agent's own default
-            # (anthropic.Anthropic() against the master ANTHROPIC_API_KEY) in charge of
-            # client construction for the free/paid tiers, unchanged from before this
-            # session.
-            run_agent_kwargs = {"prior_messages": prior_messages}
-            if byo_client is not None:
-                run_agent_kwargs["client"] = byo_client
-            result = run_agent(request.question, **run_agent_kwargs)
-        except anthropic.AuthenticationError as e:
-            # Caught ahead of the broader anthropic.APIError handler below (it's a
-            # subclass -- order matters). A key-rejection error is the one failure mode
-            # this session's BYO-key work makes concretely dangerous: the request that
-            # failed just carried either this caller's own BYO key or this server's
-            # master key, so str(e)/e.args must never reach the HTTP response even
-            # though, empirically, the Anthropic SDK's own message here is built from the
-            # API's JSON error body, not an echo of the request -- a defensive posture
-            # against a future SDK/proxy/network-layer change, not a reaction to an
-            # observed leak. The real exception (with traceback) is still logged
-            # server-side, so debuggability isn't lost, only what reaches the caller.
-            _update_usage_event_outcome(usage_event_id, None, "error")
-            logger.exception("Anthropic authentication error in /v1/ask (tier=%s)", decision.tier)
-            if byo_client is not None:
-                detail = "Your Anthropic API key was rejected. Please re-register a valid key."
-            else:
-                detail = "Anthropic API authentication failed."
-            raise HTTPException(status_code=502, detail=detail) from e
-        except anthropic.APIError as e:
-            # str(e) is deliberately kept out of the response (session 10's security
-            # hardening pass) -- the full exception, including any embedded request/
-            # response detail, is already captured server-side by logger.exception below.
-            _update_usage_event_outcome(usage_event_id, None, "error")
-            logger.exception("Anthropic API error in /v1/ask")
-            raise HTTPException(status_code=502, detail="Anthropic API error.") from e
-        except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
-            # str(e) used to reach this response; session 10's security hardening pass
-            # closed that gap for every handler in this route, not just the
-            # authentication-specific one -- a tool-execution bug, a pandas/EDGAR error,
-            # etc. inside run_agent could in principle embed request detail, and the full
-            # exception is already captured server-side by logger.exception below.
-            _update_usage_event_outcome(usage_event_id, None, "error")
-            logger.exception("run_agent failed unexpectedly in /v1/ask")
-            raise HTTPException(status_code=500, detail="run_agent failed unexpectedly.") from e
-    finally:
-        if csv_token is not None:
-            csv_session.reset_active_csv(csv_token)
-
+def _persist_turn(
+    account_id: uuid.UUID,
+    ctx: _AskContext,
+    question: str,
+    result: dict,
+    citations: list[dict],
+    usage_event_id: int,
+    started: float,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Stores the conversation (a new one is bound to this turn's statement), the turn with its
+    citations, and moves the usage row IN_PROGRESS -> DONE -- all in one transaction. If the
+    conditional move finds the row already marked failed, everything rolls back and the
+    caller gets answer_failed."""
     turn_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
     session = get_session()
     try:
-        if conversation_uuid is not None:
-            # Ownership was already verified above; re-fetch in this block's own session
-            # rather than reusing the earlier (closed) session's now-detached instance.
-            conversation = session.get(Conversation, conversation_uuid)
+        if ctx.conversation_id is not None:
+            conversation = session.get(Conversation, ctx.conversation_id)
+            # Ownership re-checked here rather than trusted from the earlier, closed session
+            # (backend/SECURITY.md SS1).
+            if conversation is None or conversation.account_id != account_id:
+                raise HTTPException(status_code=404, detail="conversation not found")
             conversation.last_turn_at = now
+            conversation_id = conversation.id
         else:
-            conversation = Conversation(
-                account_id=account.id,
-                title=request.question[:200],
-                csv_context_id=csv_context_uuid,
-                last_turn_at=now,
+            conversation_id = uuid.uuid4()
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    account_id=account_id,
+                    title=question[:200],
+                    csv_context_id=ctx.statement_id,
+                    bound_csv_context_id=ctx.statement_id,
+                    last_turn_at=now,
+                )
             )
-            session.add(conversation)
-        session.flush()  # populate conversation.id before the Turn below references it
+        session.flush()  # the conversation row exists before the Turn references it
 
         session.add(
             Turn(
                 id=turn_id,
-                conversation_id=conversation.id,
+                conversation_id=conversation_id,
                 question=result["question"],
                 final_answer=result["final_answer"],
                 hit_iteration_cap=result["hit_iteration_cap"],
@@ -485,20 +703,126 @@ def ask(
                 stop_reason=result["stop_reason"],
                 figure_check=result["figure_check"],
                 tool_calls=result["tool_calls"],
+                citations=citations,
                 model=DEFAULT_MODEL,
             )
         )
-        usage_event = session.get(UsageEvent, usage_event_id)
-        usage_event.turn_id = turn_id
-        usage_event.outcome = "hit_iteration_cap" if result["hit_iteration_cap"] else "answered"
+        session.flush()
+        final_outcome = "hit_iteration_cap" if result["hit_iteration_cap"] else "answered"
+        updated = session.execute(_completion_transition(usage_event_id, turn_id, final_outcome))
+        if updated.rowcount != 1:
+            session.rollback()
+            logger.warning(
+                "/v1/ask run finished after its request left in_progress usage_event_id=%s elapsed_ms=%d",
+                usage_event_id,
+                int((time.monotonic() - started) * 1000),
+            )
+            raise HTTPException(status_code=409, detail=ask_error(FAILED))
         session.commit()
-        conversation_id = conversation.id
+        return conversation_id, turn_id
     finally:
         session.close()
 
-    tool_calls_summary = [
-        {"tool_name": call["tool_name"], "is_error": call["is_error"]} for call in result["tool_calls"]
-    ]
+
+@app.post("/v1/ask", response_model=AskResponse)
+def ask(
+    request: AskRequest,
+    account: Account = Depends(get_current_account),
+) -> AskResponse:
+    """
+    EXTENSION_INTEGRATION.md SS6 /v1/ask (amended Phase D session 5). In order:
+      1. replay: a known request_id gets its stored answer or its state, free (no lock);
+      2. load: conversation, binding and statement -- refusals here cost nothing;
+      3. charge: lock the account, re-check the request_id, gate, insert 'in_progress', commit;
+      4. run_agent, with no DB session open;
+      5. persist the turn and its citations, moving the row to done conditionally.
+    """
+    started = time.monotonic()
+    account_id = account.id
+    fingerprint = (
+        request_fingerprint(request.question, request.csv_context_id, request.conversation_id)
+        if request.request_id is not None
+        else None
+    )
+
+    if request.request_id is not None:
+        stored = _replay_if_known(account_id, request.request_id, fingerprint)
+        if stored is not None:
+            return stored
+
+    conversation_uuid = _parse_uuid(request.conversation_id, "conversation not found")
+    csv_context_uuid = _parse_uuid(request.csv_context_id, "csv context not found")
+    ctx = _load_ask_context(account_id, conversation_uuid, csv_context_uuid)
+    df = (
+        statement_from_records(ctx.statement_data, ctx.statement_attrs)
+        if ctx.statement_id is not None
+        else None
+    )
+
+    charge = _charge(account, request.request_id, fingerprint)
+    if charge.response is not None:
+        return charge.response
+    usage_event_id = charge.usage_event_id
+
+    csv_token = csv_session.set_active_csv_with_token(df) if df is not None else None
+    try:
+        try:
+            # client is only passed when a BYO key applies -- omitting the kwarg otherwise keeps
+            # run_agent's own default client (the master key, with the same per-call timeout)
+            # in charge for the free/paid tiers.
+            run_agent_kwargs = {
+                "prior_messages": ctx.prior_messages,
+                "prior_tool_calls": ctx.prior_tool_calls,
+            }
+            if charge.byo_client is not None:
+                run_agent_kwargs["client"] = charge.byo_client
+            result = run_agent(request.question, **run_agent_kwargs)
+        except AgentTimeBudgetExceeded as e:
+            _mark_failed(usage_event_id)
+            raise HTTPException(
+                status_code=504, detail=ask_error("answer_time_budget_exceeded")
+            ) from e
+        except anthropic.AuthenticationError as e:
+            # Caught ahead of the broader anthropic.APIError handler below (it's a
+            # subclass -- order matters). A key-rejection error is the one failure mode
+            # the BYO-key work makes concretely dangerous: the request that failed just
+            # carried either this caller's own BYO key or this server's master key, so
+            # str(e)/e.args must never reach the HTTP response. The real exception (with
+            # traceback) is still logged server-side, so debuggability isn't lost.
+            _mark_failed(usage_event_id)
+            logger.exception("Anthropic authentication error in /v1/ask (tier=%s)", charge.tier)
+            if charge.byo_client is not None:
+                detail = "Your Anthropic API key was rejected. Please re-register a valid key."
+            else:
+                detail = "Anthropic API authentication failed."
+            raise HTTPException(status_code=502, detail=detail) from e
+        except anthropic.APIError as e:
+            # str(e) is deliberately kept out of the response (session 10's security
+            # hardening pass) -- the full exception is captured by logger.exception below.
+            _mark_failed(usage_event_id)
+            logger.exception("Anthropic API error in /v1/ask")
+            raise HTTPException(status_code=502, detail="Anthropic API error.") from e
+        except Exception as e:  # noqa: BLE001 -- surfaced as a clean 500, not a bare 500 traceback
+            # A tool-execution bug, a pandas/EDGAR error, etc. inside run_agent could in
+            # principle embed request detail, so str(e) never reaches the response; the full
+            # exception is captured server-side by logger.exception below.
+            _mark_failed(usage_event_id)
+            logger.exception("run_agent failed unexpectedly in /v1/ask")
+            raise HTTPException(status_code=500, detail="run_agent failed unexpectedly.") from e
+    finally:
+        if csv_token is not None:
+            csv_session.reset_active_csv(csv_token)
+
+    citations = build_citations(
+        result["figure_check"], result["tool_calls"], ctx.prior_tool_calls, ctx.statement_raw
+    )
+    try:
+        conversation_id, turn_id = _persist_turn(
+            account_id, ctx, request.question, result, citations, usage_event_id, started
+        )
+    except HTTPException:
+        _mark_failed(usage_event_id)  # conditional: a no-op if the row already left in_progress
+        raise
 
     return AskResponse(
         conversation_id=str(conversation_id),
@@ -506,8 +830,8 @@ def ask(
         final_answer=result["final_answer"],
         hit_iteration_cap=result["hit_iteration_cap"],
         figure_check=result["figure_check"],
-        citations=[],  # deferred -- provenance-derived citations are new parsing logic, not minimal wiring
-        tool_calls_summary=tool_calls_summary,
+        citations=citations,
+        tool_calls_summary=_tool_calls_summary(result["tool_calls"]),
     )
 
 

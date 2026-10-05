@@ -59,6 +59,10 @@ UsageEventOutcome = Enum(
     # Phase D session 4 (migration 0004): one row per fresh /propose-mapping model call,
     # counted only for the proposal cap -- never toward question caps (app/gating.py).
     "mapping_proposal",
+    # Phase D session 5 (migration 0005): a question that's running. Inserted before
+    # run_agent, moved to answered/hit_iteration_cap/error by a conditional UPDATE afterwards.
+    # Counts toward the question caps while it runs (app/gating.py).
+    "in_progress",
     name="usage_event_outcome",
 )
 CsvStatementStatus = Enum("unconfirmed", "confirmed", name="csv_statement_status")
@@ -228,6 +232,11 @@ class Conversation(Base):
     csv_context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("csv_statements.id", ondelete="SET NULL"), nullable=True
     )
+    # Phase D session 5 (migration 0005): the statement this conversation was bound to at
+    # creation. Deliberately no FK, so it's never nulled when the statement row goes away --
+    # that's how a bound conversation whose statement is gone is told apart from an unbound
+    # one. Only ever read through the account-scoped, confirmed-only statement loader.
+    bound_csv_context_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -249,6 +258,9 @@ class Turn(Base):
     stop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     figure_check: Mapped[dict] = mapped_column(JSONB, nullable=False)
     tool_calls: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Phase D session 5 (migration 0005): the citations computed when this answer was produced
+    # (src/agent/citations.py), returned verbatim on a request_id replay. NULL before 0005.
+    citations: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -272,3 +284,8 @@ class UsageEvent(Base):
         UUID(as_uuid=True), ForeignKey("turns.id"), nullable=True
     )
     outcome: Mapped[str] = mapped_column(UsageEventOutcome, nullable=False)
+    # Phase D session 5 (migration 0005): the caller's per-question id and a hash of the request
+    # it was first sent with (app/ask_rules.py). Unique per account where set. Only a question
+    # attempt carries them -- a rejected (429) row never does, so the id stays usable.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -170,7 +170,7 @@ def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch)
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: _fake_result(question, "MSFT revenue was $61.9 billion."),
+        lambda question, prior_messages=None, prior_tool_calls=None: _fake_result(question, "MSFT revenue was $61.9 billion."),
     )
     resp_1 = _ask(headers, "What was MSFT revenue last quarter?")
     assert resp_1.status_code == 200, resp_1.text
@@ -179,7 +179,7 @@ def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch)
 
     captured = {}
 
-    def fake_run_agent_2(question, prior_messages=None):
+    def fake_run_agent_2(question, prior_messages=None, prior_tool_calls=None):
         captured["prior_messages"] = prior_messages
         return _fake_result(question, "It grew 12% YoY.")
 
@@ -211,12 +211,22 @@ def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch)
         session.close()
 
 
+def _usage_event_count(account_id: str) -> int:
+    session = get_session()
+    try:
+        return session.execute(
+            text("SELECT COUNT(*) FROM usage_events WHERE account_id = :id"), {"id": account_id}
+        ).scalar()
+    finally:
+        session.close()
+
+
 def test_ask_with_invalid_conversation_id_404s(auth_session, monkeypatch):
-    _, headers = auth_session()
+    account_id, headers = auth_session()
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: pytest.fail(
+        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail(
             "run_agent must not be called for an invalid conversation_id"
         ),
     )
@@ -226,16 +236,18 @@ def test_ask_with_invalid_conversation_id_404s(auth_session, monkeypatch):
 
     resp = _ask(headers, "Anything.", conversation_id=str(uuid.uuid4()))
     assert resp.status_code == 404, resp.text
+    # Phase D session 5: refused before the charge, so neither 404 cost a question.
+    assert _usage_event_count(account_id) == 0
 
 
 def test_ask_with_foreign_conversation_id_404s(auth_session, monkeypatch):
     _, owner_headers = auth_session()
-    _, other_headers = auth_session()
+    other_account_id, other_headers = auth_session()
 
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: _fake_result(question, "Answer."),
+        lambda question, prior_messages=None, prior_tool_calls=None: _fake_result(question, "Answer."),
     )
     resp = _ask(owner_headers, "What was MSFT revenue last quarter?")
     assert resp.status_code == 200, resp.text
@@ -244,9 +256,10 @@ def test_ask_with_foreign_conversation_id_404s(auth_session, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None: pytest.fail(
+        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail(
             "run_agent must not be called for a foreign conversation_id"
         ),
     )
     resp = _ask(other_headers, "Follow-up.", conversation_id=conversation_id)
     assert resp.status_code == 404, resp.text
+    assert _usage_event_count(other_account_id) == 0  # refused before the charge

@@ -35,7 +35,9 @@ PAID_MONTHLY_CAP = 50
 # the cap that rejection just enforced (design doc SS2/SS7.2). Also excludes
 # "mapping_proposal" (Phase D session 4): proposing a column mapping is setup, not a
 # question, so it never counts toward the question caps -- only toward its own cap below.
-_COUNTED_OUTCOMES = ("answered", "hit_iteration_cap", "error")
+# "in_progress" (Phase D session 5) counts too: a question that's still running is a real
+# attempt, so a burst of concurrent or long-running questions can't slip past the cap.
+_COUNTED_OUTCOMES = ("answered", "hit_iteration_cap", "error", "in_progress")
 
 # Fresh model calls from POST /v1/csv/{id}/propose-mapping, per account, in a rolling 24h
 # window, regardless of tier (a proposal always uses the master key). Counted from

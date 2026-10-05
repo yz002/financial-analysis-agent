@@ -11,6 +11,7 @@ failure) as one schema with optional/defaulted fields, since FastAPI's
 response_model wants one consistent shape per route.
 """
 
+import uuid
 from datetime import datetime
 from typing import Literal
 
@@ -28,9 +29,13 @@ class HealthResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=4000)
     csv_context_id: str | None = None
     conversation_id: str | None = None
+    # Phase D session 5: the caller's per-question id. Resending it never runs or charges the
+    # question twice (EXTENSION_INTEGRATION.md SS6 /v1/ask, amended session 5). Optional so
+    # older callers keep working; the extension always sends it.
+    request_id: uuid.UUID | None = None
 
 
 class AskResponse(BaseModel):
