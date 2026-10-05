@@ -74,19 +74,61 @@ class BindingDecision:
     statement_id: uuid.UUID | None = None
 
 
+CSV_TOOLS = ("get_csv_statement", "get_csv_ratios")
+# The key each CSV tool's successful result carries (src/agent/tools.py get_csv_statement /
+# get_csv_ratios); an error result carries "error_type" instead.
+_CSV_DATA_KEYS = {"get_csv_statement": "periods", "get_csv_ratios": "ratios"}
+
+
+def csv_call_returned_data(call) -> bool:
+    """Whether one stored tool call (an entry of turns.tool_calls) is a CSV tool that actually
+    returned statement data. Not merely a CSV tool *call*: in a ticker-only conversation the
+    model can call get_csv_statement and get back data_unavailable ("no CSV has been
+    confirmed"), which run_agent stores with is_error false. That result is
+    {"business_name": null, "error_type": "data_unavailable", ...}, and a crashed tool is
+    is_error true with error_type "source_error". tool_result is stored as a JSON *string*, so
+    it's decoded here; anything that isn't a JSON object with the tool's data key and no
+    error_type doesn't count."""
+    if not isinstance(call, dict) or call.get("is_error"):
+        return False
+    data_key = _CSV_DATA_KEYS.get(call.get("tool_name"))
+    if data_key is None:
+        return False
+    try:
+        payload = json.loads(call.get("tool_result") or "")
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and "error_type" not in payload and data_key in payload
+
+
+def turns_returned_statement_data(tool_calls_per_turn) -> bool:
+    """Whether any turn's tool calls include a CSV tool that returned statement data -- i.e.
+    the conversation was answering from a statement. `tool_calls_per_turn` is an iterable of
+    turns.tool_calls values (lists of call dicts, or None)."""
+    return any(
+        csv_call_returned_data(call)
+        for tool_calls in tool_calls_per_turn
+        for call in (tool_calls or [])
+    )
+
+
 def binding_decision(
     bound_csv_context_id: uuid.UUID | None,
     csv_context_id: uuid.UUID | None,
     requested_csv_context_id: uuid.UUID | None,
-    had_csv_turns,
+    had_statement_data,
 ) -> BindingDecision:
     """Which statement a later turn of an existing conversation may use.
 
     `bound_csv_context_id` is the statement recorded at creation (no FK, never nulled; NULL for
-    conversations created before migration 0005). `csv_context_id` is the FK column, set to
-    NULL if that statement row is deleted. `had_csv_turns` is a zero-argument callable, called
-    only when it matters: whether any turn of the conversation ever called a CSV tool -- the
-    pre-0005 way to tell "bound to a statement that's since gone" from "never bound".
+    conversations created before migration 0005, and for unbound ticker-only conversations).
+    `csv_context_id` is the FK column, set to NULL if that statement row is deleted.
+    `had_statement_data` is a zero-argument callable, called only when both are NULL: whether
+    any turn of the conversation -- all of them, not just the replayed ones -- got statement
+    data back from a CSV tool (see turns_returned_statement_data). That's the pre-0005 way to
+    tell "bound to a statement that's since gone" from "never bound". A CSV tool call that
+    returned data_unavailable doesn't count, so a new ticker-only conversation where the model
+    once looked for a statement stays usable.
 
     The statement is never switched silently: a different requested id is MISMATCH. A bound
     statement that's gone is NEEDS_RECONFIRM whatever was requested. Loading the statement
@@ -98,7 +140,7 @@ def binding_decision(
         bound = bound_csv_context_id
     elif csv_context_id is not None:
         bound = csv_context_id  # created before 0005, statement still there
-    elif had_csv_turns():
+    elif had_statement_data():
         return BindingDecision(NEEDS_RECONFIRM)  # created before 0005, statement since gone
     else:
         bound = None

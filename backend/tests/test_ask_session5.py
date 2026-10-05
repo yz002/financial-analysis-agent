@@ -12,6 +12,7 @@ go-ahead. The same rules are unit-tested without a database in backend/tests_uni
 app.main.run_agent is always monkeypatched -- no Anthropic calls.
 """
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -148,31 +149,80 @@ def test_bound_statement_deleted_is_needs_reconfirm(auth_session, fake_agent):
     assert resp.json()["detail"] == {"error": "statement_needs_reconfirm"}
 
 
-def test_pre_0005_conversation_with_a_csv_call_in_turn_one_of_six_is_needs_reconfirm(
-    auth_session, monkeypatch
-):
-    """The EXISTS fallback checks every turn, not just the 3 replayed ones."""
-    _, headers = auth_session()
-    csv_call = {
+def _csv_call(tool_result: dict) -> dict:
+    return {
         "iteration": 1, "tool_name": "get_csv_statement", "tool_input": {},
-        "tool_result": "{}", "is_error": False,
+        "tool_result": json.dumps(tool_result), "is_error": False,
     }
-    results = iter([_fake_result("Q1", [csv_call])] + [_fake_result(f"Q{i}") for i in range(2, 7)])
-    monkeypatch.setattr(
-        app_main, "run_agent", lambda question, prior_messages=None, prior_tool_calls=None: next(results)
-    )
-    conversation_id = _ask(headers, "Q1").json()["conversation_id"]
-    for i in range(2, 7):
-        assert _ask(headers, f"Q{i}", conversation_id=conversation_id).status_code == 200
-    # Simulate a conversation created before 0005 whose statement is gone.
+
+
+def _insert_pre_0005_conversation(account_id: str, turn_tool_calls: list[list[dict]]) -> str:
+    """A conversation as it looked before migration 0005 after its statement was deleted: no
+    recorded binding (bound_csv_context_id NULL) and the FK nulled (csv_context_id NULL), with
+    one turn per entry of `turn_tool_calls`, oldest first. Inserted directly -- the current
+    code never creates this shape for a statement-bound conversation."""
+    conversation_id = str(uuid.uuid4())
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
     _sql(
-        "UPDATE conversations SET bound_csv_context_id = NULL, csv_context_id = NULL WHERE id = :id",
-        id=conversation_id,
+        "INSERT INTO conversations (id, account_id, title, csv_context_id, bound_csv_context_id, last_turn_at) "
+        "VALUES (:id, :a, 'pre-0005', NULL, NULL, :t)",
+        id=conversation_id, a=account_id, t=start,
+    )
+    for i, tool_calls in enumerate(turn_tool_calls):
+        _sql(
+            "INSERT INTO turns (id, conversation_id, question, final_answer, hit_iteration_cap, "
+            "iterations_used, stop_reason, figure_check, tool_calls, model, created_at) "
+            "VALUES (:id, :c, :q, 'Answer.', false, 1, 'end_turn', CAST(:fc AS jsonb), "
+            "CAST(:tc AS jsonb), 'test', :t)",
+            id=str(uuid.uuid4()), c=conversation_id, q=f"Q{i + 1}", fc=json.dumps({"figures": []}),
+            tc=json.dumps(tool_calls), t=start + timedelta(minutes=i),
+        )
+    return conversation_id
+
+
+def test_pre_0005_conversation_with_statement_data_in_turn_one_of_six_is_needs_reconfirm(
+    auth_session, fake_agent
+):
+    """The fallback checks every turn, not just the 3 replayed ones: only turn 1 of 6 got
+    statement data back."""
+    account_id, headers = auth_session()
+    statement_result = {"business_name": "Old Co", "cadence": "quarterly", "units": {}, "periods": []}
+    conversation_id = _insert_pre_0005_conversation(
+        account_id, [[_csv_call(statement_result)]] + [[] for _ in range(5)]
     )
 
     resp = _ask(headers, "Q7", conversation_id=conversation_id)
     assert resp.status_code == 409
     assert resp.json()["detail"] == {"error": "statement_needs_reconfirm"}
+    assert fake_agent == []
+    assert _usage_outcomes(account_id) == []  # refused before the charge
+
+
+def test_unbound_conversation_whose_csv_lookup_returned_data_unavailable_keeps_working(
+    auth_session, monkeypatch
+):
+    """Regression: in a ticker-only conversation the model can call get_csv_statement and get
+    data_unavailable (stored with is_error false). That must not make every later turn a 409."""
+    _, headers = auth_session()
+    no_statement = {
+        "business_name": None,
+        "error_type": "data_unavailable",
+        "error": "No CSV has been uploaded and confirmed yet -- ask the user to upload and "
+        "confirm a business CSV in the upload panel first.",
+    }
+    results = iter([_fake_result("Q1", [_csv_call(no_statement)]), _fake_result("Q2")])
+    monkeypatch.setattr(
+        app_main,
+        "run_agent",
+        lambda question, prior_messages=None, prior_tool_calls=None, client=None: next(results),
+    )
+
+    first = _ask(headers, "Q1")  # a new, unbound conversation
+    assert first.status_code == 200, first.text
+    conversation_id = first.json()["conversation_id"]
+
+    second = _ask(headers, "Q2", conversation_id=conversation_id)
+    assert second.status_code == 200, second.text
 
 
 # --- legacy statements ---------------------------------------------------------------------

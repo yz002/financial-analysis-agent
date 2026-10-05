@@ -630,6 +630,11 @@ conversation. On later turns:
 | Not bound (ticker-only) | omitted | Answered with no statement |
 | Not bound (ticker-only) | Y | `409 {"detail": {"error": "statement_mismatch"}}` |
 
+Conversations created before session 5 have no recorded binding. Such a conversation is treated
+as bound to a deleted statement (`statement_needs_reconfirm`) only if one of its turns, any of
+them, actually got statement data back from a statement tool. A ticker-only conversation where
+the model looked for a statement and found none stays unbound and keeps working.
+
 The statement is never switched silently. On `statement_mismatch`, start a new conversation
 (omit `conversation_id`) for the other statement. Ownership of both the conversation and the
 statement is checked on every turn, and a statement you don't own is never used, whatever id

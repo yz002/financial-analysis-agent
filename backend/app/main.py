@@ -31,7 +31,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
-from sqlalchemy import exists, or_, select, text, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from db.base import get_session
@@ -118,6 +118,8 @@ from .ask_rules import (
     replay_state,
     request_fingerprint,
     statement_problem,
+    turns_returned_statement_data,
+    CSV_TOOLS,
 )
 from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
 from .gating import MAPPING_PROPOSAL_OUTCOME, evaluate_ask_gate, evaluate_mapping_proposal_gate
@@ -451,19 +453,17 @@ def _recent_turns(session, conversation_id: uuid.UUID) -> list[Turn]:
     return turns
 
 
-def _csv_tool_turns_exist(conversation_id: uuid.UUID):
-    """EXISTS: did any turn of this conversation -- all of them, not only the replayed ones --
-    call a CSV tool? turns.tool_calls is the JSONB list run_agent returns, so array containment
-    (@>) finds a call by tool_name. Used only for conversations created before migration 0005,
-    to tell "bound to a statement that's since gone" from "never bound"."""
-    return select(
-        exists().where(
-            Turn.conversation_id == conversation_id,
-            or_(
-                Turn.tool_calls.contains([{"tool_name": "get_csv_statement"}]),
-                Turn.tool_calls.contains([{"tool_name": "get_csv_ratios"}]),
-            ),
-        )
+def _csv_tool_turns(conversation_id: uuid.UUID):
+    """The tool_calls of every turn of this conversation -- all of them, not only the replayed
+    ones -- that called a CSV tool. Array containment (@>) on the JSONB list run_agent returns
+    is only a prefilter: whether a call actually got statement data back is decided in Python
+    (ask_rules.turns_returned_statement_data), because each call's tool_result is stored as a
+    JSON *string* that SQL can't inspect without a cast that fails on non-JSON text. Used only
+    when a conversation has no recorded binding, to tell "bound to a statement that's since
+    gone" (created before migration 0005) from "never bound"."""
+    return select(Turn.tool_calls).where(
+        Turn.conversation_id == conversation_id,
+        or_(*(Turn.tool_calls.contains([{"tool_name": name}]) for name in CSV_TOOLS)),
     )
 
 
@@ -495,7 +495,9 @@ def _load_ask_context(
                 conversation.bound_csv_context_id,
                 conversation.csv_context_id,
                 requested_csv_uuid,
-                lambda: bool(session.execute(_csv_tool_turns_exist(conversation_uuid)).scalar()),
+                lambda: turns_returned_statement_data(
+                    session.execute(_csv_tool_turns(conversation_uuid)).scalars()
+                ),
             )
             if decision.kind in (MISMATCH, NEEDS_RECONFIRM):
                 raise HTTPException(status_code=409, detail=ask_error(decision.kind))

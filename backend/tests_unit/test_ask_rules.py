@@ -1,5 +1,6 @@
 """Pure tests for app/ask_rules.py -- no database, no HTTP."""
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -73,7 +74,7 @@ X, Y = uuid.uuid4(), uuid.uuid4()
 
 
 def _never():
-    raise AssertionError("had_csv_turns must only be consulted for a pre-0005 conversation")
+    raise AssertionError("had_statement_data must only be consulted when no binding is recorded")
 
 
 @pytest.mark.parametrize(
@@ -93,9 +94,62 @@ def test_binding_table(bound, fk, requested, expected):
     assert (decision.kind, decision.statement_id) == expected
 
 
-def test_pre_0005_conversation_that_used_csv_tools_is_needs_reconfirm():
+def test_pre_0005_conversation_that_got_statement_data_is_needs_reconfirm():
     decision = binding_decision(None, None, None, lambda: True)
     assert decision.kind == NEEDS_RECONFIRM
+
+
+# --- csv_call_returned_data / turns_returned_statement_data ---------------------------------
+
+
+def _call(tool_name, payload, is_error=False):
+    return {
+        "iteration": 1, "tool_name": tool_name, "tool_input": {},
+        "tool_result": payload if isinstance(payload, str) else json.dumps(payload),
+        "is_error": is_error,
+    }
+
+
+_STATEMENT_OK = {"business_name": "Acme", "cadence": "quarterly", "units": {}, "periods": []}
+_RATIOS_OK = {"business_name": "Acme", "cadence": "quarterly", "units": {}, "notes": [], "ratios": {}}
+# Exactly what tools._get_active_csv_or_error returns when no statement is active.
+_NO_STATEMENT = {
+    "business_name": None,
+    "error_type": "data_unavailable",
+    "error": "No CSV has been uploaded and confirmed yet -- ask the user to upload and confirm "
+    "a business CSV in the upload panel first.",
+}
+
+
+@pytest.mark.parametrize(
+    "call, expected",
+    [
+        (_call("get_csv_statement", _STATEMENT_OK), True),
+        (_call("get_csv_ratios", _RATIOS_OK), True),
+        # Looked for a statement and found none -- stored with is_error false.
+        (_call("get_csv_statement", _NO_STATEMENT), False),
+        (_call("get_csv_ratios", {**_NO_STATEMENT, "error_type": "invalid_input"}), False),
+        # A crashed tool (agent.py stores these with is_error true, error_type source_error).
+        (_call("get_csv_statement", {"error_type": "source_error", "error": "boom"}, is_error=True), False),
+        (_call("get_csv_statement", _STATEMENT_OK, is_error=True), False),
+        # Wrong data key for the tool, non-JSON text, a non-object, another tool.
+        (_call("get_csv_statement", _RATIOS_OK), False),
+        (_call("get_csv_statement", "not json"), False),
+        (_call("get_csv_statement", "[1, 2]"), False),
+        (_call("get_financial_statement", {"ticker": "MSFT", "periods": []}), False),
+        ("not a dict", False),
+    ],
+)
+def test_csv_call_returned_data(call, expected):
+    assert ask_rules.csv_call_returned_data(call) is expected
+
+
+def test_turns_returned_statement_data_looks_across_every_turn():
+    no_data_turn = [_call("get_csv_statement", _NO_STATEMENT)]
+    data_turn = [_call("get_financial_statement", {"periods": []}), _call("get_csv_ratios", _RATIOS_OK)]
+    assert ask_rules.turns_returned_statement_data([no_data_turn, None, [], data_turn]) is True
+    assert ask_rules.turns_returned_statement_data([no_data_turn, None, []]) is False
+    assert ask_rules.turns_returned_statement_data([]) is False
 
 
 def test_never_bound_conversation_stays_unbound_and_refuses_a_statement():

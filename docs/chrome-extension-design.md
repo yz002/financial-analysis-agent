@@ -958,6 +958,14 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     account, during a read-only check. Audit every app query that picks "the latest" row; use
     `DESC NULLS LAST` or filter `IS NOT NULL`.
 
+**From Phase D session 5** (backlog, not session 5 work):
+
+13. **8 leftover test accounts in production** (`sub-*@example.com`, created 2026-09-19).
+    They predate session 5: the DB-backed test run on 2026-10-05 left the count unchanged
+    before and after, so they come from an earlier run whose teardown didn't complete. Delete
+    them in a future, separately approved cleanup. Deleting an account cascades to all of its
+    rows.
+
 **Migrations are manual** (session 4): Render never runs them. Its Pre-Deploy command isn't
 available on the current plan. Run an additive migration with `alembic upgrade head` against
 production before pushing the code that needs it, verify the change, and record it. The local

@@ -377,15 +377,70 @@ def test_bound_statement_owned_by_another_account_never_reaches_the_agent(world,
     assert world.locks == []  # refused before the charge
 
 
-def test_csv_turn_fallback_checks_every_turn_with_jsonb_containment():
-    compiled = app_main._csv_tool_turns_exist(uuid.uuid4()).compile(dialect=postgresql.dialect())
+def test_csv_turn_fallback_prefilters_every_turn_with_jsonb_containment():
+    compiled = app_main._csv_tool_turns(uuid.uuid4()).compile(dialect=postgresql.dialect())
     sql = str(compiled)
-    assert "EXISTS" in sql
+    assert sql.startswith("SELECT turns.tool_calls")
     assert sql.count("turns.tool_calls @>") == 2
     assert "LIMIT" not in sql  # every turn, not just the replayed window
     contained = [v for v in compiled.params.values() if isinstance(v, list)]
     assert [{"tool_name": "get_csv_statement"}] in contained
     assert [{"tool_name": "get_csv_ratios"}] in contained
+
+
+class _ScalarsResult:
+    def __init__(self, values):
+        self._values = values
+
+    def scalars(self):
+        return iter(self._values)
+
+
+def _unbound_conversation_world(world, monkeypatch, csv_turn_tool_calls):
+    """An existing conversation with no recorded binding whose CSV-tool turns are
+    `csv_turn_tool_calls` (what _csv_tool_turns would return)."""
+    monkeypatch.setattr(app_main, "_recent_turns", lambda session, conversation_id: [])
+    conversation_id = uuid.uuid4()
+    world.rows[(Conversation, conversation_id)] = Conversation(
+        id=conversation_id, account_id=ACCOUNT_ID, csv_context_id=None, bound_csv_context_id=None,
+    )
+    original_execute = FakeSession.execute
+
+    def execute(self, statement):
+        if "SELECT turns.tool_calls" in str(statement):
+            return _ScalarsResult(csv_turn_tool_calls)
+        return original_execute(self, statement)
+
+    monkeypatch.setattr(FakeSession, "execute", execute)
+    return conversation_id
+
+
+def test_unbound_conversation_whose_csv_lookup_found_nothing_keeps_working(world, monkeypatch):
+    no_statement = {
+        "iteration": 1, "tool_name": "get_csv_statement", "tool_input": {}, "is_error": False,
+        "tool_result": '{"business_name": null, "error_type": "data_unavailable", "error": "No CSV"}',
+    }
+    conversation_id = _unbound_conversation_world(world, monkeypatch, [[no_statement]])
+    monkeypatch.setattr(app_main, "run_agent", lambda question, **kwargs: _result(question))
+
+    resp = _ask(conversation_id=str(conversation_id))
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_unbound_conversation_that_got_statement_data_is_needs_reconfirm(world, monkeypatch):
+    with_data = {
+        "iteration": 1, "tool_name": "get_csv_statement", "tool_input": {}, "is_error": False,
+        "tool_result": '{"business_name": "Old Co", "cadence": "quarterly", "periods": []}',
+    }
+    conversation_id = _unbound_conversation_world(world, monkeypatch, [[with_data]])
+    monkeypatch.setattr(app_main, "run_agent", lambda question, **kwargs: pytest.fail("must not run"))
+
+    resp = _ask(conversation_id=str(conversation_id))
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {"error": "statement_needs_reconfirm"}
+    assert world.locks == []  # refused before the charge
 
 
 # --- counting and logging ------------------------------------------------------------------
