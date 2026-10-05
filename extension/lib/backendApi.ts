@@ -3,10 +3,17 @@ import type { CsvParseRequest } from './cellGrid';
 import type { ConfirmRequestBody, ProposalEntry } from './mappingModel';
 
 export class BackendApiError extends Error {
+  /**
+   * `fromBackend` is false when the error response didn't come from this backend's own error
+   * handling: no JSON body, or JSON without FastAPI's `detail` key. The usual case is a bare
+   * 502/504 from Render's proxy (EXTENSION_INTEGRATION.md SS6 /v1/ask, "Long answers and
+   * recovery"): a gateway or server problem, not an answer to the request.
+   */
   constructor(
     message: string,
     public readonly status: number,
     public readonly detail: unknown,
+    public readonly fromBackend = true,
   ) {
     super(message);
   }
@@ -21,6 +28,7 @@ export interface ExchangeTokenResponse {
 interface PostJsonOptions {
   body?: unknown;
   sessionToken?: string;
+  signal?: AbortSignal;
 }
 
 async function postJson<T>(path: string, opts: PostJsonOptions): Promise<T> {
@@ -32,6 +40,7 @@ async function postJson<T>(path: string, opts: PostJsonOptions): Promise<T> {
     method: 'POST',
     headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    signal: opts.signal,
   });
 
   let json: unknown = null;
@@ -42,11 +51,9 @@ async function postJson<T>(path: string, opts: PostJsonOptions): Promise<T> {
   }
 
   if (!response.ok) {
-    const detail =
-      json && typeof json === 'object' && 'detail' in (json as object)
-        ? (json as { detail: unknown }).detail
-        : json;
-    throw new BackendApiError(`${path} failed (${response.status}).`, response.status, detail);
+    const fromBackend = json !== null && typeof json === 'object' && 'detail' in (json as object);
+    const detail = fromBackend ? (json as { detail: unknown }).detail : json;
+    throw new BackendApiError(`${path} failed (${response.status}).`, response.status, detail, fromBackend);
   }
 
   return json as T;
@@ -179,6 +186,106 @@ export async function confirmMapping(
     sessionToken,
     body,
   });
+}
+
+// --- POST /v1/ask (EXTENSION_INTEGRATION.md SS6, amended session 5) ------------------------
+
+export interface AskRequestBody {
+  question: string;
+  csv_context_id: string | null;
+  conversation_id: string | null;
+  /** One per question; resending it never runs or charges the question twice. */
+  request_id: string;
+}
+
+export interface FigureCheckFigure {
+  raw_text: string;
+  start: number;
+  end: number;
+  traced: boolean;
+  weak_match: boolean;
+}
+
+export interface FigureCheck {
+  figures_checked?: number;
+  figures_traced?: number;
+  figures_untraced?: number;
+  all_traced?: boolean;
+  figures?: FigureCheckFigure[];
+  figures_skipped?: { raw_text: string; start: number; end: number; reason: string }[];
+}
+
+/** A spreadsheet cell, a filing fact, or another tool's output (kind decides which fields). */
+export interface CitationSource {
+  cell?: string | null;
+  concept?: string;
+  column?: string | null;
+  period_end?: string | null;
+  read_value?: string | null;
+  sheet_scale?: string | null;
+  ticker?: string | null;
+  tag?: string | null;
+  filed?: string | null;
+  is_derived?: boolean | null;
+  derivation_method?: string;
+  tool_name?: string;
+  json_path?: string;
+}
+
+export interface CitationInput {
+  role: string;
+  value: number | null;
+  source: CitationSource | null;
+  computation?: CitationComputation;
+}
+
+export interface CitationComputation {
+  name: string;
+  formula: string | null;
+  period_end: string | null;
+  inputs: CitationInput[];
+}
+
+export interface CitationMatch {
+  kind: 'cell' | 'derived' | 'filing' | 'tool';
+  value: number;
+  turn_id: string | null;
+  source?: CitationSource;
+  computation?: CitationComputation;
+}
+
+export type CitationStatus = 'traced' | 'ambiguous' | 'weak' | 'untraced';
+
+export interface Citation {
+  figure_index: number;
+  raw_text: string;
+  start: number;
+  end: number;
+  status: CitationStatus;
+  matches: CitationMatch[];
+}
+
+export interface AskResponse {
+  conversation_id: string;
+  turn_id: string;
+  final_answer: string;
+  hit_iteration_cap: boolean;
+  figure_check: FigureCheck;
+  citations: Citation[];
+  tool_calls_summary: { tool_name: string; is_error: boolean }[];
+}
+
+/**
+ * POST /v1/ask. Errors are BackendApiError with the structured `detail` the contract defines
+ * ({"error": "<code>"} for the session-5 errors); `fromBackend` false marks a gateway/proxy
+ * response (see BackendApiError). Retrying with the same request_id is lib/askRunner.ts's job.
+ */
+export async function ask(
+  sessionToken: string,
+  body: AskRequestBody,
+  signal?: AbortSignal,
+): Promise<AskResponse> {
+  return postJson<AskResponse>('/v1/ask', { sessionToken, body, signal });
 }
 
 /** No request body per the contract. Always resolves {revoked: true} on 2xx. */

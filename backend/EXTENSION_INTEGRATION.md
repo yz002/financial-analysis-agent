@@ -716,8 +716,12 @@ already running when a resend arrives, the resend gets the replay response
 **Long answers and recovery.**
 - An answer can take several minutes. The extension waits up to 5 minutes on one request.
 - **When the wait ends, or the panel reopens with a question pending,** the extension re-sends
-  the same body, with the same `request_id`, every 20 seconds while the response is
-  `answer_in_progress`.
+  the same body, with the same `request_id`, while the response is `answer_in_progress`, a
+  network error, or a gateway 502/503/504.
+  - It backs off between resends: 20 seconds at first, growing to at most 2 minutes.
+  - It stops 30 minutes after the question was first sent and shows "Still not finished — check
+    back later". It keeps the pending `request_id`, so a later check (or a reopened panel)
+    resends it once more. It never resends endlessly during an outage.
 - **The backend stops a run after a 45-minute budget** with
   `504 {"detail": {"error": "answer_time_budget_exceeded"}}`. Replaying that `request_id` then
   returns `answer_failed`.

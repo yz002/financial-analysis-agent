@@ -1,4 +1,5 @@
 import type { AuthProvider } from './authConfig';
+import { clearChatState } from './conversationStorage';
 import { clearAllDataAccess } from './dataAccessStorage';
 
 export interface StoredSession {
@@ -23,15 +24,17 @@ export async function setStoredSession(session: StoredSession): Promise<void> {
 }
 
 /**
- * Also clears every provider data token and data-account email (lib/dataAccessStorage.ts) and
- * the active statement. This is the single chokepoint, so sign-out, revoke-all, a 401, and any
- * future path that ends the session can't leave data-access state behind
+ * Also clears every provider data token and data-account email (lib/dataAccessStorage.ts), the
+ * active statement, and the chat -- the conversation and any pending question
+ * (lib/conversationStorage.ts). This is the single chokepoint, so sign-out, revoke-all, a 401,
+ * and any future path that ends the session can't leave data-access or chat state behind
  * (chrome-extension-design.md SS6 3a).
  */
 export async function clearStoredSession(): Promise<void> {
   await browser.storage.local.remove(SESSION_STORAGE_KEY);
   await clearAllDataAccess();
   await clearActiveStatement();
+  await clearChatState();
 }
 
 /**

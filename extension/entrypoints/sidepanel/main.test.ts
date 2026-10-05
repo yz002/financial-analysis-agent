@@ -75,6 +75,15 @@ const SIDEPANEL_BODY = `
         <ul id="statement-warnings"></ul>
         <button id="change-mapping" type="button" hidden>Change mapping</button>
       </section>
+      <section id="chat-panel" hidden>
+        <p id="chat-statement"></p>
+        <div id="chat-mismatch" hidden><p id="chat-mismatch-text"></p><button id="chat-new" type="button">New conversation</button></div>
+        <div id="chat-log"></div>
+        <div id="chat-waiting" hidden><p id="chat-waiting-text"></p><button id="chat-stop" type="button">Stop waiting</button></div>
+        <p id="chat-notice"></p>
+        <button id="chat-check" type="button" hidden>Check again</button>
+        <form id="chat-form"><textarea id="chat-input"></textarea><button id="chat-send" type="submit">Ask</button></form>
+      </section>
       <button id="signout" type="button">Sign out</button>
       <button id="revoke-all" type="button">Sign out everywhere</button>
     </div>
@@ -101,7 +110,17 @@ const {
   getActiveStatementMock,
   setActiveStatementMock,
   clearActiveStatementMock,
+  chatShowMock,
+  chatStartNewConversationMock,
+  chatResetMock,
+  clearChatStateMock,
+  chatDeps,
 } = vi.hoisted(() => ({
+  chatShowMock: vi.fn(),
+  chatStartNewConversationMock: vi.fn(),
+  chatResetMock: vi.fn(),
+  clearChatStateMock: vi.fn(),
+  chatDeps: { current: null as null | Record<string, (...args: unknown[]) => unknown> },
   proposeMappingMock: vi.fn(),
   confirmMappingMock: vi.fn(),
   getActiveStatementMock: vi.fn(),
@@ -155,6 +174,22 @@ vi.mock('../../lib/backendApi', async (importOriginal) => {
     confirmMapping: confirmMappingMock,
   };
 });
+
+// The chat panel has its own tests (chat.test.ts); here only main.ts's wiring of it is checked.
+vi.mock('./chat', () => ({
+  ChatController: class {
+    constructor(_elements: unknown, deps: Record<string, (...args: unknown[]) => unknown>) {
+      chatDeps.current = deps;
+    }
+    show = chatShowMock;
+    startNewConversation = chatStartNewConversationMock;
+    reset = chatResetMock;
+  },
+}));
+
+vi.mock('../../lib/conversationStorage', () => ({
+  clearChatState: clearChatStateMock,
+}));
 
 vi.mock('../../lib/dataAccessStorage', () => ({
   clearAllDataAccess: clearAllDataAccessMock,
@@ -232,6 +267,11 @@ beforeEach(() => {
   getActiveStatementMock.mockReset().mockResolvedValue(null);
   setActiveStatementMock.mockReset().mockResolvedValue(undefined);
   clearActiveStatementMock.mockReset().mockResolvedValue(undefined);
+  chatShowMock.mockReset().mockResolvedValue(undefined);
+  chatStartNewConversationMock.mockReset().mockResolvedValue(undefined);
+  chatResetMock.mockReset();
+  clearChatStateMock.mockReset().mockResolvedValue(undefined);
+  chatDeps.current = null;
 });
 
 afterEach(() => {
@@ -1041,6 +1081,22 @@ describe('mapping screen (session 4)', () => {
     expect(statusText()).toBe('Statement confirmed.');
   });
 
+  it('confirming a statement starts a new conversation about it, and shows the chat for it', async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+
+    expect(chatStartNewConversationMock).toHaveBeenCalledTimes(1);
+    const [statement] = chatStartNewConversationMock.mock.calls[0]!;
+    expect(statement).toEqual(expect.objectContaining({ csvContextId: 'ctx-123' }));
+    // The conversation is reset before the card (and with it the chat) is shown for it.
+    expect(chatStartNewConversationMock.mock.invocationCallOrder[0]!).toBeLessThan(
+      chatShowMock.mock.invocationCallOrder.at(-1)!,
+    );
+    expect(chatShowMock).toHaveBeenLastCalledWith(expect.objectContaining({ csvContextId: 'ctx-123' }));
+  });
+
   it('flags a role chosen for two columns and keeps Confirm disabled', async () => {
     await openMapping();
     choose('#scale-select', 'ones');
@@ -1331,5 +1387,88 @@ describe('active statement across panel loads and sign-ins (session 4)', () => {
 
     expect(clearStoredSessionMock).toHaveBeenCalled();
     expect(isHidden('#statement-card')).toBe(true);
+  });
+});
+
+describe('chat wiring (session 5)', () => {
+  const stored = {
+    csvContextId: 'ctx-stored',
+    entityName: 'Spike Co',
+    label: "FA Spike Test · 'P&L'!A3:C9",
+    confirmedAt: '2026-10-04T00:00:00Z',
+    cadence: 'quarterly',
+    scale: 'thousands',
+    currency: null,
+  };
+
+  it('chat is shown only with a confirmed statement', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    await loadSidepanel();
+    expect(chatShowMock).toHaveBeenLastCalledWith(stored);
+
+    getActiveStatementMock.mockResolvedValue(null);
+    await loadSidepanel();
+    expect(chatShowMock).toHaveBeenLastCalledWith(null);
+  });
+
+  it('signing out resets the chat (its storage goes with clearStoredSession)', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    await loadSidepanel();
+
+    await click('#signout');
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(chatResetMock).toHaveBeenCalled();
+    expect(chatShowMock).toHaveBeenLastCalledWith(null);
+  });
+
+  it('a new sign-in clears the previous chat', async () => {
+    launchAuthFlowMock.mockResolvedValue({ provider: 'microsoft', oauthToken: 't' });
+    exchangeTokenMock.mockResolvedValue({
+      session_token: 'new-token', account_id: 'account-new', expires_at: '2026-12-31T00:00:00Z',
+    });
+    await loadSidepanel();
+
+    await click('#signin-microsoft');
+
+    expect(clearChatStateMock).toHaveBeenCalled();
+    expect(chatResetMock).toHaveBeenCalled();
+  });
+
+  it('a statement that needs re-confirming is cleared, with the reason shown', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    await loadSidepanel();
+    expect(isHidden('#statement-card')).toBe(false);
+
+    await chatDeps.current!.onStatementNeedsReconfirm!('Confirm it again.');
+    await flushAsync();
+
+    expect(clearActiveStatementMock).toHaveBeenCalled();
+    expect(isHidden('#statement-card')).toBe(true);
+    expect(chatShowMock).toHaveBeenLastCalledWith(null);
+    expect(statusText()).toBe('Confirm it again.');
+  });
+
+  it('a 401 from a question ends the session like any other 401', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+
+    await chatDeps.current!.onUnauthorized!();
+    await flushAsync();
+
+    expect(clearStoredSessionMock).toHaveBeenCalled();
+    expect(isHidden('#signed-out-view')).toBe(false);
+    expect(launchAuthFlowMock).not.toHaveBeenCalled();
+  });
+
+  it('every question gets a fresh request id', async () => {
+    await loadSidepanel();
+    const first = chatDeps.current!.newRequestId!();
+    const second = chatDeps.current!.newRequestId!();
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second).not.toBe(first);
   });
 });

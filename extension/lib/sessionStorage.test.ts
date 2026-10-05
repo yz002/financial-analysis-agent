@@ -11,6 +11,7 @@ import {
 } from './sessionStorage';
 import type { StoredSession } from './sessionStorage';
 import { setDataGrant } from './dataAccessStorage';
+import { getConversation, getPendingAsk, setConversation, setPendingAsk } from './conversationStorage';
 
 function createFakeLocalStorage() {
   let store: Record<string, unknown> = {};
@@ -145,8 +146,20 @@ describe('clearStoredSession clears data access too (the single chokepoint)', ()
       currency: null,
     });
 
+    // Session 5: the chat -- transcript and pending question -- goes with the session too.
+    await setConversation({
+      csvContextId: 'ctx-1', statementLabel: 'Spike Co', conversationId: 'conv-1',
+      messages: [{ role: 'question', text: 'What was revenue?' }],
+    });
+    await setPendingAsk({
+      requestId: 'req-1', question: 'What was revenue?', csvContextId: 'ctx-1', conversationId: 'conv-1', startedAt: 1,
+    });
+    expect(await getPendingAsk()).not.toBeNull();
+
     await clearStoredSession();
 
+    expect(await getConversation()).toBeNull();
+    expect(await getPendingAsk()).toBeNull();
     expect(await getStoredSession()).toBeNull();
     expect(await getActiveStatement()).toBeNull();
     expect(await fakeBrowser.storage.session.get(null)).toEqual({});

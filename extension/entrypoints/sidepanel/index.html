@@ -87,6 +87,27 @@
           <button id="change-mapping" type="button" hidden>Change mapping</button>
         </section>
 
+        <section id="chat-panel" aria-label="Ask about this statement" hidden>
+          <h2>Ask about this statement</h2>
+          <p id="chat-statement"></p>
+          <div id="chat-mismatch" hidden>
+            <p id="chat-mismatch-text"></p>
+            <button id="chat-new" type="button">New conversation</button>
+          </div>
+          <div id="chat-log" aria-live="polite"></div>
+          <div id="chat-waiting" hidden>
+            <p id="chat-waiting-text"></p>
+            <button id="chat-stop" type="button">Stop waiting</button>
+          </div>
+          <p id="chat-notice" role="status"></p>
+          <button id="chat-check" type="button" hidden>Check again</button>
+          <form id="chat-form">
+            <label for="chat-input">Your question</label>
+            <textarea id="chat-input" rows="3" maxlength="4000" spellcheck="true"></textarea>
+            <button id="chat-send" type="submit">Ask</button>
+          </form>
+        </section>
+
         <button id="signout" type="button">Sign out</button>
         <button id="revoke-all" type="button">Sign out everywhere</button>
       </div>

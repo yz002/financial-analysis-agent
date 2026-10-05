@@ -1,5 +1,9 @@
 import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
+import { abortableSleep } from '../../lib/askRunner';
+import { clearChatState } from '../../lib/conversationStorage';
+import { ChatController } from './chat';
 import {
+  ask,
   confirmMapping,
   exchangeToken,
   logout,
@@ -118,6 +122,48 @@ const statementCard = document.querySelector<HTMLElement>('#statement-card');
 const statementSummary = document.querySelector<HTMLElement>('#statement-summary');
 const statementWarnings = document.querySelector<HTMLElement>('#statement-warnings');
 const changeMappingButton = document.querySelector<HTMLButtonElement>('#change-mapping');
+
+function required<T extends Element>(selector: string): T {
+  const found = document.querySelector<T>(selector);
+  if (!found) throw new Error(`side panel is missing ${selector}`);
+  return found;
+}
+
+// The chat (Phase D session 5). Shown only while a confirmed statement is active.
+const chat = new ChatController(
+  {
+    panel: required('#chat-panel'),
+    statementLine: required('#chat-statement'),
+    mismatch: required('#chat-mismatch'),
+    mismatchText: required('#chat-mismatch-text'),
+    newConversationButton: required('#chat-new'),
+    log: required('#chat-log'),
+    notice: required('#chat-notice'),
+    waiting: required('#chat-waiting'),
+    waitingText: required('#chat-waiting-text'),
+    stopButton: required('#chat-stop'),
+    checkButton: required('#chat-check'),
+    form: required('#chat-form'),
+    input: required('#chat-input'),
+    sendButton: required('#chat-send'),
+  },
+  {
+    getSession: () => getStoredSession(),
+    send: (sessionToken, body, signal) => ask(sessionToken, body, signal),
+    onUnauthorized: () => handleUnauthorized(),
+    onStatementNeedsReconfirm: async (message) => {
+      // The statement can't be used for questions any more (deleted, or confirmed before
+      // units existed): drop it, so the person reads the range and confirms it again.
+      await clearActiveStatement();
+      lastConfirmed = null;
+      renderStatementCard(null);
+      setStatus(message, true);
+    },
+    newRequestId: () => crypto.randomUUID(),
+    now: () => Date.now(),
+    sleep: abortableSleep,
+  },
+);
 
 // The connected spreadsheet and the grid last previewed from it -- panel memory only.
 let connectedFile: ConnectedFile | null = null;
@@ -453,6 +499,7 @@ function describeScale(scale: string): string {
 }
 
 function renderStatementCard(statement: ActiveStatement | null, details: string[] = []): void {
+  void chat.show(statement); // chat needs a confirmed statement
   if (!statement) {
     statementCard?.setAttribute('hidden', '');
     statementWarnings?.replaceChildren();
@@ -478,6 +525,7 @@ function renderSignedOut(errorMessage?: string): void {
   resetReadPanel();
   closeMappingPanel();
   lastConfirmed = null;
+  chat.reset();
   renderStatementCard(null);
   setDataConnection('');
   signedOutView?.removeAttribute('hidden');
@@ -580,8 +628,10 @@ async function handleSignIn(provider: AuthProvider): Promise<void> {
     // signed in before.
     await clearAllDataAccess();
     await clearActiveStatement();
+    await clearChatState();
     lastConfirmed = null;
     closeMappingPanel();
+    chat.reset();
     renderStatementCard(null);
     await setStoredSession(session);
     renderSignedIn(session);
@@ -1016,6 +1066,9 @@ async function statementConfirmed(m: MappingSession, response: ConfirmMappingRes
     currency: m.draft.currency,
   };
   await setActiveStatement(statement);
+  // A newly confirmed statement starts a new conversation: a conversation is bound to one
+  // statement (EXTENSION_INTEGRATION.md SS6 /v1/ask, amended session 5).
+  await chat.startNewConversation(statement);
   lastConfirmed = {
     grid: m.grid,
     file: m.file,

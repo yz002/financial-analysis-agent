@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ask,
   BackendApiError,
   confirmMapping,
   exchangeGoogleDataToken,
@@ -245,5 +246,59 @@ describe('mapping calls (session 4)', () => {
         accept_unparsed_cells: false, ack_fingerprint: null,
       }),
     ).rejects.toBeInstanceOf(BackendApiError);
+  });
+});
+
+describe('ask (session 5)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const BODY = {
+    question: 'What was revenue?',
+    csv_context_id: 'ctx-1',
+    conversation_id: null,
+    request_id: '6f1c2c1e-7a55-4b5e-9f66-2b0c5f6e9d10',
+  };
+
+  it('posts the question with its request id, bearer token and abort signal', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ conversation_id: 'c' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    await ask('session-token', BODY, controller.signal);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/ask`);
+    expect(init.method).toBe('POST');
+    expect(init.headers['Authorization']).toBe('Bearer session-token');
+    expect(JSON.parse(init.body as string)).toEqual(BODY);
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it("a backend error keeps its structured detail and is marked as the backend's own", async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 504, json: async () => ({ detail: { error: 'answer_time_budget_exceeded' } }),
+    }));
+    const error = await ask('t', BODY).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BackendApiError);
+    expect((error as BackendApiError).status).toBe(504);
+    expect((error as BackendApiError).detail).toEqual({ error: 'answer_time_budget_exceeded' });
+    expect((error as BackendApiError).fromBackend).toBe(true);
+  });
+
+  it('a bodyless or non-JSON gateway 502/504 is marked as not from the backend', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 502, json: async () => { throw new SyntaxError('Unexpected token <'); },
+    }));
+    const error = (await ask('t', BODY).catch((e: unknown) => e)) as BackendApiError;
+    expect(error.status).toBe(502);
+    expect(error.fromBackend).toBe(false);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 504, json: async () => ({ message: 'upstream timed out' }),
+    }));
+    const other = (await ask('t', BODY).catch((e: unknown) => e)) as BackendApiError;
+    expect(other.fromBackend).toBe(false);
   });
 });
