@@ -820,7 +820,34 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
      (`IndexError`) on a statement with more than 8 quarters. Its default window is the last 8
      rows, and that tail kept its original row labels, which the growth lookup then used as
      positions. The model saw a crashed tool instead of a growth rate. Fixed by resetting the
-     window's index, with a regression test (`tests/test_tools.py`).)*
+     window's index, with a regression test (`tests/test_tools.py`).*
+   - *Local live test (2026-10-05, local backend, shared production database), pending the
+     production run:*
+     - *Verified:*
+       - *a direct value, cited to its cell;*
+       - *derived values: a margin, and a growth rate with its prior-period cell;*
+       - *an ambiguous value, with B4 and B6 both listed;*
+       - *a figure from an earlier turn ("from an earlier answer");*
+       - *a thousands-scale tab: 'P&L (000s)'!B5 = 1310 gives 1.31 million, with the tab name
+         quoted correctly;*
+       - *a new confirm starts a new conversation;*
+       - *a statement mismatch on reopen shows the New conversation offer and charges nothing.*
+     - *Closing the panel mid-answer, then reopening:* one model run (2 iterations, 2.7 s and
+       12.1 s), recovered by replay with the same `request_id`.
+     - *The logs carried metadata only.* The largest model call was 12.1 s.
+     - *Five findings. Fixes are in progress, pending a live re-check:*
+       1. *In a range ("61–62%") only the second end had the unit, so the first was wrongly
+          marked "Not traced".*
+       2. *Digits in a sheet name ("P&L (000s)") were read as figures, and the marker landed
+          inside the name.*
+       3. *Ratios were quoted as raw floats.*
+       4. *A statement confirmed in one window didn't update another window's open panel.*
+       5. *Two statements from the same range had identical labels, and the name was
+          repeated ("FA Spike Test — FA Spike Test").*
+     - *Also in progress:* data from a sheet is no longer described as an "uploaded CSV".
+     - *Expected after fix 3:* a ratio answer may show "Found in more than one place" more
+       often, because a 1-decimal percentage can match several periods. That's honest, not a
+       bug.)*
 6. **Usage and billing surfacing.** `GET /v1/usage` display; the 429 body's
    `prompt_byo_key`/`prompt_upgrade` fields driving which upsell to show;
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the
@@ -937,6 +964,15 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
       setting only.
     - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
       that raises the owner's question cap for session 5 live testing, if it was created.
+    - Answer markdown shows as raw text (`**`, backticks, tables). Consider a safe formatter
+      (bold, code, lists, tables) built with createElement, or plain-text answers.
+    - The source list repeats the same figure once per mention. Group it by figure and
+      provenance.
+    - Make it clearer which file and tab the chat is about. The chat follows the active
+      statement, even while another document is open.
+    - A newly added tab appeared only after reconnecting. Refresh the sheet list.
+    - Optional: a soft warning when the chosen scale gives implausible values (e.g. revenue in
+      billions from a small sheet).
 11. **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
     `statement_attrs` exist in production, predating the current confirm code. One belongs to
     account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
