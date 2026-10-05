@@ -54,6 +54,8 @@ const PANEL = `
     <div id="chat-waiting" hidden><p id="chat-waiting-text"></p><button id="chat-stop" type="button">Stop waiting</button></div>
     <p id="chat-notice"></p>
     <button id="chat-check" type="button" hidden>Check again</button>
+        <button id="chat-discard" type="button" hidden></button>
+        <p id="chat-pending-note" hidden></p>
     <form id="chat-form"><textarea id="chat-input"></textarea><button id="chat-send" type="submit">Ask</button></form>
   </section>`;
 
@@ -86,6 +88,7 @@ function makeChat(responses: Array<AskResponse | Error | 'hang'>): Harness {
     send,
     onUnauthorized: vi.fn(async () => {}),
     onStatementNeedsReconfirm: vi.fn(async () => {}),
+    onPendingChange: vi.fn(),
     newRequestId: vi.fn(() => `req-${sent.length + 1}`),
     now: () => clock,
     sleep: async (ms: number) => {
@@ -105,6 +108,8 @@ function makeChat(responses: Array<AskResponse | Error | 'hang'>): Harness {
       waitingText: $('#chat-waiting-text'),
       stopButton: $('#chat-stop'),
       checkButton: $('#chat-check'),
+      discardButton: $('#chat-discard'),
+      pendingNote: $('#chat-pending-note'),
       form: $('#chat-form'),
       input: $('#chat-input'),
       sendButton: $('#chat-send'),
@@ -326,6 +331,79 @@ describe('ChatController', () => {
     expect((await getConversation())).toEqual(expect.objectContaining({ csvContextId: 'ctx-2', messages: [] }));
     expect($('#chat-log').children).toHaveLength(0);
     expect($('#chat-waiting').hidden).toBe(true);
+  });
+
+  it('while an answer is pending, New conversation is blocked with a plain reason and a Discard button', async () => {
+    const { chat, deps } = makeChat(['hang']);
+    await chat.show({ ...STATEMENT, csvContextId: 'ctx-old' });
+    await ask('Slow one?');
+    await chat.show(STATEMENT); // now offering a new conversation for the active statement
+
+    expect(chat.hasPendingAnswer).toBe(true);
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(true);
+    expect($<HTMLButtonElement>('#chat-new').disabled).toBe(true);
+    expect($('#chat-pending-note').hidden).toBe(false);
+    expect($('#chat-pending-note').textContent).toBe(
+      'An answer is still being prepared. Wait for it, or discard it to start over.',
+    );
+    expect($('#chat-discard').hidden).toBe(false);
+    expect($('#chat-discard').textContent).toBe('Discard this question (it still counts toward your limit)');
+  });
+
+  it('Discard clears the pending entry, puts the question back, and unblocks starting over', async () => {
+    const { chat, deps } = makeChat(['hang']);
+    await chat.show(STATEMENT);
+    await ask('Slow one?');
+
+    $<HTMLButtonElement>('#chat-discard').click();
+    await settle();
+
+    expect(await getPendingAsk()).toBeNull();
+    expect(chat.hasPendingAnswer).toBe(false);
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(false);
+    expect($<HTMLTextAreaElement>('#chat-input').value).toBe('Slow one?');
+    expect($('#chat-log').querySelector('.chat-question')).toBeNull();
+    expect($<HTMLButtonElement>('#chat-new').disabled).toBe(false);
+    expect($('#chat-discard').hidden).toBe(true);
+    expect($('#chat-pending-note').hidden).toBe(true);
+    expect($('#chat-waiting').hidden).toBe(true);
+    expect($<HTMLButtonElement>('#chat-send').disabled).toBe(false);
+  });
+
+  it('Discard is offered in the "check back later" state too', async () => {
+    const outage = Array.from({ length: 100 }, () => gateway(502));
+    const { chat } = makeChat(outage);
+    await chat.show(STATEMENT);
+    await ask('What was revenue?');
+    expect($('#chat-notice').textContent).toBe('Still not finished — check back later.');
+    expect($('#chat-discard').hidden).toBe(false);
+
+    $<HTMLButtonElement>('#chat-discard').click();
+    await settle();
+    expect(await getPendingAsk()).toBeNull();
+    expect($('#chat-check').hidden).toBe(true);
+  });
+
+  it('a reopened panel with a pending entry shows the same blocked state', async () => {
+    const { chat, deps } = makeChat(['hang']);
+    await setPendingAsk({
+      requestId: 'req-from-before', question: 'Earlier?', csvContextId: 'ctx-1', conversationId: null, startedAt: 1_000_000,
+    });
+    await chat.show(STATEMENT);
+    await settle();
+
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(true);
+    expect($<HTMLButtonElement>('#chat-new').disabled).toBe(true);
+    expect($('#chat-pending-note').hidden).toBe(false);
+    expect($('#chat-discard').hidden).toBe(false);
+  });
+
+  it('an answer arriving lifts the block', async () => {
+    const { chat, deps } = makeChat([answer()]);
+    await chat.show(STATEMENT);
+    await ask('Q?');
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(false);
+    expect($('#chat-discard').hidden).toBe(true);
   });
 
   it('an empty question is not sent', async () => {

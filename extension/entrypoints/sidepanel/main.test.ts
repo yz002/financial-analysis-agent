@@ -64,6 +64,7 @@ const SIDEPANEL_BODY = `
           <button id="confirm-anyway" type="button">Confirm anyway</button>
           <button id="ack-back" type="button">Back to mapping</button>
         </div>
+        <p id="mapping-pending-note" hidden></p>
         <div id="mapping-actions">
           <button id="confirm-mapping" type="button" disabled>Confirm mapping</button>
           <button id="reset-mapping" type="button">Reset to suggestion</button>
@@ -82,6 +83,8 @@ const SIDEPANEL_BODY = `
         <div id="chat-waiting" hidden><p id="chat-waiting-text"></p><button id="chat-stop" type="button">Stop waiting</button></div>
         <p id="chat-notice"></p>
         <button id="chat-check" type="button" hidden>Check again</button>
+        <button id="chat-discard" type="button" hidden></button>
+        <p id="chat-pending-note" hidden></p>
         <form id="chat-form"><textarea id="chat-input"></textarea><button id="chat-send" type="submit">Ask</button></form>
       </section>
       <button id="signout" type="button">Sign out</button>
@@ -1079,6 +1082,58 @@ describe('mapping screen (session 4)', () => {
     expect(el('#statement-summary').textContent).toContain('numbers in thousands; currency not specified');
     expect(isHidden('#change-mapping')).toBe(false);
     expect(statusText()).toBe('Statement confirmed.');
+  });
+
+  it('Confirm is blocked while an answer is pending, with the reason shown, and unblocked once it is not', async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(false);
+
+    chatDeps.current!.onPendingChange!(true);
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(true);
+    expect(isHidden('#mapping-pending-note')).toBe(false);
+    expect(el('#mapping-pending-note').textContent).toBe(
+      'An answer is still being prepared. Wait for it, or discard it to start over.',
+    );
+    el<HTMLButtonElement>('#confirm-mapping').disabled = false; // even if forced, nothing is sent
+    await click('#confirm-mapping');
+    expect(confirmMappingMock).not.toHaveBeenCalled();
+    expect(chatStartNewConversationMock).not.toHaveBeenCalled();
+
+    chatDeps.current!.onPendingChange!(false); // answered, or discarded
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(false);
+    expect(isHidden('#mapping-pending-note')).toBe(true);
+    await click('#confirm-mapping');
+    expect(confirmMappingMock).toHaveBeenCalled();
+  });
+
+  it('a pending answer from before the mapping screen opened (e.g. a reopened panel) blocks Confirm too', async () => {
+    await loadSidepanel();
+    chatDeps.current!.onPendingChange!(true);
+    await clickConnect();
+    await click('#read-range');
+    await click('#send-data');
+    choose('#scale-select', 'thousands');
+
+    expect(el<HTMLButtonElement>('#confirm-mapping').disabled).toBe(true);
+    expect(isHidden('#mapping-pending-note')).toBe(false);
+  });
+
+  it('Confirm anyway is blocked while an answer is pending', async () => {
+    const cell = {
+      cell: "'P&L'!B4", source_row: 0, column: 'Revenue', role: 'revenue', period_end: '2025-03-31', value: '#DIV/0!',
+    };
+    confirmMappingMock.mockResolvedValueOnce(
+      confirmResponse({ confirmed: false, requires_acknowledgement: true, unparsed_cells: [cell], ack_fingerprint: 'fp' }),
+    );
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+    expect(isHidden('#ack-panel')).toBe(false);
+
+    chatDeps.current!.onPendingChange!(true);
+    expect(el<HTMLButtonElement>('#confirm-anyway').disabled).toBe(true);
   });
 
   it('confirming a statement starts a new conversation about it, and shows the chat for it', async () => {

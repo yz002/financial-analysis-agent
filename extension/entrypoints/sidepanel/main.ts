@@ -1,5 +1,6 @@
 import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
 import { abortableSleep } from '../../lib/askRunner';
+import { ANSWER_PENDING_NOTE } from '../../lib/chatModel';
 import { clearChatState } from '../../lib/conversationStorage';
 import { ChatController } from './chat';
 import {
@@ -122,6 +123,7 @@ const statementCard = document.querySelector<HTMLElement>('#statement-card');
 const statementSummary = document.querySelector<HTMLElement>('#statement-summary');
 const statementWarnings = document.querySelector<HTMLElement>('#statement-warnings');
 const changeMappingButton = document.querySelector<HTMLButtonElement>('#change-mapping');
+const mappingPendingNote = document.querySelector<HTMLElement>('#mapping-pending-note');
 
 function required<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -143,12 +145,24 @@ const chat = new ChatController(
     waitingText: required('#chat-waiting-text'),
     stopButton: required('#chat-stop'),
     checkButton: required('#chat-check'),
+    discardButton: required('#chat-discard'),
+    pendingNote: required('#chat-pending-note'),
     form: required('#chat-form'),
     input: required('#chat-input'),
     sendButton: required('#chat-send'),
   },
   {
     getSession: () => getStoredSession(),
+    onPendingChange: (pending) => {
+      // Confirming starts a new conversation, which would abandon a pending question that
+      // still counts: Confirm is blocked until it's answered or discarded.
+      answerPending = pending;
+      if (mappingPendingNote) {
+        mappingPendingNote.textContent = pending ? ANSWER_PENDING_NOTE : '';
+        mappingPendingNote.hidden = !pending;
+      }
+      if (mapping) updateMappingValidation(mapping);
+    },
     send: (sessionToken, body, signal) => ask(sessionToken, body, signal),
     onUnauthorized: () => handleUnauthorized(),
     onStatementNeedsReconfirm: async (message) => {
@@ -202,6 +216,7 @@ interface MappingSession extends MappingOrigin {
 let mapping: MappingSession | null = null;
 let lastConfirmed: ConfirmedChoices | null = null;
 let busy = false;
+let answerPending = false;
 
 const SAMPLE_VALUES_SHOWN = 3;
 
@@ -422,7 +437,8 @@ function updateMappingValidation(m: MappingSession): void {
     if (conflict) conflict.textContent = message;
     tr.classList.toggle('mapping-row--conflict', message !== '');
   });
-  if (confirmMappingButton) confirmMappingButton.disabled = busy || !result.canConfirm;
+  if (confirmMappingButton) confirmMappingButton.disabled = busy || answerPending || !result.canConfirm;
+  if (confirmAnywayButton) confirmAnywayButton.disabled = busy || answerPending;
   if (resetMappingButton) resetMappingButton.hidden = m.proposal === null;
 }
 
@@ -999,7 +1015,7 @@ async function handleChangeMapping(): Promise<void> {
 /** Confirm, or (`acknowledge`) Confirm anyway for the unparsed cells just shown. */
 async function handleConfirmMapping(acknowledge: boolean): Promise<void> {
   const m = mapping;
-  if (!m || !validateDraft(m.draft).canConfirm) return;
+  if (!m || !validateDraft(m.draft).canConfirm || answerPending) return;
   const session = await getStoredSession();
   if (!session) {
     renderSignedOut();

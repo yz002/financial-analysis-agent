@@ -1,7 +1,9 @@
 import { runAsk, type AskFailure } from '../../lib/askRunner';
 import type { AskRequestBody, AskResponse, Citation } from '../../lib/backendApi';
 import {
+  ANSWER_PENDING_NOTE,
   describeCitation,
+  DISCARD_LABEL,
   failureMessage,
   figureCheckBanner,
   ITERATION_CAP_NOTICE,
@@ -44,6 +46,10 @@ export interface ChatElements {
   waitingText: HTMLElement;
   stopButton: HTMLButtonElement;
   checkButton: HTMLButtonElement;
+  /** "Discard this question": shown while waiting and in the "check back later" state. */
+  discardButton: HTMLButtonElement;
+  /** The plain line saying why starting over is blocked while an answer is pending. */
+  pendingNote: HTMLElement;
   form: HTMLFormElement;
   input: HTMLTextAreaElement;
   sendButton: HTMLButtonElement;
@@ -56,6 +62,12 @@ export interface ChatDeps {
   onUnauthorized(): Promise<void>;
   /** The statement can't be used any more: clear it so the person re-reads and re-confirms. */
   onStatementNeedsReconfirm(message: string): Promise<void>;
+  /**
+   * Whether an answer is pending (waiting, stopped, or "check back later"). The panel blocks
+   * Confirm mapping while it is: confirming starts a new conversation, which would abandon a
+   * question that still counts.
+   */
+  onPendingChange(pending: boolean): void;
   newRequestId(): string;
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -156,6 +168,7 @@ export class ChatController {
   private statement: ActiveStatement | null = null;
   private conversation: StoredConversation | null = null;
   private running: AbortController | null = null;
+  private pending: PendingAsk | null = null;
 
   constructor(
     private readonly el: ChatElements,
@@ -168,6 +181,8 @@ export class ChatController {
     });
     el.stopButton.addEventListener('click', () => this.running?.abort());
     el.checkButton.addEventListener('click', () => void this.checkAgain());
+    el.discardButton.textContent = DISCARD_LABEL;
+    el.discardButton.addEventListener('click', () => void this.discard());
     el.newConversationButton.addEventListener('click', () => {
       if (this.statement) void this.startNewConversation(this.statement);
     });
@@ -189,9 +204,16 @@ export class ChatController {
     this.renderMismatch();
 
     if (!this.running) {
+      // A reopened panel with a question still pending: blocked state first, then resume.
       const pending = await getPendingAsk();
+      this.setPending(pending);
       if (pending) void this.run(pending);
     }
+  }
+
+  /** True while an answer is pending: starting a new conversation is blocked. */
+  get hasPendingAnswer(): boolean {
+    return this.pending !== null;
   }
 
   /** A newly confirmed statement starts a new conversation (any unanswered question is dropped). */
@@ -199,6 +221,7 @@ export class ChatController {
     this.running?.abort();
     this.running = null;
     await clearChatState();
+    this.setPending(null);
     this.statement = statement;
     this.conversation = freshConversation(statement);
     await setConversation(this.conversation);
@@ -215,6 +238,7 @@ export class ChatController {
     this.running = null;
     this.statement = null;
     this.conversation = null;
+    this.setPending(null);
     this.el.log.replaceChildren();
     this.el.input.value = '';
     this.setNotice('');
@@ -246,6 +270,16 @@ export class ChatController {
     }
   }
 
+  private setPending(pending: PendingAsk | null): void {
+    this.pending = pending;
+    const blocked = pending !== null;
+    this.el.newConversationButton.disabled = blocked;
+    this.el.pendingNote.textContent = blocked ? ANSWER_PENDING_NOTE : '';
+    this.el.pendingNote.hidden = !blocked;
+    this.el.discardButton.hidden = !blocked;
+    this.deps.onPendingChange(blocked);
+  }
+
   private setNotice(text: string): void {
     this.el.notice.textContent = text;
   }
@@ -265,7 +299,7 @@ export class ChatController {
     const question = this.el.input.value.trim();
     const statement = this.statement;
     const conversation = this.conversation;
-    if (!statement || !conversation || this.running) return;
+    if (!statement || !conversation || this.running || this.pending) return;
     if (!question) {
       this.setNotice('Type a question first.');
       return;
@@ -287,6 +321,7 @@ export class ChatController {
     conversation.messages.push({ role: 'question', text: question });
     await this.save();
     await setPendingAsk(pending);
+    this.setPending(pending);
     this.el.input.value = '';
     this.renderTranscript();
     await this.run(pending);
@@ -328,6 +363,7 @@ export class ChatController {
 
     if (outcome.kind === 'answered') {
       await clearPendingAsk();
+      this.setPending(null);
       if (this.conversation) {
         this.conversation.conversationId = outcome.response.conversation_id;
         this.conversation.messages.push({ role: 'answer', response: outcome.response });
@@ -353,6 +389,7 @@ export class ChatController {
         return;
       case 'statement_needs_reconfirm':
         await clearChatState();
+        this.setPending(null);
         this.conversation = null;
         this.el.log.replaceChildren();
         await this.deps.onStatementNeedsReconfirm(failureMessage(failure));
@@ -363,6 +400,7 @@ export class ChatController {
 
     // Final: the question won't be answered. Put it back in the box so it's easy to ask again.
     await clearPendingAsk();
+    this.setPending(null);
     this.dropUnansweredQuestion(pending.question);
     if (!this.el.input.value) this.el.input.value = pending.question;
 
@@ -377,6 +415,28 @@ export class ChatController {
     }
     await this.save();
     this.renderTranscript();
+  }
+
+  /**
+   * Gives up on the pending question: stops waiting, clears the pending entry, and puts the
+   * question back in the box. The backend may still finish it, and it still counts -- the
+   * button's label says so.
+   */
+  private async discard(): Promise<void> {
+    const pending = this.pending ?? (await getPendingAsk());
+    this.running?.abort();
+    this.running = null;
+    this.setWaiting(false);
+    await clearPendingAsk();
+    this.setPending(null);
+    this.el.checkButton.hidden = true;
+    this.setNotice('');
+    if (pending) {
+      this.dropUnansweredQuestion(pending.question);
+      if (!this.el.input.value) this.el.input.value = pending.question;
+      await this.save();
+      this.renderTranscript();
+    }
   }
 
   /** Takes the last question back out of the transcript (it's put back in the input instead). */

@@ -502,7 +502,8 @@ button:disabled {
 
 #chat-new,
 #chat-stop,
-#chat-check {
+#chat-check,
+#chat-discard {
   align-self: flex-start;
   background: var(--color-canvas);
   color: var(--color-accent-text);
@@ -511,7 +512,8 @@ button:disabled {
 
 #chat-new:hover:not(:disabled),
 #chat-stop:hover:not(:disabled),
-#chat-check:hover:not(:disabled) {
+#chat-check:hover:not(:disabled),
+#chat-discard:hover:not(:disabled) {
   background: var(--color-surface);
   border-color: var(--color-accent-text);
 }
@@ -525,4 +527,13 @@ button:disabled {
 
 #chat-notice:empty {
   display: none;
+}
+
+/* While an answer is pending, starting over is blocked; this line says why (both panels). */
+#app #chat-pending-note,
+#app #mapping-pending-note {
+  margin: 0;
+  font-size: var(--text-meta-size);
+  line-height: var(--text-meta-line-height);
+  color: var(--color-warning);
 }

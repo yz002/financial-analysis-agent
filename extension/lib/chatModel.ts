@@ -27,6 +27,14 @@ export const ITERATION_CAP_NOTICE =
   'This answer stopped early: it reached the limit on lookup steps before it finished. ' +
   'Try asking a narrower question.';
 
+/**
+ * While an answer is still pending, anything that would start a new conversation (confirming a
+ * statement, New conversation) is blocked: it would abandon a question that still counts.
+ */
+export const ANSWER_PENDING_NOTE =
+  'An answer is still being prepared. Wait for it, or discard it to start over.';
+export const DISCARD_LABEL = 'Discard this question (it still counts toward your limit)';
+
 export type AnswerSegment =
   | { kind: 'text'; text: string }
   | { kind: 'figure'; text: string; citation: Citation };
