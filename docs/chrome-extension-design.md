@@ -815,7 +815,12 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    - *The extension requires a confirmed statement before it offers chat. It keeps the
      conversation and pending question in `chrome.storage.session`.*
    - *Click-to-cell navigation is deferred, because neither platform's cell-selection URL
-     behavior is verified.)*
+     behavior is verified.*
+   - *Bug found and fixed while adding growth-rate citations: `get_csv_ratios` crashed
+     (`IndexError`) on a statement with more than 8 quarters. Its default window is the last 8
+     rows, and that tail kept its original row labels, which the growth lookup then used as
+     positions. The model saw a crashed tool instead of a growth rate. Fixed by resetting the
+     window's index, with a regression test (`tests/test_tools.py`).)*
 6. **Usage and billing surfacing.** `GET /v1/usage` display; the 429 body's
    `prompt_byo_key`/`prompt_upgrade` fields driving which upsell to show;
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the

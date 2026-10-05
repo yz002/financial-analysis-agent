@@ -748,6 +748,11 @@ Response (200) — only the fields relevant to the caller's tier are populated, 
   "byo_key_required": false
 }
 ```
+(Amended Phase D session 5 (pending live verification): `questions_today` and
+`questions_this_period` now include questions that are still running. A question counts from
+the moment it starts, so it's counted while it runs, not only once it's answered. A question
+that's later answered, stopped or failed still counts once. Refused requests and replays of a
+finished `request_id` never count (see `/v1/ask` above).)
 
 ### `POST /v1/byo-key`
 Auth required. Registers or rotates the caller's own Anthropic API key. **There is only this one
