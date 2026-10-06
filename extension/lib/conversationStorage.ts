@@ -57,6 +57,18 @@ export async function clearPendingAsk(): Promise<void> {
   await browser.storage.session.remove(PENDING_ASK_KEY);
 }
 
+/**
+ * Subscribes to changes of the conversation or the pending question in chrome.storage.session,
+ * so every open panel shows the same chat and the same pending-answer block (Phase D session
+ * 5). The callback re-reads storage itself; this panel's own writes trigger it too.
+ */
+export function onChatStateChanged(callback: () => void): void {
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'session') return;
+    if (CONVERSATION_KEY in changes || PENDING_ASK_KEY in changes) callback();
+  });
+}
+
 /** Both the conversation and any pending question. */
 export async function clearChatState(): Promise<void> {
   await browser.storage.session.remove([CONVERSATION_KEY, PENDING_ASK_KEY]);

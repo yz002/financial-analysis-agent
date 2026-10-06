@@ -1,7 +1,8 @@
 import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
 import { abortableSleep } from '../../lib/askRunner';
 import { ANSWER_PENDING_NOTE } from '../../lib/chatModel';
-import { clearChatState } from '../../lib/conversationStorage';
+import { clearChatState, onChatStateChanged } from '../../lib/conversationStorage';
+import { statementSource } from '../../lib/statementLabel';
 import { ChatController } from './chat';
 import {
   ask,
@@ -51,6 +52,7 @@ import {
   setStoredSession,
   clearStoredSession,
   onStoredSessionChanged,
+  onActiveStatementChanged,
   getActiveStatement,
   setActiveStatement,
   clearActiveStatement,
@@ -192,6 +194,8 @@ interface MappingOrigin {
 
 /** What "Change mapping" starts from: the last mapping confirmed in this panel. */
 interface ConfirmedChoices extends MappingOrigin {
+  /** The statement this panel confirmed, so a change from another window can be told apart. */
+  csvContextId: string;
   roles: Record<string, string>;
   entityName: string;
   scale: Scale;
@@ -514,7 +518,11 @@ function describeScale(scale: string): string {
   return SCALE_OPTIONS.find((o) => o.value === scale)?.label ?? scale;
 }
 
+/** The statement the card currently shows, so a storage change that repeats it is ignored. */
+let displayedStatementId: string | null = null;
+
 function renderStatementCard(statement: ActiveStatement | null, details: string[] = []): void {
+  displayedStatementId = statement?.csvContextId ?? null;
   void chat.show(statement); // chat needs a confirmed statement
   if (!statement) {
     statementCard?.setAttribute('hidden', '');
@@ -524,7 +532,7 @@ function renderStatementCard(statement: ActiveStatement | null, details: string[
   if (statementSummary) {
     const cadence = statement.cadence ? `${statement.cadence} periods` : 'a single period';
     statementSummary.textContent =
-      `${statement.entityName} — ${statement.label}. ${cadence[0]!.toUpperCase()}${cadence.slice(1)}; ` +
+      `${statementSource(statement)}. ${cadence[0]!.toUpperCase()}${cadence.slice(1)}; ` +
       `numbers in ${describeScale(statement.scale).toLowerCase()}; currency ` +
       `${statement.currency ?? 'not specified'}. Ready for questions.`;
   }
@@ -1086,6 +1094,7 @@ async function statementConfirmed(m: MappingSession, response: ConfirmMappingRes
   // statement (EXTENSION_INTEGRATION.md SS6 /v1/ask, amended session 5).
   await chat.startNewConversation(statement);
   lastConfirmed = {
+    csvContextId: m.csvContextId,
     grid: m.grid,
     file: m.file,
     roles: { ...m.draft.roles },
@@ -1192,6 +1201,23 @@ getStoredSession().then((session) => {
 // (already handled by the calls above) and, critically, any OTHER open side panel's
 // sign-in/sign-out/revoke-all, since each panel is a separate document that otherwise
 // never observes another panel's actions.
+// A statement confirmed (or cleared) in another window's panel: show it here too, without
+// touching any preview or mapping screen open in this panel -- a later confirm here simply
+// becomes the newest statement (Phase D session 5).
+onActiveStatementChanged((statement) => {
+  if (signedInView?.hasAttribute('hidden')) return;
+  if ((statement?.csvContextId ?? null) === displayedStatementId) return; // this panel's own write
+  if (lastConfirmed && lastConfirmed.csvContextId !== statement?.csvContextId) {
+    lastConfirmed = null; // Change mapping needs this panel's own rows for the shown statement
+  }
+  renderStatementCard(statement);
+});
+
+// The conversation or pending question changed in another panel (or this one).
+onChatStateChanged(() => {
+  void chat.syncFromStorage();
+});
+
 onStoredSessionChanged((session) => {
   if (session) {
     renderSignedIn(session);

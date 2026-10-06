@@ -55,3 +55,26 @@ describe('conversationStorage', () => {
     expect(await getConversation()).toBeNull();
   });
 });
+
+
+describe('onChatStateChanged', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('fires for the conversation or the pending question in the session area only', async () => {
+    const { onChatStateChanged } = await import('./conversationStorage');
+    let calls = 0;
+    onChatStateChanged(() => {
+      calls += 1;
+    });
+
+    await setPendingAsk(PENDING);
+    expect(calls).toBe(1);
+    await setConversation(CONVERSATION);
+    expect(calls).toBe(2);
+    await fakeBrowser.storage.session.set({ unrelated: 1 });
+    await fakeBrowser.storage.local.set({ fa_pending_ask: PENDING });
+    expect(calls).toBe(2);
+  });
+});

@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type AskRequestBody, type AskResponse, type Citation } from '../../lib/backendApi';
-import { getConversation, getPendingAsk, setPendingAsk } from '../../lib/conversationStorage';
+import { clearPendingAsk, getConversation, getPendingAsk, setConversation, setPendingAsk } from '../../lib/conversationStorage';
 import type { ActiveStatement } from '../../lib/sessionStorage';
 import { ChatController, renderAnswer, type ChatDeps } from './chat';
 
@@ -187,7 +187,10 @@ describe('ChatController', () => {
     expect($('#chat-panel').hidden).toBe(true);
     await chat.show(STATEMENT);
     expect($('#chat-panel').hidden).toBe(false);
-    expect($('#chat-statement').textContent).toBe("Answers come from Acme — Q3 P&L · 'P&L'!A3:C9.");
+    const when = new Date(STATEMENT.confirmedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    expect($('#chat-statement').textContent).toBe(
+      `Answers come from Acme — Q3 P&L · 'P&L'!A3:C9 · numbers in thousands · confirmed ${when}.`,
+    );
   });
 
   it('asks with the statement and a request id, then continues the same conversation', async () => {
@@ -412,5 +415,87 @@ describe('ChatController', () => {
     await ask('   ');
     expect(send).not.toHaveBeenCalled();
     expect($('#chat-notice').textContent).toBe('Type a question first.');
+  });
+});
+
+
+describe('ChatController.syncFromStorage (another window)', () => {
+  const OTHER_PENDING = {
+    requestId: 'req-other-window', question: 'From elsewhere?', csvContextId: 'ctx-1', conversationId: null, startedAt: 1_000_000,
+  };
+
+  it("a question pending in another window blocks here too, and isn't resent from here", async () => {
+    const { chat, send, deps } = makeChat([]);
+    await chat.show(STATEMENT);
+    await setPendingAsk(OTHER_PENDING);
+
+    await chat.syncFromStorage();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(true);
+    expect($('#chat-notice').textContent).toContain('being prepared in another window');
+    expect($('#chat-check').hidden).toBe(false);
+    expect($('#chat-discard').hidden).toBe(false);
+    expect($<HTMLButtonElement>('#chat-new').disabled).toBe(true);
+  });
+
+  it('when the other window clears it, the block lifts and its answer appears', async () => {
+    const { chat, deps } = makeChat([]);
+    await chat.show(STATEMENT);
+    await setPendingAsk(OTHER_PENDING);
+    await chat.syncFromStorage();
+
+    await setConversation({
+      csvContextId: 'ctx-1', statementLabel: 'Acme', conversationId: 'conv-1',
+      messages: [{ role: 'question', text: 'From elsewhere?' }, { role: 'answer', response: answer() }],
+    });
+    await clearPendingAsk();
+    await chat.syncFromStorage();
+
+    expect(deps.onPendingChange).toHaveBeenLastCalledWith(false);
+    expect($('#chat-notice').textContent).toBe('');
+    expect($('#chat-check').hidden).toBe(true);
+    expect($('#chat-log').querySelectorAll('.chat-answer')).toHaveLength(1);
+  });
+
+  it("this panel's own pending question doesn't look like another window's", async () => {
+    const { chat, send } = makeChat(['hang']);
+    await chat.show(STATEMENT);
+    await ask('Mine?');
+    await chat.syncFromStorage();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect($('#chat-notice').textContent).not.toContain('another window');
+  });
+
+  it('a conversation replaced by another window for another statement shows the New conversation offer', async () => {
+    const { chat } = makeChat([]);
+    await chat.show(STATEMENT);
+    await setConversation({
+      csvContextId: 'ctx-elsewhere', statementLabel: 'Other Co · Sheet1!A1:B9 · numbers in millions',
+      conversationId: 'conv-x', messages: [],
+    });
+
+    await chat.syncFromStorage();
+
+    expect($('#chat-mismatch').hidden).toBe(false);
+    expect($('#chat-mismatch-text').textContent).toContain('Other Co');
+  });
+
+  it('the New conversation offer tells apart two statements from the same range by scale', async () => {
+    const { chat } = makeChat([answer()]);
+    await chat.show({ ...STATEMENT, csvContextId: 'ctx-thousands', scale: 'thousands' });
+    await ask('Q?');
+    await chat.show({ ...STATEMENT, csvContextId: 'ctx-millions', scale: 'millions' });
+
+    const text = $('#chat-mismatch-text').textContent!;
+    expect(text).toContain('numbers in thousands');
+    expect(text).toContain('numbers in millions');
+  });
+
+  it("the chat line doesn't repeat a business name that is also the file name", async () => {
+    const { chat } = makeChat([]);
+    await chat.show({ ...STATEMENT, entityName: 'FA Spike Test', label: "FA Spike Test · 'P&L'!A3:G7" });
+    expect($('#chat-statement').textContent).not.toContain('FA Spike Test — FA Spike Test');
   });
 });

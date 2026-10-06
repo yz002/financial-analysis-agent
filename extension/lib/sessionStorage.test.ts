@@ -191,3 +191,27 @@ describe('active statement (session 4)', () => {
     expect(await getActiveStatement()).toBeNull();
   });
 });
+
+
+describe('onActiveStatementChanged (session 5)', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('passes the new statement, and null when it is cleared, for the local key only', async () => {
+    const { onActiveStatementChanged } = await import('./sessionStorage');
+    const seen: unknown[] = [];
+    onActiveStatementChanged((statement) => seen.push(statement));
+    const statement = {
+      csvContextId: 'ctx-9', entityName: 'Acme', label: 'File · A1:B3',
+      confirmedAt: '2026-10-05T00:00:00Z', cadence: null, scale: 'ones', currency: null,
+    };
+
+    await setActiveStatement(statement);
+    await clearActiveStatement();
+    await fakeBrowser.storage.session.set({ fa_active_statement: statement });
+    await fakeBrowser.storage.local.set({ other: 1 });
+
+    expect(seen).toEqual([statement, null]);
+  });
+});

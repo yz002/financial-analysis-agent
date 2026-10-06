@@ -84,3 +84,16 @@ export function onStoredSessionChanged(callback: (session: StoredSession | null)
     callback(newValue ?? null);
   });
 }
+
+/**
+ * Subscribes to fa_active_statement changes in chrome.storage.local, so a panel in another
+ * window shows a statement confirmed elsewhere (Phase D session 5). Passes the new statement,
+ * or null when it was cleared.
+ */
+export function onActiveStatementChanged(callback: (statement: ActiveStatement | null) => void): void {
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !(ACTIVE_STATEMENT_KEY in changes)) return;
+    const newValue = changes[ACTIVE_STATEMENT_KEY]?.newValue as ActiveStatement | undefined;
+    callback(newValue ?? null);
+  });
+}

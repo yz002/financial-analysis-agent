@@ -23,6 +23,7 @@ import {
   type StoredConversation,
 } from '../../lib/conversationStorage';
 import type { ActiveStatement, StoredSession } from '../../lib/sessionStorage';
+import { describeStatement } from '../../lib/statementLabel';
 
 /**
  * The chat panel (Phase D session 5): questions about the active statement, POST /v1/ask with
@@ -156,11 +157,14 @@ function renderMessage(message: ChatMessage): HTMLElement {
 function freshConversation(statement: ActiveStatement): StoredConversation {
   return {
     csvContextId: statement.csvContextId,
-    statementLabel: `${statement.entityName} — ${statement.label}`,
+    statementLabel: describeStatement(statement),
     conversationId: null,
     messages: [],
   };
 }
+
+const ELSEWHERE_NOTE =
+  'An answer is being prepared in another window. It will appear here when it arrives, or check again.';
 
 const WAITING_TEXT = 'Answering… this can take a few minutes. You can close the panel; the answer is kept.';
 
@@ -169,6 +173,8 @@ export class ChatController {
   private conversation: StoredConversation | null = null;
   private running: AbortController | null = null;
   private pending: PendingAsk | null = null;
+  /** The request id this panel sent or resumed itself, to tell its own writes from another window's. */
+  private ownRequestId: string | null = null;
 
   constructor(
     private readonly el: ChatElements,
@@ -195,7 +201,7 @@ export class ChatController {
       this.el.panel.setAttribute('hidden', '');
       return;
     }
-    this.el.statementLine.textContent = `Answers come from ${statement.entityName} — ${statement.label}.`;
+    this.el.statementLine.textContent = `Answers come from ${describeStatement(statement)}.`;
     this.el.panel.removeAttribute('hidden');
 
     const stored = await getConversation();
@@ -208,6 +214,29 @@ export class ChatController {
       const pending = await getPendingAsk();
       this.setPending(pending);
       if (pending) void this.run(pending);
+    }
+  }
+
+  /**
+   * Another panel (or this one) changed the conversation or the pending question in storage:
+   * show the same transcript and the same block. A question pending in another window isn't
+   * resent from here; this panel offers Check again or Discard instead.
+   */
+  async syncFromStorage(): Promise<void> {
+    if (this.running || !this.statement) return;
+    const stored = await getConversation();
+    this.conversation = stored ?? freshConversation(this.statement);
+    this.renderTranscript();
+    this.renderMismatch();
+    const pending = await getPendingAsk();
+    if (this.running) return; // this panel started waiting meanwhile
+    this.setPending(pending);
+    if (pending && pending.requestId !== this.ownRequestId) {
+      this.setNotice(ELSEWHERE_NOTE);
+      this.el.checkButton.hidden = false;
+    } else if (!pending && this.el.notice.textContent === ELSEWHERE_NOTE) {
+      this.setNotice('');
+      this.el.checkButton.hidden = true;
     }
   }
 
@@ -263,7 +292,7 @@ export class ChatController {
     if (statement && conversation && (force || conversation.csvContextId !== statement.csvContextId)) {
       this.el.mismatchText.textContent =
         `This conversation is about ${conversation.statementLabel}. Start a new conversation ` +
-        `about ${statement.entityName} — ${statement.label}?`;
+        `about ${describeStatement(statement)}?`;
       this.el.mismatch.removeAttribute('hidden');
     } else {
       this.el.mismatch.setAttribute('hidden', '');
@@ -319,6 +348,7 @@ export class ChatController {
       startedAt: this.deps.now(),
     };
     conversation.messages.push({ role: 'question', text: question });
+    this.ownRequestId = pending.requestId;
     await this.save();
     await setPendingAsk(pending);
     this.setPending(pending);
@@ -333,6 +363,7 @@ export class ChatController {
   }
 
   private async run(pending: PendingAsk): Promise<void> {
+    this.ownRequestId = pending.requestId;
     const session = await this.deps.getSession();
     if (!session) return;
     const stop = new AbortController();

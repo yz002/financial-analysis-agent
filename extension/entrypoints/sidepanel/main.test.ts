@@ -114,12 +114,19 @@ const {
   setActiveStatementMock,
   clearActiveStatementMock,
   chatShowMock,
+  chatSyncMock,
+  storageListeners,
   chatStartNewConversationMock,
   chatResetMock,
   clearChatStateMock,
   chatDeps,
 } = vi.hoisted(() => ({
   chatShowMock: vi.fn(),
+  chatSyncMock: vi.fn(),
+  storageListeners: {
+    activeStatement: null as null | ((statement: unknown) => void),
+    chatState: null as null | (() => void),
+  },
   chatStartNewConversationMock: vi.fn(),
   chatResetMock: vi.fn(),
   clearChatStateMock: vi.fn(),
@@ -152,6 +159,9 @@ vi.mock('../../lib/sessionStorage', () => ({
   setStoredSession: setStoredSessionMock,
   clearStoredSession: clearStoredSessionMock,
   onStoredSessionChanged: onStoredSessionChangedMock,
+  onActiveStatementChanged: (callback: (statement: unknown) => void) => {
+    storageListeners.activeStatement = callback;
+  },
   getActiveStatement: getActiveStatementMock,
   setActiveStatement: setActiveStatementMock,
   clearActiveStatement: clearActiveStatementMock,
@@ -185,6 +195,7 @@ vi.mock('./chat', () => ({
       chatDeps.current = deps;
     }
     show = chatShowMock;
+    syncFromStorage = chatSyncMock;
     startNewConversation = chatStartNewConversationMock;
     reset = chatResetMock;
   },
@@ -192,6 +203,9 @@ vi.mock('./chat', () => ({
 
 vi.mock('../../lib/conversationStorage', () => ({
   clearChatState: clearChatStateMock,
+  onChatStateChanged: (callback: () => void) => {
+    storageListeners.chatState = callback;
+  },
 }));
 
 vi.mock('../../lib/dataAccessStorage', () => ({
@@ -1136,6 +1150,47 @@ describe('mapping screen (session 4)', () => {
     expect(el<HTMLButtonElement>('#confirm-anyway').disabled).toBe(true);
   });
 
+  const ELSEWHERE_STATEMENT = {
+    csvContextId: 'ctx-other', entityName: 'Other Co', label: 'Other File · A1:B3',
+    confirmedAt: '2026-10-05T10:00:00Z', cadence: null, scale: 'ones', currency: null,
+  };
+
+  it('a statement confirmed in another window leaves an open mapping screen and its draft alone', async () => {
+    getActiveStatementMock.mockResolvedValue(null);
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    el<HTMLInputElement>('#entity-name').value = 'Draft Name';
+
+    storageListeners.activeStatement!(ELSEWHERE_STATEMENT);
+    await flushAsync();
+
+    expect(isHidden('#mapping-panel')).toBe(false);
+    expect(el<HTMLInputElement>('#entity-name').value).toBe('Draft Name');
+    expect(el<HTMLSelectElement>('#scale-select').value).toBe('thousands');
+    expect(isHidden('#statement-card')).toBe(false);
+    expect(el('#statement-summary').textContent).toContain('Other Co');
+    expect(chatShowMock).toHaveBeenLastCalledWith(ELSEWHERE_STATEMENT);
+
+    // A later confirm here simply becomes the newest statement.
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await click('#confirm-mapping');
+    expect(setActiveStatementMock).toHaveBeenLastCalledWith(expect.objectContaining({ csvContextId: 'ctx-123' }));
+  });
+
+  it("another window's statement replaces this panel's, and Change mapping goes with it", async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+    expect(isHidden('#change-mapping')).toBe(false);
+
+    storageListeners.activeStatement!(ELSEWHERE_STATEMENT);
+    await flushAsync();
+
+    expect(isHidden('#change-mapping')).toBe(true);
+    expect(chatShowMock).toHaveBeenLastCalledWith(ELSEWHERE_STATEMENT);
+  });
+
   it('confirming a statement starts a new conversation about it, and shows the chat for it', async () => {
     confirmMappingMock.mockResolvedValue(confirmResponse());
     await openMapping();
@@ -1525,5 +1580,58 @@ describe('chat wiring (session 5)', () => {
     const second = chatDeps.current!.newRequestId!();
     expect(first).toMatch(/^[0-9a-f-]{36}$/);
     expect(second).not.toBe(first);
+  });
+});
+
+
+describe('a statement confirmed in another window (session 5)', () => {
+  const OTHER = {
+    csvContextId: 'ctx-other',
+    entityName: 'Other Co',
+    label: "Other File · 'P&L'!A1:C9",
+    confirmedAt: '2026-10-05T10:00:00Z',
+    cadence: 'quarterly',
+    scale: 'millions',
+    currency: null,
+  };
+
+  it('updates the card and the chat here', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+    expect(isHidden('#statement-card')).toBe(true);
+
+    storageListeners.activeStatement!(OTHER);
+    await flushAsync();
+
+    expect(isHidden('#statement-card')).toBe(false);
+    expect(el('#statement-summary').textContent).toContain('Other Co — Other File');
+    expect(chatShowMock).toHaveBeenLastCalledWith(OTHER);
+  });
+
+  it('a cleared statement hides the card and the chat', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(OTHER);
+    await loadSidepanel();
+    expect(isHidden('#statement-card')).toBe(false);
+
+    storageListeners.activeStatement!(null);
+    await flushAsync();
+
+    expect(isHidden('#statement-card')).toBe(true);
+    expect(chatShowMock).toHaveBeenLastCalledWith(null);
+  });
+
+  it('a chat change elsewhere re-syncs the chat here', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+    storageListeners.chatState!();
+    expect(chatSyncMock).toHaveBeenCalled();
+  });
+
+  it('is ignored while signed out', async () => {
+    await loadSidepanel();
+    storageListeners.activeStatement!(OTHER);
+    await flushAsync();
+    expect(isHidden('#statement-card')).toBe(true);
   });
 });
