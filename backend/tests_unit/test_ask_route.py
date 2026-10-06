@@ -469,3 +469,41 @@ def test_agent_logger_has_its_own_handler_and_does_not_propagate():
     assert agent_logger.level == logging.INFO
     # pytest attaches its own capture handlers too; app.main adds exactly one stream handler.
     assert len([h for h in agent_logger.handlers if type(h) is logging.StreamHandler]) == 1
+
+
+
+# --- the statement's names reach the figure check --------------------------------------------
+
+
+def test_the_bound_statements_names_are_passed_as_excluded_phrases(world, monkeypatch):
+    statement_id = uuid.uuid4()
+    world.rows[(CsvStatement, statement_id)] = CsvStatement(
+        id=statement_id, account_id=ACCOUNT_ID, status="confirmed",
+        statement_data=[{"period_end": "2024-03-31"}],
+        statement_attrs={"entity_name": "Studio 54", "csv_source": {"scale": "thousands", "currency": None}},
+        raw_columns={"columns": [], "data_rows": [], "source": {"sheet_name": "P&L (000s)", "file_name": "Spike File"}},
+    )
+    monkeypatch.setattr(app_main, "statement_from_records", lambda data, attrs: object())
+    seen = {}
+
+    def run_agent(question, **kwargs):
+        seen.update(kwargs)
+        return _result(question)
+
+    monkeypatch.setattr(app_main, "run_agent", run_agent)
+    resp = _ask(csv_context_id=str(statement_id))
+
+    assert resp.status_code == 200, resp.text
+    assert seen["excluded_phrases"] == ["P&L (000s)", "Spike File", "Studio 54"]
+
+
+def test_no_statement_means_no_excluded_phrases(world, monkeypatch):
+    seen = {}
+
+    def run_agent(question, **kwargs):
+        seen.update(kwargs)
+        return _result(question)
+
+    monkeypatch.setattr(app_main, "run_agent", run_agent)
+    assert _ask().status_code == 200
+    assert seen["excluded_phrases"] == []

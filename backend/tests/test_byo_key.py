@@ -194,7 +194,7 @@ def test_ask_byo_key_tier_uses_decrypted_key_and_updates_last_used_at(auth_sessi
 
     captured_clients = []
 
-    def _fake_run_agent(question, prior_messages=None, prior_tool_calls=None, client=None):
+    def _fake_run_agent(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None, client=None):
         captured_clients.append(client)
         return _fake_result(question)
 
@@ -237,7 +237,7 @@ def test_ask_byo_key_auth_failure_does_not_leak_key_in_response(auth_session, mo
 
     auth_error_response = httpx.Response(401, request=_httpx_request())
 
-    def _raise_auth_error(question, prior_messages=None, prior_tool_calls=None, client=None):
+    def _raise_auth_error(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None, client=None):
         # The fake key appears in the raised exception's own message -- the exact
         # leak vector under test: a naive `detail=str(e)` would put it straight into
         # the HTTP response body.
@@ -264,7 +264,7 @@ def test_ask_master_key_auth_failure_returns_generic_message_no_leak(auth_sessio
     master_key_fragment = "sk-ant-api03-master-key-should-never-appear"
     auth_error_response = httpx.Response(401, request=_httpx_request())
 
-    def _raise_auth_error(question, prior_messages=None, prior_tool_calls=None):
+    def _raise_auth_error(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None):
         raise anthropic.AuthenticationError(
             f"invalid x-api-key: {master_key_fragment}", response=auth_error_response, body=None
         )
@@ -351,7 +351,7 @@ def test_ask_generic_api_error_does_not_leak_exception_detail(auth_session, monk
     _, headers = auth_session()
     marker = "internal-anthropic-error-detail-should-not-leak"
 
-    def _raise_api_error(question, prior_messages=None, prior_tool_calls=None):
+    def _raise_api_error(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None):
         raise anthropic.APIError(marker, _httpx_request(), body=None)
 
     monkeypatch.setattr(app_main, "run_agent", _raise_api_error)
@@ -368,7 +368,7 @@ def test_ask_generic_exception_does_not_leak_exception_detail(auth_session, monk
     _, headers = auth_session()
     marker = "internal-tool-failure-detail-should-not-leak"
 
-    def _raise_generic_error(question, prior_messages=None, prior_tool_calls=None):
+    def _raise_generic_error(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None):
         raise RuntimeError(marker)
 
     monkeypatch.setattr(app_main, "run_agent", _raise_generic_error)

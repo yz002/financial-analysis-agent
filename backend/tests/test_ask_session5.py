@@ -44,7 +44,7 @@ def _fake_result(question: str, tool_calls: list[dict] | None = None) -> dict:
 def fake_agent(monkeypatch):
     calls = []
 
-    def run_agent(question, prior_messages=None, prior_tool_calls=None, client=None):
+    def run_agent(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None, client=None):
         calls.append(question)
         return _fake_result(question)
 
@@ -214,7 +214,7 @@ def test_unbound_conversation_whose_csv_lookup_returned_data_unavailable_keeps_w
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None, client=None: next(results),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None, client=None: next(results),
     )
 
     first = _ask(headers, "Q1")  # a new, unbound conversation
@@ -338,3 +338,44 @@ def test_in_progress_rows_count_toward_the_cap(auth_session, fake_agent):
     resp = _ask(headers, "One more")
     assert resp.status_code == 429
     assert resp.json()["detail"]["error"] == "daily_cap_reached"
+
+
+
+def test_ask_passes_the_bound_statements_names_to_the_figure_check(auth_session, monkeypatch):
+    """Digits in a sheet, file or business name ("P&L (000s)", "Studio 54") aren't figures:
+    /v1/ask hands those names to run_agent so the figure check can skip them."""
+    _, headers = auth_session()
+    resp = client.post(
+        "/v1/csv/parse",
+        json={
+            "rows": [["Quarter Ending", "Total Revenue"], ["2024-03-31", "100"], ["2024-06-30", "110"]],
+            "filename": "Spike File — P&L (000s)",
+            "source": {
+                "platform": "google_sheets", "sheet_name": "P&L (000s)", "range": "A1:B3",
+                "file_name": "Spike File", "modified_at": None,
+            },
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    csv_context_id = resp.json()["csv_context_id"]
+    resp = client.post(
+        f"/v1/csv/{csv_context_id}/confirm",
+        json={
+            "mapping": {"Quarter Ending": "period_end", "Total Revenue": "revenue"},
+            "entity_name": "Studio 54",
+            "scale": "thousands",
+        },
+        headers=headers,
+    )
+    assert resp.json()["confirmed"] is True, resp.text
+
+    seen = {}
+
+    def run_agent(question, **kwargs):
+        seen.update(kwargs)
+        return _fake_result(question)
+
+    monkeypatch.setattr(app_main, "run_agent", run_agent)
+    assert _ask(headers, csv_context_id=csv_context_id).status_code == 200
+    assert seen["excluded_phrases"] == ["P&L (000s)", "Spike File", "Studio 54"]

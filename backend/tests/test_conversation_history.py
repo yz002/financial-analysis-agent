@@ -170,7 +170,7 @@ def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch)
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: _fake_result(question, "MSFT revenue was $61.9 billion."),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: _fake_result(question, "MSFT revenue was $61.9 billion."),
     )
     resp_1 = _ask(headers, "What was MSFT revenue last quarter?")
     assert resp_1.status_code == 200, resp_1.text
@@ -179,7 +179,7 @@ def test_ask_with_conversation_id_uses_seeded_history(auth_session, monkeypatch)
 
     captured = {}
 
-    def fake_run_agent_2(question, prior_messages=None, prior_tool_calls=None):
+    def fake_run_agent_2(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None):
         captured["prior_messages"] = prior_messages
         return _fake_result(question, "It grew 12% YoY.")
 
@@ -226,7 +226,7 @@ def test_ask_with_invalid_conversation_id_404s(auth_session, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail(
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail(
             "run_agent must not be called for an invalid conversation_id"
         ),
     )
@@ -247,7 +247,7 @@ def test_ask_with_foreign_conversation_id_404s(auth_session, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: _fake_result(question, "Answer."),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: _fake_result(question, "Answer."),
     )
     resp = _ask(owner_headers, "What was MSFT revenue last quarter?")
     assert resp.status_code == 200, resp.text
@@ -256,7 +256,7 @@ def test_ask_with_foreign_conversation_id_404s(auth_session, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail(
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail(
             "run_agent must not be called for a foreign conversation_id"
         ),
     )

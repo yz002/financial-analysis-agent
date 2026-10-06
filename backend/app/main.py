@@ -428,6 +428,18 @@ class _AskContext:
     statement_raw: dict | None
 
 
+def _statement_names(ctx: "_AskContext") -> list[str]:
+    """The bound statement's sheet, file and business names, for the figure check: digits in
+    a name like "P&L (000s)" or "Studio 54" aren't figures (src/agent/guardrails.py, which also
+    ignores any name too short or purely numeric to exclude safely). Empty without a
+    statement."""
+    if ctx.statement_id is None:
+        return []
+    source = (ctx.statement_raw or {}).get("source") or {}
+    names = [source.get("sheet_name"), source.get("file_name"), (ctx.statement_attrs or {}).get("entity_name")]
+    return [name for name in names if isinstance(name, str) and name.strip()]
+
+
 def _parse_uuid(value: str | None, not_found_detail: str) -> uuid.UUID | None:
     """A request id as a UUID. Malformed by construction can't match any row, so it gets the
     same 404 as a well-formed id that doesn't exist -- never a silent fallback."""
@@ -775,6 +787,7 @@ def ask(
             run_agent_kwargs = {
                 "prior_messages": ctx.prior_messages,
                 "prior_tool_calls": ctx.prior_tool_calls,
+                "excluded_phrases": _statement_names(ctx),
             }
             if charge.byo_client is not None:
                 run_agent_kwargs["client"] = charge.byo_client

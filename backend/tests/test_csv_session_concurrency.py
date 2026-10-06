@@ -96,7 +96,7 @@ def test_concurrent_ask_calls_never_cross_accounts_csv_data(auth_session, monkey
 
     barrier = threading.Barrier(2, timeout=10)
 
-    def fake_run_agent(question, prior_messages=None, prior_tool_calls=None):
+    def fake_run_agent(question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None):
         # Read this request's context-local active CSV once immediately...
         before_df = csv_session.get_active_csv()
         before_entity = before_df.attrs["entity_name"] if before_df is not None else None
@@ -157,7 +157,7 @@ def test_ask_with_unconfirmed_csv_context_id_is_refused(auth_session, monkeypatc
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(headers, csv_context_id)
@@ -173,7 +173,7 @@ def test_ask_with_foreign_csv_context_id_is_refused(auth_session, monkeypatch):
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(other_headers, csv_context_id)
@@ -187,7 +187,7 @@ def test_ask_with_nonexistent_csv_context_id_is_refused(auth_session, monkeypatc
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail("run_agent must not be called when the CSV context is refused"),
     )
 
     resp = _ask(headers, str(uuid.uuid4()))

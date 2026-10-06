@@ -263,7 +263,7 @@ def test_ask_rejects_at_free_daily_cap_without_calling_run_agent(auth_session, m
     monkeypatch.setattr(
         app_main,
         "run_agent",
-        lambda question, prior_messages=None, prior_tool_calls=None: pytest.fail(
+        lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: pytest.fail(
             "run_agent must not be called once the gate rejects"
         ),
     )
@@ -290,7 +290,7 @@ def test_ask_rejects_at_free_daily_cap_without_calling_run_agent(auth_session, m
 def test_ask_allow_path_records_answered_usage_event(auth_session, monkeypatch):
     account_id, headers = auth_session()
     monkeypatch.setattr(
-        app_main, "run_agent", lambda question, prior_messages=None, prior_tool_calls=None: _fake_result(question)
+        app_main, "run_agent", lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: _fake_result(question)
     )
 
     resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
