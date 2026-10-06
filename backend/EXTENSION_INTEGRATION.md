@@ -567,7 +567,7 @@ Response (200):
 **`citations` is currently always an empty array** regardless of the answer — provenance-derived
 citation extraction from `tool_calls` is not implemented yet, despite being described in the
 original design doc. Don't build extension UI that assumes it will be populated today.
-*(Superseded by the session 5 amendment below, pending live verification: `citations` is now
+*(Superseded by the session 5 amendment below, verified locally and in production, commit `aea7b33`: `citations` is now
 populated.)*
 
 Errors:
@@ -605,7 +605,7 @@ turn's full tool-call trace beyond the `tool_calls_summary` (name + error flag o
 above. Both were described in the original backend design doc but were never built — do not
 build extension UI that assumes either exists.
 
-(Amended Phase D session 5 (pending live verification): **citations, statement binding, and
+(Amended Phase D session 5, verified locally and in production, commit `aea7b33`: **citations, statement binding, and
 replayable requests.** Every new request field is optional, so older callers keep working.)
 
 **Request additions:**
@@ -757,7 +757,7 @@ Response (200) — only the fields relevant to the caller's tier are populated, 
   "byo_key_required": false
 }
 ```
-(Amended Phase D session 5 (pending live verification): `questions_today` and
+(Amended Phase D session 5, verified locally and in production, commit `aea7b33`: `questions_today` and
 `questions_this_period` now include questions that are still running. A question counts from
 the moment it starts, so it's counted while it runs, not only once it's answered. A question
 that's later answered, stopped or failed still counts once. Refused requests and replays of a

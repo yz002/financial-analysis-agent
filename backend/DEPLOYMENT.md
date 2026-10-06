@@ -68,7 +68,7 @@ The fake request fails before account resolution, so it creates no rows.
   every affected user has to re-register their key.
 - To rotate it, follow `SECURITY.md` §3.1 (hard cutover).
 
-## `/v1/ask` timeouts and the per-call log (Phase D session 5, pending live verification)
+## `/v1/ask` timeouts and the per-call log (Phase D session 5, verified locally and in production, commit `aea7b33`)
 
 - **Anthropic client timeout: 120 s per model call**, set explicitly for both the master key and
   BYO keys. The SDK's own default is 600 s, with 2 retries.
@@ -81,7 +81,17 @@ The fake request fails before account resolution, so it creates no rows.
 - **Per-call duration log.** Each model call logs one INFO line from `src.agent.agent` to
   stderr: iteration, `duration_ms`, stop reason and model. These appear in the Render service's
   logs. Use them to check the 120 s timeout against real call times before changing it. The
-  lines carry metadata only, never question or answer text (`SECURITY.md` §4).
+  lines carry metadata only, never question or answer text (`SECURITY.md` §4). In the
+  session 5 production run the largest model call was 12.1 s.
+
+## Production deploys
+
+- **`aea7b33`, 2026-10-06 (Phase D session 5).** `/v1/health` returned
+  `{"status":"ok","db":"ok","commit":"aea7b33c7aef255dfc5b852e2e6c0a53fef536ce"}`. No new
+  migrations beyond `0005_ask_request_state`, which was applied before the push.
+  - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row for
+    account `36f87f76-1ff4-4a13-809d-2d54d23b5745`. It raised the owner's question cap for
+    the session 5 live tests. Deleting it is a production write, so it needs its own approval.
 
 ## Database migrations
 

@@ -802,7 +802,7 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    rendering `final_answer`/`figure_check`/`hit_iteration_cap`, and the documented error-type
    handling (404 on a stale/foreign `conversation_id`/`csv_context_id`, 429 cap responses, 502/500
    generic-message handling) — all per contract §6, nothing invented beyond what it specifies.
-   *(Amended Phase D session 5 (pending live verification): planning found that the contract
+   *(Done. Amended Phase D session 5, verified locally and in production, commit `aea7b33`: planning found that the contract
    needed changes before a chat panel could be correct. They're specified in
    `EXTENSION_INTEGRATION.md` §6 `/v1/ask`, amended session 5:*
    - *Citations: each figure links to its cell, or to the cells and formula behind a derived
@@ -821,33 +821,50 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
      rows, and that tail kept its original row labels, which the growth lookup then used as
      positions. The model saw a crashed tool instead of a growth rate. Fixed by resetting the
      window's index, with a regression test (`tests/test_tools.py`).*
-   - *Local live test (2026-10-05, local backend, shared production database), pending the
-     production run:*
-     - *Verified:*
+   - ***Done.** Verified locally (2026-10-05, local backend, shared production database), then
+     in production: commit `aea7b33`, deployed on Render 2026-10-06, `/v1/health` returned
+     `{"status":"ok","db":"ok","commit":"aea7b33c7aef255dfc5b852e2e6c0a53fef536ce"}`, with the
+     production build of the extension.*
+     - *Production checks, all passed:*
+       1. *Formatted ratios (62.0%, 13.6%, -4.6%) traced as derived, with their formula and
+          cells. Answers name the data as "your sheet 'P&L', A3:G7", never "uploaded CSV".
+          Extreme values keep their format too: -38,449.6% traced to its formula and cells.*
+       2. *Ambiguous: 1.25 million lists both 'P&L'!B4 and 'P&L'!B6.*
+       3. *Scale and sheet name: 'P&L (000s)'!B5 = 1310 (as read, in thousands) gives
+          $1,310,000. "P&L (000s)" stays intact, with no false "000" figure.*
+       4. *Cross-window: a question asked in window 1 showed "An answer is being prepared in
+          another window" in window 2, with Check again and Discard, and Confirm blocked. The
+          block lifted and the answer appeared in both. This confirms that
+          `storage.onChanged` fires for the session area in side panels.*
+       5. *Panel closed about 5 s into an answer and reopened about 60 s later: the answer
+          appeared. Render's logs show one run (iteration 1: 5751 ms, `tool_use`; iteration 2:
+          11499 ms, `end_turn`). The replay POST line wasn't captured in the production logs;
+          the earlier local run showed the replay POST returning 200 with no new model calls.*
+       6. *The logs carry metadata only (iteration, `duration_ms`, stop reason, model). The
+          largest model call seen was 12.1 s, well under the 120 s timeout.*
+     - *Local checks, also verified* (closing the panel mid-answer gave one model run, 2.7 s
+       and 12.1 s, recovered by replay with the same `request_id`):
        - *a direct value, cited to its cell;*
        - *derived values: a margin, and a growth rate with its prior-period cell;*
-       - *an ambiguous value, with B4 and B6 both listed;*
        - *a figure from an earlier turn ("from an earlier answer");*
-       - *a thousands-scale tab: 'P&L (000s)'!B5 = 1310 gives 1.31 million, with the tab name
-         quoted correctly;*
        - *a new confirm starts a new conversation;*
        - *a statement mismatch on reopen shows the New conversation offer and charges nothing.*
-     - *Closing the panel mid-answer, then reopening:* one model run (2 iterations, 2.7 s and
-       12.1 s), recovered by replay with the same `request_id`.
-     - *The logs carried metadata only.* The largest model call was 12.1 s.
-     - *Five findings. Fixes are in progress, pending a live re-check:*
-       1. *In a range ("61–62%") only the second end had the unit, so the first was wrongly
-          marked "Not traced".*
-       2. *Digits in a sheet name ("P&L (000s)") were read as figures, and the marker landed
-          inside the name.*
-       3. *Ratios were quoted as raw floats.*
-       4. *A statement confirmed in one window didn't update another window's open panel.*
-       5. *Two statements from the same range had identical labels, and the name was
-          repeated ("FA Spike Test — FA Spike Test").*
-     - *Also in progress:* data from a sheet is no longer described as an "uploaded CSV".
-     - *Expected after fix 3:* a ratio answer may show "Found in more than one place" more
-       often, because a 1-decimal percentage can match several periods. That's honest, not a
-       bug.)*
+     - *The five findings from the first local live test, re-checked locally before the push:*
+       1. *Ranges ("61–62%"): only the second end carried the unit, so the first was wrongly
+          marked "Not traced". **Unit-tested only**: the model didn't write a range during
+          the live checks, so it wasn't observed live.*
+       2. *Sheet names: digits in a name like "P&L (000s)" were read as figures. Verified
+          fixed, locally and in production (check 3).*
+       3. *Ratios were quoted as raw floats. Verified fixed: they're quoted as formatted
+          percentages (check 1).*
+       4. *Other windows: a statement confirmed in one window didn't update another window's
+          panel. Verified fixed: other panels update without reopening, and the pending block
+          holds across windows (check 4).*
+       5. *Labels: two statements from the same range looked identical, and the name was
+          repeated ("FA Spike Test — FA Spike Test"). Verified fixed: labels carry the scale
+          and confirmed time, without the repeat.*
+     - *Also verified:* data from a sheet is described as "your sheet", not an "uploaded
+       CSV".)*
 6. **Usage and billing surfacing.** `GET /v1/usage` display; the 429 body's
    `prompt_byo_key`/`prompt_upgrade` fields driving which upsell to show;
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the
@@ -946,8 +963,8 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
 **From Phase D session 4** (items 10–12; details in `NOTES.md`):
 
 10. **Session 7 polish for the mapping screen and statement card**, from the live test:
-    - The card repeats the name when the business and file names match ("FA Spike Test — FA
-      Spike Test").
+    - ~~The card repeats the name when the business and file names match ("FA Spike Test —
+      FA Spike Test").~~ Done in session 5 (statement labels).
     - Show the period count ("4 quarterly periods").
     - Unmapped-concept warnings use internal names (`operating_cash_flow`). Use friendly
       labels, grouped on one line.
@@ -963,7 +980,8 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     - Optional: a manual light/dark/system theme switch. Today the panel follows the system
       setting only.
     - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
-      that raises the owner's question cap for session 5 live testing, if it was created.
+      that raises the owner's question cap for session 5 live testing. It exists, for account
+      `36f87f76-1ff4-4a13-809d-2d54d23b5745` (`backend/DEPLOYMENT.md`).
     - Answer markdown shows as raw text (`**`, backticks, tables). Consider a safe formatter
       (bold, code, lists, tables) built with createElement, or plain-text answers.
     - The source list repeats the same figure once per mention. Group it by figure and
@@ -973,6 +991,12 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     - A newly added tab appeared only after reconnecting. Refresh the sheet list.
     - Optional: a soft warning when the chosen scale gives implausible values (e.g. revenue in
       billions from a small sheet).
+    - From the session 5 production run:
+      - When another window starts a new conversation, show a short notice instead of the
+        transcript silently disappearing.
+      - The model sometimes writes loose estimates ("low-60s", "roughly 380x"). They're
+        correctly flagged "Not traced"; consider a prompt nudge to avoid them.
+      - The answer sometimes puts a percentage in quotes ("-4.6%"). Minor prompt polish.
 11. **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
     `statement_attrs` exist in production, predating the current confirm code. One belongs to
     account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them

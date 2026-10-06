@@ -71,7 +71,7 @@ isolation).
   guard at the second-session re-fetch, and a comment at the `Turn` query
   tying it to the earlier check, next time this code is touched.
 
-**Phase D session 5 (pending live verification): `/v1/ask` binding, replay and citations.**
+**Phase D session 5 (verified locally and in production, commit `aea7b33`): `/v1/ask` binding, replay and citations.**
 - **Ownership on every turn.** `/v1/ask` checks that the caller owns the conversation
   (`_get_owned_conversation`) and the statement (`_load_confirmed_csv_statement`) on every
   turn. This was already true before session 5.
@@ -296,7 +296,7 @@ added across sessions 3-9, not just this session's) and `src/` (imported by
   rendering — for a `Turn` insert, that's raw `question`/`final_answer`
   text — the moment real log aggregation is wired up on Render. Fixed now
   rather than only once that changes.
-- **Phase D session 5 (pending live verification): two new log lines, metadata only.**
+- **Phase D session 5 (verified locally and in production, commit `aea7b33`): two new log lines, metadata only.**
   - `src/agent/agent.py` logs each model call at INFO: iteration, duration in ms, stop reason
     and model. When the 45-minute run budget stops a run, it adds the elapsed time.
   - `backend/app/main.py` logs a WARNING when a run finishes after its request was already
@@ -306,6 +306,10 @@ added across sessions 3-9, not just this session's) and `src/` (imported by
     any key. A unit test asserts this.
   - The `src.agent.agent` logger has its own stderr handler, with `propagate = False`, so its
     lines aren't duplicated if uvicorn or Render configures the root logger.
+  - Production log review (session 5, commit `aea7b33`): the per-call lines carried only
+    iteration, `duration_ms`, stop reason and model. **The uvicorn access log includes the
+    client IP address** (for example on `POST /v1/ask` lines), alongside the method, path and
+    status. No question or answer content is logged.
 
 ---
 
