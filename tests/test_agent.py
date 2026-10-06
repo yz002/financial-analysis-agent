@@ -366,3 +366,23 @@ def test_default_client_uses_the_explicit_model_call_timeout(monkeypatch):
 def test_system_prompt_asks_for_scale_words_not_bare_suffixes():
     assert "scale word" in agent.SYSTEM_PROMPT
     assert "bare suffix" in agent.SYSTEM_PROMPT
+
+
+
+def test_prompt_asks_for_display_strings_and_neutral_source_wording():
+    prompt = agent.SYSTEM_PROMPT
+    assert "quote the display text" in prompt
+    assert '"your sheet"' in prompt
+    assert 'uploaded CSV", and' in prompt  # the "don't call it an uploaded CSV" instruction
+
+
+def test_excluded_phrases_reach_the_figure_check():
+    text = "The P&L (000s) tab is ready."
+    plain = agent.run_agent("Q?", client=_client_with_responses([_response([_text_block(text)], "end_turn")]))
+    assert plain["figure_check"]["figures_checked"] == 1
+    result = agent.run_agent(
+        "Q?",
+        client=_client_with_responses([_response([_text_block(text)], "end_turn")]),
+        excluded_phrases=["P&L (000s)"],
+    )
+    assert result["figure_check"]["figures_checked"] == 0

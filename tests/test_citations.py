@@ -254,3 +254,34 @@ def test_citations_follow_figure_order_and_offsets(stored):
     assert [c["figure_index"] for c in cites] == [0, 1]
     for cite, figure in zip(cites, figure_check["figures"]):
         assert answer[cite["start"]:cite["end"]] == cite["raw_text"] == figure["raw_text"]
+
+
+
+def test_a_quoted_display_percentage_traces_to_the_raw_ratio_as_derived(stored):
+    calls = _csv_tool_calls()
+    growth = json.loads(calls[1]["tool_result"])["ratios"]["revenue_growth_qoq"]
+    row = next(r for r in growth if r["period_end"] == "2024-06-30")
+    assert row["display"] == "4.0%"
+    _, cites = _cite(f"Revenue grew {row['display']} quarter over quarter.", calls, statement_raw=stored)
+    [match] = cites[0]["matches"]
+    assert match["kind"] == "derived"
+    assert match["computation"]["name"] == "revenue_growth_qoq"
+
+
+def test_a_negative_and_a_huge_display_percentage_trace():
+    payload = {"ratios": {"earnings_growth_qoq": [
+        {"period_end": "2025-06-30", "value": -0.04580152671755725, "display": "-4.6%", "inputs": {}, "provenance": {}},
+        {"period_end": "2025-09-30", "value": -384.4961832061069, "display": "-38,449.6%", "inputs": {}, "provenance": {}},
+    ]}}
+    calls = [_call("get_ratios", json.dumps(payload))]
+    figure_check, cites = _cite("Earnings fell -4.6%, then -38,449.6%.", calls)
+    assert figure_check["all_traced"] is True
+    assert [c["matches"][0]["kind"] for c in cites] == ["derived", "derived"]
+
+
+def test_no_citation_lands_inside_a_sheet_name(stored):
+    answer = "In 'P&L'!B4 revenue was 1.25 million; the P&L (000s) tab agrees."
+    result = {"final_answer": answer, "tool_calls": _csv_tool_calls()}
+    figure_check = guardrails.check_figures(result, None, ["P&L (000s)"])
+    cites = citations.build_citations(figure_check, result["tool_calls"], None, stored)
+    assert [c["raw_text"] for c in cites] == ["1.25 million"]

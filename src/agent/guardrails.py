@@ -174,7 +174,18 @@ _NEGATION_WORD_RE = re.compile(
 # without reaching into an unrelated neighboring sentence.
 _NEGATION_WORD_WINDOW = 40
 
+# A cell or range reference qualified by its sheet -- 'P&L (000s)'!B5, ‘Q3’!A3:G7, Sheet1!B5:D7 --
+# including when it sits inside a backtick code span. Bare cell references ("B5", "A3:G7") never
+# yield a candidate anyway (\b before the mantissa), but a sheet name can hold digits of its own
+# ("P&L (000s)"), and those aren't figures. Only the reference itself is excluded, so a real
+# figure next to it in the same code span ("`'P&L'!B5 = 1,310`") is still checked.
+_CELL_REF = r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?"
+_SHEET_REF_RE = re.compile(
+    rf"(?:'[^'\n]{{1,100}}'|‘[^’\n]{{1,100}}’|\b[A-Za-z_][\w.]*)!{_CELL_REF}(?!\w)"
+)
+
 _EXCLUSION_PATTERNS = (
+    _SHEET_REF_RE,
     _FY_YEAR_RE,
     _QUARTER_RE,
     _PERIOD_COUNT_RE,
@@ -186,10 +197,24 @@ _EXCLUSION_PATTERNS = (
 )
 
 
-def _excluded_spans(text: str) -> list[tuple[int, int]]:
+def _usable_phrase(phrase) -> bool:
+    """A known name is only excluded when it can't be mistaken for a figure: at least 3
+    characters and at least one letter. A purely numeric sheet or business name ("100", "2024")
+    is never excluded -- otherwise an invented figure equal to it would go unchecked."""
+    return isinstance(phrase, str) and len(phrase.strip()) >= 3 and any(c.isalpha() for c in phrase)
+
+
+def _excluded_spans(text: str, excluded_phrases=None) -> list[tuple[int, int]]:
     spans = []
     for pattern in _EXCLUSION_PATTERNS:
         for m in pattern.finditer(text):
+            spans.append((m.start(), m.end()))
+    # Known names -- the statement's sheet, file and business names -- whose digits aren't
+    # figures ("the P&L (000s) tab", "Studio 54"), matched literally on word boundaries.
+    for phrase in excluded_phrases or ():
+        if not _usable_phrase(phrase):
+            continue
+        for m in re.finditer(rf"(?<!\w){re.escape(phrase.strip())}(?!\w)", text):
             spans.append((m.start(), m.end()))
     return spans
 
@@ -209,25 +234,69 @@ def _is_bare_year(m: re.Match) -> bool:
     return 1900 <= int(mantissa) <= 2099
 
 
-def _extract(text: str) -> tuple[list[re.Match], list[re.Match]]:
-    """(candidates, skipped): every number-like token check_figures checks, plus the bare-suffix
-    tokens it deliberately can't (see below), so those are reported rather than silently lost."""
-    excluded = _excluded_spans(text)
-    candidates, skipped = [], []
-    for m in _NUMBER_RE.finditer(text):
-        if _overlaps((m.start(), m.end()), excluded):
+# What separates the two ends of a range: a dash (any _DASH_CHARS) or "to", with optional spaces.
+_RANGE_GAP_RE = re.compile(rf"\s*(?:[{_DASH_CHARS}]|to)\s*", re.IGNORECASE)
+
+
+def _unit_of(m: re.Match) -> dict | None:
+    if m.group("percent"):
+        return {"percent": True}
+    if m.group("word"):
+        return {"word": m.group("word")}
+    if m.group("suffix"):
+        return {"suffix": m.group("suffix")}
+    return None
+
+
+def _range_units(text: str, matches: list[re.Match]) -> dict[int, dict]:
+    """Units shared across a range, keyed by the receiving match's start offset. In "61–62%",
+    "$1.2–1.3 million" or "1.2 to 1.3 million" the unit is written once, on the right end, but
+    applies to both, so the left end inherits it. In "$1.2–1.3B" the currency is written once, on
+    the left end, so the right end inherits the "$" (and isn't skipped as a bare suffix). Each
+    end is still normalized and matched on its own, at its own stated precision -- only the
+    unit is shared, never the value."""
+    inherited: dict[int, dict] = {}
+    for left, right in zip(matches, matches[1:]):
+        if not _RANGE_GAP_RE.fullmatch(text[left.end() : right.start()]):
             continue
+        right_unit = _unit_of(right)
+        if _unit_of(left) is None and right_unit is not None:
+            inherited[left.start()] = dict(right_unit)
+        if left.group("dollar") and not right.group("dollar"):
+            inherited.setdefault(right.start(), {})["dollar"] = True
+    return inherited
+
+
+def _extract_with_units(
+    text: str, excluded_phrases=None
+) -> tuple[list[re.Match], list[re.Match], dict[int, dict]]:
+    """(candidates, skipped, inherited): every number-like token check_figures checks, the
+    bare-suffix tokens it deliberately can't (see below), and the units a range shares between
+    its ends (_range_units)."""
+    excluded = _excluded_spans(text, excluded_phrases)
+    matches = [m for m in _NUMBER_RE.finditer(text) if not _overlaps((m.start(), m.end()), excluded)]
+    inherited = _range_units(text, matches)
+    candidates, skipped = [], []
+    for m in matches:
+        unit = inherited.get(m.start(), {})
         # A bare suffix with no leading "$" ("3M", "10K") is not reinterpreted as an unscaled
         # number -- resolves the "3M-the-company" vs "3-million-dollars" ambiguity without a
         # ticker/company-name detector. It can't be checked either way, so it's reported in
         # figures_skipped: a figure written "1.25M" (no "$", as a statement with no stated
-        # currency requires) would otherwise vanish from the check entirely.
-        if m.group("suffix") and not m.group("dollar"):
+        # currency requires) would otherwise vanish from the check entirely. The right end of
+        # a range whose "$" is written on the left end ("$1.2–1.3B") does carry a currency.
+        if m.group("suffix") and not (m.group("dollar") or unit.get("dollar")):
             skipped.append(m)
             continue
-        if _is_bare_year(m):
+        if not unit and _is_bare_year(m):
             continue
         candidates.append(m)
+    return candidates, skipped, inherited
+
+
+def _extract(text: str) -> tuple[list[re.Match], list[re.Match]]:
+    """(candidates, skipped) -- see _extract_with_units."""
+    candidates, skipped, _ = _extract_with_units(text)
     return candidates, skipped
 
 
@@ -235,13 +304,15 @@ def _extract_candidates(text: str) -> list[re.Match]:
     return _extract(text)[0]
 
 
-def _format_label(m: re.Match) -> str:
-    dollar = bool(m.group("dollar"))
-    if m.group("percent"):
+def _format_label(m: re.Match, inherited: dict | None = None) -> str:
+    """`inherited` is a unit shared from the other end of a range (_range_units)."""
+    inherited = inherited or {}
+    dollar = bool(m.group("dollar") or inherited.get("dollar"))
+    if m.group("percent") or inherited.get("percent"):
         return "percent"
-    if m.group("word"):
+    if m.group("word") or inherited.get("word"):
         return "dollar_scale_word" if dollar else "scale_word"
-    if m.group("suffix"):
+    if m.group("suffix") or inherited.get("suffix"):
         return "dollar_suffix"
     mantissa = m.group("mantissa")
     if "," in mantissa:
@@ -251,19 +322,22 @@ def _format_label(m: re.Match) -> str:
     return "dollar_integer" if dollar else "plain_integer"
 
 
-def _normalize(m: re.Match) -> tuple[float, int]:
+def _normalize(m: re.Match, inherited: dict | None = None) -> tuple[float, int]:
     """Return (normalized_value, ndigits) -- ndigits is what `round()` needs to compare a
-    candidate at exactly the precision it was stated at, per the module docstring."""
+    candidate at exactly the precision it was stated at, per the module docstring. `inherited`
+    is a unit shared from the other end of a range (_range_units); the precision is still this
+    token's own decimal places, so each end of a range is checked on its own."""
+    inherited = inherited or {}
     mantissa = m.group("mantissa").replace(",", "")
     decimal_places = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
 
-    word = m.group("word")
-    suffix = m.group("suffix")
+    word = m.group("word") or inherited.get("word")
+    suffix = m.group("suffix") or inherited.get("suffix")
     if word:
         divisor = _SCALE_WORDS[word.lower()]
     elif suffix:
         divisor = _SCALE_SUFFIXES[suffix.upper()]
-    elif m.group("percent"):
+    elif m.group("percent") or inherited.get("percent"):
         divisor = 0.01
     else:
         divisor = 1.0
@@ -420,7 +494,11 @@ def _paren_negative_match(
 _WEAK_PRECISION_FORMATS = frozenset({"plain_integer", "dollar_integer"})
 
 
-def check_figures(result: dict, prior_tool_calls: list[dict] | None = None) -> dict:
+def check_figures(
+    result: dict,
+    prior_tool_calls: list[dict] | None = None,
+    excluded_phrases: list[str] | None = None,
+) -> dict:
     """Verify every numeric figure in result["final_answer"] traces back to a value present in
     result["tool_calls"][*]["tool_result"] -- or, when `prior_tool_calls` is given, in the
     earlier turns' tool results that were replayed into the model's context (see
@@ -431,16 +509,20 @@ def check_figures(result: dict, prior_tool_calls: list[dict] | None = None) -> d
     figure whose only matching evidence is a coincidence-prone whole-number match (see
     `_WEAK_PRECISION_FORMATS`) reports `traced: False` and `weak_match: True` -- its near-miss
     `match` is still included for transparency, but it doesn't count toward
-    `figures_traced`/`all_traced`."""
+    `figures_traced`/`all_traced`.
+
+    `excluded_phrases` are known names (the statement's sheet, file and business names) whose
+    digits aren't figures; see _excluded_spans for which ones are used."""
     final_answer = result.get("final_answer") or ""
     tool_calls = result.get("tool_calls") or []
     tool_values = collect_tool_values(tool_calls, prior_tool_calls)
-    candidates, skipped = _extract(final_answer)
+    candidates, skipped, inherited = _extract_with_units(final_answer, excluded_phrases)
 
     figures = []
     for m in candidates:
-        normalized_value, ndigits = _normalize(m)
-        fmt = _format_label(m)
+        unit = inherited.get(m.start())
+        normalized_value, ndigits = _normalize(m, unit)
+        fmt = _format_label(m, unit)
         match = _find_match(normalized_value, ndigits, tool_values)
         sign_inferred = False
         if match is None and not m.group("sign") and normalized_value > 0:
@@ -462,6 +544,7 @@ def check_figures(result: dict, prior_tool_calls: list[dict] | None = None) -> d
                 "traced": match is not None and not weak_match,
                 "sign_inferred": sign_inferred,
                 "weak_match": weak_match,
+                "unit_from_range": bool(unit and (unit.keys() - {"dollar"})),
                 "match": (
                     {
                         "tool_call_index": match["tool_call_index"],

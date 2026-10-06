@@ -547,6 +547,18 @@ def normalize(
         "scale": scale,
         "currency": currency,
     }
+    # Where a spreadsheet-sourced statement came from (Phase D session 5), so the agent can call
+    # it "your sheet" with its sheet and range rather than an "uploaded CSV". Absent for a plain
+    # file upload.
+    if raw.source:
+        df.attrs["csv_source"].update(
+            {
+                "sheet_name": raw.source.get("sheet_name"),
+                "range": raw.source.get("range"),
+                "file_name": raw.source.get("file_name"),
+                "platform": raw.source.get("platform"),
+            }
+        )
     df.attrs["csv_provenance"] = provenance
 
     return df, [], warnings

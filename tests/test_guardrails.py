@@ -885,3 +885,114 @@ def test_find_all_matches_returns_every_qualifying_value_closest_first():
     ]
     hits = guardrails.find_all_matches(90000000000.0, -8, values)
     assert [h["json_path"] for h in hits] == ["c", "a"]
+
+
+# --- Phase D session 5 live-test fixes: ranges, sheet references, known names ---------------
+
+
+def _values_call(**values):
+    return _tool_call("get_ratios", {"ratios": {k: [{"value": v}] for k, v in values.items()}})
+
+
+def _by_text(report):
+    return {f["raw_text"]: f for f in report["figures"]}
+
+
+def test_range_shares_its_percent_with_the_left_end():
+    calls = [_values_call(low=0.6105, high=0.6197)]
+    for text in ("Margin was 61–62% all year.", "Margin was 61-62% all year.", "Margin was 61 to 62% all year."):
+        report = guardrails.check_figures(_result(text, calls))
+        figs = _by_text(report)
+        assert figs["61"]["traced"] is True, text
+        assert figs["61"]["unit_from_range"] is True
+        assert figs["61"]["format"] == "percent"
+        assert figs["62%"]["traced"] is True
+        assert figs["62%"]["unit_from_range"] is False
+
+
+def test_range_shares_its_scale_word_and_currency():
+    calls = [_values_call(low=1_210_000.0, high=1_290_000.0)]
+    report = guardrails.check_figures(_result("Revenue was $1.2–1.3 million.", calls))
+    figs = _by_text(report)
+    assert figs["$1.2"]["traced"] is True and figs["$1.2"]["format"] == "dollar_scale_word"
+    assert figs["1.3 million"]["traced"] is True
+
+    report = guardrails.check_figures(_result("Revenue was 1.2 to 1.3 million.", calls))
+    assert all(f["traced"] for f in report["figures"])
+
+
+def test_range_suffix_on_the_right_gets_the_left_ends_dollar_and_is_checked():
+    calls = [_values_call(low=1.21e9, high=1.29e9)]
+    report = guardrails.check_figures(_result("Assets were $1.2–1.3B.", calls))
+    figs = _by_text(report)
+    assert figs["$1.2"]["traced"] is True
+    assert figs["1.3B"]["traced"] is True and figs["1.3B"]["format"] == "dollar_suffix"
+    assert report["figures_skipped"] == []
+
+
+def test_each_end_of_a_range_is_still_checked_at_its_own_precision():
+    # 0.65 doesn't round to 0.61 at 2 digits: the left end stays untraced (no false match).
+    report = guardrails.check_figures(_result("Margin was 61–62%.", [_values_call(low=0.65, high=0.6197)]))
+    figs = _by_text(report)
+    assert figs["61"]["traced"] is False
+    assert figs["62%"]["traced"] is True
+
+
+def test_ends_with_their_own_units_and_period_counts_are_not_paired():
+    report = guardrails.check_figures(_result("Margin was 61%–62%.", [_values_call(a=0.61, b=0.62)]))
+    assert all(f["unit_from_range"] is False for f in report["figures"])
+    report = guardrails.check_figures(_result("It took 5 to 6 quarters.", []))
+    assert all(f["unit_from_range"] is False for f in report["figures"])
+    assert "6" not in [f["raw_text"] for f in report["figures"]]
+
+
+def test_an_unrelated_bare_number_is_unaffected_by_a_range_elsewhere():
+    report = guardrails.check_figures(_result("Margin was 61–62%. We have 61 stores.", [_values_call(x=0.61, y=0.62)]))
+    stores = [f for f in report["figures"] if f["start"] > 20]
+    assert len(stores) == 1 and stores[0]["format"] == "plain_integer"
+    assert stores[0]["unit_from_range"] is False
+
+
+def test_digits_in_a_quoted_sheet_reference_are_not_figures():
+    calls = [_values_call(v=1_310_000.0)]
+    report = guardrails.check_figures(_result("'P&L (000s)'!B5 = 1,310 thousand, i.e. 1.31 million.", calls))
+    texts = [f["raw_text"] for f in report["figures"]]
+    assert "000" not in texts
+    assert report["figures_checked"] == 2
+
+
+def test_a_cell_reference_inside_backticks_is_excluded_but_the_figure_beside_it_is_checked():
+    report = guardrails.check_figures(_result("See `'P&L (000s)'!B5 = 1,310`.", [_values_call(v=1310.0)]))
+    assert [f["raw_text"] for f in report["figures"]] == ["1,310"]
+    assert report["figures"][0]["traced"] is True
+
+
+def test_unquoted_sheet_ranges_are_excluded():
+    report = guardrails.check_figures(_result("The rows are in Sheet1!B5:D7 and Q3_2024!A1.", []))
+    assert report["figures_checked"] == 0
+
+
+def test_a_known_sheet_name_in_prose_is_excluded():
+    text = "From the P&L (000s) tab, revenue was 1.31 million."
+    without = guardrails.check_figures(_result(text, [_values_call(v=1_310_000.0)]))
+    assert "000" in [f["raw_text"] for f in without["figures"]]
+    report = guardrails.check_figures(_result(text, [_values_call(v=1_310_000.0)]), excluded_phrases=["P&L (000s)"])
+    assert [f["raw_text"] for f in report["figures"]] == ["1.31 million"]
+
+
+def test_a_business_name_with_digits_suppresses_only_its_own_digits():
+    text = "Studio 54 grew 54% this year."
+    report = guardrails.check_figures(_result(text, [_values_call(g=0.54)]), excluded_phrases=["Studio 54"])
+    assert [f["raw_text"] for f in report["figures"]] == ["54%"]
+
+
+def test_a_purely_numeric_name_never_suppresses_checking():
+    # A sheet named "100" must not hide an invented 100 in the answer.
+    report = guardrails.check_figures(_result("Revenue was 100 this quarter.", []), excluded_phrases=["100", "2024", "ab"])
+    assert [f["raw_text"] for f in report["figures"]] == ["100"]
+    assert report["figures"][0]["traced"] is False
+
+
+def test_known_names_match_on_word_boundaries_only():
+    report = guardrails.check_figures(_result("Plan54 sold 54 units.", []), excluded_phrases=["an54"])
+    assert "54" in [f["raw_text"] for f in report["figures"]]

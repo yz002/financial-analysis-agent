@@ -130,6 +130,15 @@ null, the currency was not specified -- report CSV figures without any currency 
 bare suffix ("1.25M"): a suffix without a currency symbol can't be checked against the tool \
 results.
 
+When a tool value comes with a "display" string (every ratio does), quote the display text \
+exactly as given -- e.g. "-4.6%", never the raw value -0.0458... -- and never round or reformat a \
+value yourself.
+
+Describe confirmed-statement data by where it came from, using its "data_source": for a \
+spreadsheet, call it "your sheet" and name the sheet and range (e.g. "your sheet 'P&L', \
+A3:G7"); for a file, call it "your file". Don't call spreadsheet data an "uploaded CSV", and \
+don't quote upload timestamps.
+
 When comparing a CSV-backed business to a ticker-identified company, prefer scale-invariant \
 ratios (margins, growth rates, ROA/ROE, debt-to-assets, current ratio) over raw dollar figures \
 from get_csv_statement/get_financial_statement -- a small business's revenue or net income \
@@ -157,6 +166,7 @@ def run_agent(
     prior_messages: list[dict] | None = None,
     prior_tool_calls: list[dict] | None = None,
     clock=time.monotonic,
+    excluded_phrases: list[str] | None = None,
 ) -> dict:
     """
     Answer `question` using the Claude API with tool calling.
@@ -187,6 +197,10 @@ def run_agent(
     covers everything the model saw, and a figure restated from an earlier
     turn's tool result traces to that turn. Never pass a wider window than
     was replayed.
+
+    `excluded_phrases` are known names -- the statement's sheet, file and business names --
+    whose digits the figure check must not read as figures ("P&L (000s)"); see
+    guardrails._excluded_spans.
 
     The run stops with AgentTimeBudgetExceeded once RUN_BUDGET_SECONDS of
     `clock` time has passed, checked before every model call and every tool
@@ -316,5 +330,5 @@ def run_agent(
         "iterations_used": iteration,
         "stop_reason": stop_reason,
     }
-    result["figure_check"] = guardrails.check_figures(result, prior_tool_calls)
+    result["figure_check"] = guardrails.check_figures(result, prior_tool_calls, excluded_phrases)
     return result

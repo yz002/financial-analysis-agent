@@ -68,6 +68,33 @@ RATIOS = {
     "roe": (ratios_mod.roe, ["net_income", "stockholders_equity"]),
 }
 
+# Ratios whose "value" is a rate conventionally read as a percentage (margins, growth rates,
+# debt-to-assets, roa/roe). free_cash_flow is an amount and current_ratio a plain multiple. The
+# single source for both the tools' "display" strings (_ratio_display) and the Streamlit app's
+# chart formatting (src/app/main.py).
+PERCENT_RATIOS = frozenset({
+    "gross_margin", "operating_margin", "net_margin",
+    "revenue_growth_qoq", "revenue_growth_yoy",
+    "earnings_growth_qoq", "earnings_growth_yoy",
+    "roa", "roe", "debt_to_assets",
+})
+
+
+def _ratio_display(name: str, value: float | None) -> str | None:
+    """The ratio value formatted in Python for the model to quote as-is (Phase D session 5), so
+    it never rounds or reformats a raw float itself: a percentage with one decimal ("-4.6%",
+    "-38,449.6%"), current_ratio with two decimals, free_cash_flow as a grouped whole number
+    with no currency symbol (the units rule decides the currency). None when there's no value.
+    Same conventions as the Streamlit app's charts (".1%" / ",.2f")."""
+    if value is None:
+        return None
+    if name in PERCENT_RATIOS:
+        return f"{value:,.1%}"
+    if name == "free_cash_flow":
+        return f"{value:,.0f}"
+    return f"{value:,.2f}"
+
+
 # The stockholders_equity tag (see CONCEPTS["stockholders_equity"] in src/data/concepts.py)
 # that includes noncontrolling/minority interests in the equity balance -- the other tag,
 # StockholdersEquity, excludes them. get_ratios's roe-specific note below fires whenever this
@@ -175,16 +202,16 @@ def _get_active_csv_or_error() -> tuple:
         return None, _csv_error(
             None,
             "data_unavailable",
-            "No CSV has been uploaded and confirmed yet -- ask the user to upload and confirm "
-            "a business CSV in the upload panel first.",
+            "No statement has been confirmed yet -- ask the user to read their sheet (or upload "
+            "a file) and confirm it first.",
         )
     return df, None
 
 
 def _csv_unavailable_note(concept: str, business_name: str, suffix: str = "") -> str:
     return (
-        f"No {concept} data available for {business_name}; this column wasn't mapped in the "
-        f"uploaded CSV.{suffix}"
+        f"No {concept} data available for {business_name}; no column was mapped to it in the "
+        f"confirmed statement.{suffix}"
     )
 
 
@@ -239,6 +266,30 @@ _GROWTH_RATIO_LAGS = {
     "earnings_growth_qoq": ("net_income", 1),
     "earnings_growth_yoy": ("net_income", 4),
 }
+
+
+def _csv_data_source(df_attrs: dict) -> dict:
+    """What the statement came from, so the agent can describe it plainly (Phase D session 5):
+    {"kind": "spreadsheet", "sheet", "range", "file"} for a sheet or workbook range, or
+    {"kind": "file", "file"} for a plain uploaded file. Statements confirmed before the sheet
+    and range were recorded fall back to the sheet named in their first cell citation."""
+    source = df_attrs.get("csv_source", {})
+    if source.get("sheet_name"):
+        return {
+            "kind": "spreadsheet",
+            "sheet": source.get("sheet_name"),
+            "range": source.get("range"),
+            "file": source.get("file_name"),
+        }
+    for periods in df_attrs.get("csv_provenance", {}).values():
+        for prov in periods.values():
+            cell = prov.get("source_cell")
+            if cell and "!" in cell:
+                sheet = cell.rsplit("!", 1)[0]
+                if len(sheet) >= 2 and sheet[0] == sheet[-1] == "'":
+                    sheet = sheet[1:-1].replace("''", "'")
+                return {"kind": "spreadsheet", "sheet": sheet, "range": None, "file": None}
+    return {"kind": "file", "file": source.get("filename")}
 
 
 def _csv_units(df_attrs: dict) -> dict:
@@ -589,10 +640,12 @@ def get_ratios(
                         prov["alt_method"] = getattr(srow, f"{c}_alt_method")
                         prov["diverges_from_alt"] = bool(getattr(srow, f"{c}_diverges_from_alt"))
                 provenance[c] = prov
+            value = _num(rrow.value)
             rows.append(
                 {
                     "period_end": _iso(rrow.period_end),
-                    "value": _num(rrow.value),
+                    "value": value,
+                    "display": _ratio_display(name, value),
                     "inputs": inputs,
                     "provenance": provenance,
                 }
@@ -666,6 +719,7 @@ def get_csv_statement(periods: int | None = DEFAULT_PERIODS) -> str:
     result = {
         "business_name": business_name,
         "cadence": cadence,
+        "data_source": _csv_data_source(full_df.attrs),
         "units": _csv_units(full_df.attrs),
         "periods_returned": len(periods_out),
         "concepts_unavailable": unavailable,
@@ -786,10 +840,12 @@ def get_csv_ratios(
                         for j in window + [i]
                     ]
                 )
+            value = _num(rrow.value)
             rows.append(
                 {
                     "period_end": period_end_iso,
-                    "value": _num(rrow.value),
+                    "value": value,
+                    "display": _ratio_display(name, value),
                     "inputs": inputs,
                     "provenance": provenance,
                 }
@@ -799,6 +855,7 @@ def get_csv_ratios(
     result = {
         "business_name": business_name,
         "cadence": cadence,
+        "data_source": _csv_data_source(full_df.attrs),
         "units": _csv_units(full_df.attrs),
         "notes": notes,
         "ratios": ratios_out,
@@ -1161,10 +1218,11 @@ TOOL_DEFINITIONS = [
     {
         "name": "get_csv_statement",
         "description": (
-            "Get the financial statement of the business the user has uploaded and confirmed "
-            "via the CSV upload panel -- the same 13 tracked concepts as "
-            "get_financial_statement, one row per period, but sourced from their own uploaded "
-            "CSV instead of SEC EDGAR. Use this whenever the user refers to 'my business', 'my "
+            "Get the financial statement of the business the user has confirmed from their own "
+            "sheet or an uploaded file -- the same 13 tracked concepts as "
+            "get_financial_statement, one row per period, but sourced from that statement "
+            "instead of SEC EDGAR. 'data_source' says whether it came from a spreadsheet (with "
+            "its sheet and range) or a file. Use this whenever the user refers to 'my business', 'my "
             "company', 'our numbers', 'the CSV I uploaded', or similar -- there is no "
             "identifier to pass, it always refers to whichever CSV is currently confirmed (at "
             "most one). Every present value carries the literal CSV column header it came from "
@@ -1195,8 +1253,9 @@ TOOL_DEFINITIONS = [
             "Compute financial ratios (same set as get_ratios: gross_margin, "
             "operating_margin, net_margin, revenue_growth_qoq, revenue_growth_yoy, "
             "earnings_growth_qoq, earnings_growth_yoy, free_cash_flow, debt_to_assets, "
-            "current_ratio, roa, roe) for the business the user has uploaded and confirmed via "
-            "the CSV upload panel. No identifier needed, same as get_csv_statement. When "
+            "current_ratio, roa, roe) for the business the user has confirmed from their own "
+            "sheet or an uploaded file. No identifier needed, same as get_csv_statement. Each "
+            "value has a 'display' string -- quote that, not the raw value. When "
             "comparing this business to a ticker-identified company, prefer these ratios over "
             "raw dollar figures from get_csv_statement/get_financial_statement -- absolute "
             "figures aren't meaningful across very different company sizes. Every value "

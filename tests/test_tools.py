@@ -902,3 +902,53 @@ def test_get_csv_ratios_non_growth_ratios_carry_no_prior_provenance():
     result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
     provenance = result["ratios"]["net_margin"][0]["provenance"]
     assert set(provenance) == {"net_income", "revenue"}
+
+
+
+# --- Phase D session 5 live-test fixes: display values and data_source ----------------------
+
+
+def test_ratio_display_strings_follow_the_app_conventions():
+    assert tools._ratio_display("gross_margin", 0.4) == "40.0%"
+    assert tools._ratio_display("revenue_growth_qoq", -0.04580152671755725) == "-4.6%"
+    assert tools._ratio_display("earnings_growth_qoq", -384.4961832061069) == "-38,449.6%"
+    assert tools._ratio_display("current_ratio", 1.8467) == "1.85"
+    assert tools._ratio_display("free_cash_flow", 125000.0) == "125,000"
+    assert tools._ratio_display("roa", None) is None
+
+
+def test_csv_ratio_rows_carry_their_display_string():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip())
+    result = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
+    row = {r["period_end"]: r for r in result["ratios"]["net_margin"]}["2024-03-31"]
+    assert row["value"] == pytest.approx(0.08)
+    assert row["display"] == "8.0%"
+
+
+def test_data_source_names_the_sheet_and_range_for_sheet_data():
+    csv_session.set_active_csv(_sheet_statement_after_backend_round_trip())
+    statement = json.loads(tools.get_csv_statement())
+    assert statement["data_source"] == {
+        "kind": "spreadsheet", "sheet": "P&L", "range": "A3:C5", "file": "FA Spike Test",
+    }
+    ratios = json.loads(tools.get_csv_ratios(ratio_names=["net_margin"]))
+    assert ratios["data_source"] == statement["data_source"]
+
+
+def test_data_source_falls_back_to_the_cell_citation_for_older_statements():
+    df = _sheet_statement_after_backend_round_trip()
+    for key in ("sheet_name", "range", "file_name", "platform"):
+        df.attrs["csv_source"].pop(key, None)
+    assert tools._csv_data_source(df.attrs) == {"kind": "spreadsheet", "sheet": "P&L", "range": None, "file": None}
+
+
+def test_data_source_is_a_file_for_a_plain_upload():
+    csv_session.set_active_csv(_normalized_csv_statement())
+    statement = json.loads(tools.get_csv_statement())
+    assert statement["data_source"] == {"kind": "file", "file": "sample_small_business.csv"}
+
+
+def test_csv_tools_no_longer_call_sheet_data_an_uploaded_csv():
+    statement_tool = next(t for t in tools.TOOL_DEFINITIONS if t["name"] == "get_csv_statement")
+    assert "uploaded CSV" not in statement_tool["description"]
+    assert "No CSV has been uploaded" not in tools.get_csv_statement()

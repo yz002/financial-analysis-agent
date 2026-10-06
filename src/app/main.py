@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.agent import csv_session  # noqa: E402 -- see comment above
 from src.agent.agent import run_agent  # noqa: E402 -- import after sys.path/load_dotenv setup above
+from src.agent.tools import PERCENT_RATIOS  # noqa: E402 -- see comment above
 from src.analysis import csv_statement  # noqa: E402 -- see comment above
 from src.data import csv_ingest  # noqa: E402 -- see comment above
 from src.data.cik_lookup import get_company_name  # noqa: E402 -- see comment above
@@ -62,12 +63,8 @@ MAX_CHARTS = 4
 # percentage (margins, growth rates, debt-to-assets, roa/roe). free_cash_flow is a dollar amount
 # (no division involved), so it's grouped with ALL_CONCEPTS below instead. current_ratio is the
 # only ratio left ungrouped -- a dimensionless multiple (e.g. "1.5"), not a percentage.
-PERCENT_RATIOS = {
-    "gross_margin", "operating_margin", "net_margin",
-    "revenue_growth_qoq", "revenue_growth_yoy",
-    "earnings_growth_qoq", "earnings_growth_yoy",
-    "roa", "roe", "debt_to_assets",
-}
+# PERCENT_RATIOS itself lives in src/agent/tools.py (imported above), which also formats each
+# ratio's "display" string with the same convention.
 DOLLAR_SERIES = set(ALL_CONCEPTS) | {"free_cash_flow"}
 
 
