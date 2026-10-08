@@ -151,6 +151,10 @@ class CheckoutSessionResponse(BaseModel):
     checkout_url: str
 
 
+class PortalSessionResponse(BaseModel):
+    portal_url: str
+
+
 class ByoKeyRequest(BaseModel):
     api_key: str
 

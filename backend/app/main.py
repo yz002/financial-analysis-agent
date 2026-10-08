@@ -28,6 +28,7 @@ from pathlib import Path
 import anthropic
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
@@ -43,6 +44,7 @@ from db.models import (
     LinkedIdentity,
     Session as SessionModel,
     StripeWebhookEvent,
+    Subscription,
     Turn,
     UsageEvent,
 )
@@ -141,6 +143,7 @@ from .schemas import (
     HealthResponse,
     LogoutResponse,
     MappingProposalEntry,
+    PortalSessionResponse,
     ProposeMappingResponse,
     RevokeAllSessionsResponse,
     UsageResponse,
@@ -1345,16 +1348,26 @@ def register_byo_key(
     return ByoKeyResponse(registered=True)
 
 
-_BILLING_SUCCESS_HTML = (
-    "<!doctype html><html><head><title>Subscription active</title></head>"
-    "<body><h1>Subscription active</h1>"
-    "<p>You can close this tab and return to your Google Sheet.</p></body></html>"
+def _billing_page(title: str, message: str) -> str:
+    return (
+        f"<!doctype html><html><head><title>{title}</title></head>"
+        f"<body><h1>{title}</h1><p>{message}</p></body></html>"
+    )
+
+
+_BILLING_SUCCESS_HTML = _billing_page(
+    "Subscription started",
+    "You can close this tab and return to the extension. Your plan updates there once "
+    "Stripe confirms the payment, usually within a few seconds.",
 )
-_BILLING_CANCEL_HTML = (
-    "<!doctype html><html><head><title>Checkout canceled</title></head>"
-    "<body><h1>Checkout canceled</h1>"
-    "<p>No changes were made. You can close this tab and return to your Google Sheet.</p>"
-    "</body></html>"
+_BILLING_CANCEL_HTML = _billing_page(
+    "Checkout canceled",
+    "No changes were made. You can close this tab and return to the extension.",
+)
+_BILLING_RETURN_HTML = _billing_page(
+    "Done",
+    "You can close this tab and return to the extension. Any change to your subscription "
+    "shows there once Stripe confirms it.",
 )
 
 
@@ -1368,21 +1381,182 @@ def billing_cancel() -> HTMLResponse:
     return HTMLResponse(_BILLING_CANCEL_HTML)
 
 
+@app.get("/v1/billing/return", response_class=HTMLResponse)
+def billing_return() -> HTMLResponse:
+    """Where the Stripe customer portal's return link lands (Phase D session 6)."""
+    return HTMLResponse(_BILLING_RETURN_HTML)
+
+
+def _billing_error(status_code: int, error: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"error": error})
+
+
+def _billing_unavailable(e: billing.BillingUnavailable) -> HTTPException:
+    # str(e) names the failed check ("... is not a test-mode key"), never a value.
+    logger.warning("billing unavailable: %s", e)
+    return _billing_error(503, "billing_unavailable")
+
+
+def _billing_provider_error(operation: str, e: stripe.StripeError) -> HTTPException:
+    # The class name only: a Stripe error's message can echo request parameters.
+    logger.warning("Stripe %s failed: %s", operation, type(e).__name__)
+    return _billing_error(502, "billing_provider_error")
+
+
+@dataclass(frozen=True)
+class _SubscriptionSnapshot:
+    status: str
+    stripe_customer_id: str
+
+
+def _subscription_snapshot(account_id: uuid.UUID) -> _SubscriptionSnapshot | None:
+    """The caller's own subscriptions row as plain values, read in a short session that's
+    closed before any Stripe call."""
+    session = get_session()
+    try:
+        row = session.execute(
+            select(Subscription.status, Subscription.stripe_customer_id).where(
+                Subscription.account_id == account_id
+            )
+        ).one_or_none()
+    finally:
+        session.close()
+    if row is None:
+        return None
+    return _SubscriptionSnapshot(status=row.status, stripe_customer_id=row.stripe_customer_id)
+
+
 @app.post("/v1/billing/checkout-session", response_model=CheckoutSessionResponse)
 def create_checkout_session_route(
     request: Request,
     account: Account = Depends(get_current_account),
 ) -> CheckoutSessionResponse:
-    price_id = os.environ.get("STRIPE_PRICE_ID")
-    if not price_id:
-        raise HTTPException(status_code=500, detail="STRIPE_PRICE_ID is not configured")
+    """
+    EXTENSION_INTEGRATION.md SS6 (amended Phase D session 6). Config is checked before any
+    DB access; an account whose subscription is still live gets 409 subscription_exists
+    (manage it through the portal instead); a returning customer is checked out as the same
+    Stripe customer.
+    """
+    try:
+        billing.ensure_configured()
+        price_id = billing.checkout_price_id()
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
+
+    existing = _subscription_snapshot(account.id)
+    if existing is not None and existing.status in billing.LIVE_SUBSCRIPTION_STATUSES:
+        raise _billing_error(409, "subscription_exists")
 
     success_url = str(request.base_url) + "v1/billing/success"
     cancel_url = str(request.base_url) + "v1/billing/cancel"
-    checkout_url = billing.create_checkout_session(
-        account.id, account.primary_email, price_id, success_url, cancel_url
-    )
+    try:
+        checkout_url = billing.create_checkout_session(
+            account.id,
+            account.primary_email,
+            price_id,
+            success_url,
+            cancel_url,
+            existing_customer_id=existing.stripe_customer_id if existing is not None else None,
+        )
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
+    except stripe.StripeError as e:
+        raise _billing_provider_error("checkout session creation", e) from None
     return CheckoutSessionResponse(checkout_url=checkout_url)
+
+
+@app.post("/v1/billing/portal-session", response_model=PortalSessionResponse)
+def create_portal_session_route(
+    request: Request,
+    account: Account = Depends(get_current_account),
+) -> PortalSessionResponse:
+    """
+    EXTENSION_INTEGRATION.md SS6 (new, Phase D session 6): Stripe's hosted customer portal
+    for the caller's own subscription. The Stripe customer comes only from the caller's own
+    subscriptions row -- the route takes no body, so no request field can name a customer.
+    """
+    try:
+        billing.ensure_configured()
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
+
+    existing = _subscription_snapshot(account.id)
+    if existing is None:
+        raise _billing_error(404, "no_billing_account")
+
+    return_url = str(request.base_url) + "v1/billing/return"
+    try:
+        portal_url = billing.create_portal_session(existing.stripe_customer_id, return_url)
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
+    except stripe.StripeError as e:
+        raise _billing_provider_error("portal session creation", e) from None
+    return PortalSessionResponse(portal_url=portal_url)
+
+
+def _stripe_event_seen(event_id: str) -> bool:
+    session = get_session()
+    try:
+        return session.get(StripeWebhookEvent, event_id) is not None
+    finally:
+        session.close()
+
+
+def _process_stripe_event(event) -> None:
+    """
+    Runs in the threadpool (it blocks on Stripe and the DB). Order matters:
+      1. a cheap read of the idempotency marker, so a redelivery never calls Stripe;
+      2. prepare_event's Stripe call, with no DB session open;
+      3. one transaction: insert the marker, apply the change, commit.
+    """
+    if _stripe_event_seen(event["id"]):
+        return
+
+    try:
+        prepared = billing.prepare_event(event)
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
+    except stripe.StripeError as e:
+        # No marker written, so Stripe retries the event later.
+        logger.warning(
+            "Stripe webhook event %s (%s) couldn't be prepared: %s",
+            event["id"], event["type"], type(e).__name__,
+        )
+        raise HTTPException(status_code=500, detail="Stripe webhook processing failed.") from None
+
+    session = get_session()
+    try:
+        # Insert-first idempotency guard: the stripe_webhook_events PK is the source of
+        # truth under concurrent/duplicate delivery (the read in step 1 only saves a Stripe
+        # call; it has a race window). flush() (not commit()) sends the INSERT now, still
+        # inside this same transaction as the mutation below -- so if apply_event raises,
+        # rolling back undoes BOTH the marker and any partial mutation together, and a Stripe
+        # retry correctly reprocesses from scratch.
+        session.add(StripeWebhookEvent(stripe_event_id=event["id"], event_type=event["type"]))
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            return
+        result = billing.apply_event(session, prepared, datetime.now(timezone.utc))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # Ids only -- never an email or any other payload field (backend/SECURITY.md SS5/SS8).
+    if result.outcome == "duplicate_subscription_ignored":
+        logger.warning(
+            "duplicate subscription ignored existing=%s new=%s event=%s",
+            result.existing_subscription_id, result.new_subscription_id, event["id"],
+        )
+    elif result.outcome == "unknown_account":
+        logger.warning(
+            "Stripe checkout for an unknown account ignored subscription=%s event=%s",
+            result.new_subscription_id, event["id"],
+        )
 
 
 @app.post("/v1/billing/webhook")
@@ -1391,44 +1565,33 @@ async def stripe_webhook(request: Request) -> dict:
     One of the few endpoints (alongside /v1/health and /v1/auth/exchange) that does NOT
     require an Authorization: Bearer session token -- Stripe calls this directly and cannot
     carry one (design doc SS1's explicitly-stated exception). Deliberately async def, the
-    one exception to this file's otherwise
-    consistent sync def (threadpool-dispatched) route convention: it needs await
-    request.body() to read the raw, unparsed body before FastAPI's normal body-parsing
-    machinery touches it -- re-serializing a parsed body breaks Stripe's signature check.
+    one exception to this file's otherwise consistent sync def (threadpool-dispatched) route
+    convention: it needs await request.body() to read the raw, unparsed body before FastAPI's
+    normal body-parsing machinery touches it -- re-serializing a parsed body breaks Stripe's
+    signature check. Everything blocking (Stripe, the DB) then runs in the threadpool, so a
+    slow Stripe call doesn't stall the event loop.
+
+    Everything before _process_stripe_event touches neither the DB nor Stripe: an unverified
+    webhook is a real attack surface (design doc SS7.4).
     """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
-    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-    if not webhook_secret:
-        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET is not configured")
+    try:
+        secret = billing.webhook_secret()
+    except billing.BillingUnavailable as e:
+        raise _billing_unavailable(e) from None
 
     try:
-        event = billing.verify_webhook_event(payload, sig_header, webhook_secret)
+        event = billing.verify_webhook_event(payload, sig_header, secret)
     except (ValueError, stripe.SignatureVerificationError):
-        # Rejected before any DB access at all -- an unverified webhook is a real attack
-        # surface (design doc SS7.4).
         raise HTTPException(status_code=400, detail="invalid Stripe webhook signature")
 
-    session = get_session()
-    try:
-        # Insert-first idempotency guard: the stripe_webhook_events PK is the source of
-        # truth under concurrent/duplicate delivery, not a check-then-insert (which has a
-        # race window). flush() (not commit()) sends the INSERT now, still inside this same
-        # transaction as the mutation below -- so if handle_stripe_event raises, rolling
-        # back undoes BOTH the marker and any partial mutation together, and a Stripe retry
-        # correctly reprocesses from scratch rather than silently no-oping forever against a
-        # marker row that was committed but never actually followed by its mutation.
-        session.add(StripeWebhookEvent(stripe_event_id=event["id"], event_type=event["type"]))
-        try:
-            session.flush()
-        except IntegrityError:
-            session.rollback()
-            return {"received": True}
-        billing.handle_stripe_event(session, event)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    if billing.is_livemode(event):
+        # Test-mode phase (backend/SECURITY.md SS8): a live event shouldn't reach a test-mode
+        # endpoint at all. 400 rather than an ignored 200, so it shows up as failing in the
+        # Stripe dashboard.
+        logger.warning("Stripe livemode event rejected id=%s type=%s", event["id"], event["type"])
+        raise _billing_error(400, "livemode_event_rejected")
+
+    await run_in_threadpool(_process_stripe_event, event)
     return {"received": True}
