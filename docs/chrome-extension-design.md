@@ -870,6 +870,30 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the
    account's tier updated on return, per contract §6's own stated webhook-latency caveat);
    `POST /v1/byo-key` registration form.
+   *(Amended Phase D session 6 (pending live verification). Planning found that the backend
+   needed changes before the panel could be correct. They're specified in
+   `EXTENSION_INTEGRATION.md` §6, amended session 6, with security notes in
+   `backend/SECURITY.md` §8:*
+   - *Test-mode guard: live Stripe keys are refused, and the billing routes say
+     `billing_unavailable`.*
+   - *Webhook: subscription state is re-read from Stripe rather than trusted from the event, so
+     ordering can't roll it back. Unknown references are acknowledged and ignored. A duplicate
+     subscription is kept out and logged for manual refund.*
+   - *Checkout: refused when a subscription is already live. It reuses the Stripe customer and
+     expires after 30 minutes.*
+   - *A new customer-portal endpoint, for Manage subscription.*
+   - *`/v1/usage`: reports `resets_at`, `has_byo_key` and the subscription's state (past_due,
+     scheduled cancellation) whatever the tier. A late renewal webhook can no longer leave a
+     paid account uncapped.*
+   - *BYO keys:*
+     - *A key is verified with Anthropic (no tokens) before it's stored.*
+     - *A new `DELETE /v1/byo-key` removes it.*
+     - *A removed or replaced key's ciphertext is erased.*
+     - *BYO questions don't count toward the free or paid caps. This needed migration 0006
+       (`usage_events.tier`).*
+   - *Extension: a usage panel (used/limit, tier, reset time), Upgrade and Manage subscription
+     opening Stripe in a new tab, Refresh, and an add/remove form for a BYO key that's never
+     stored or logged in the extension.)*
 7. **Polish + manual QA pass** across both OAuth providers and both spreadsheet platforms
    end-to-end (sign-in → file read → mapping confirm → ask → usage/billing surfacing). No new
    endpoints or scopes — a verification session, not a feature one.

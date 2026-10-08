@@ -33,6 +33,30 @@ registered in the Stripe dashboard (in test mode), whose signing secret becomes
 works for local forwarding and must not be used on Render. Until then, billing endpoints fail
 at request time in production.
 
+**Phase D session 6 (pending live verification): Stripe is test-mode only.**
+- The billing code refuses any `STRIPE_SECRET_KEY` that doesn't start with `sk_test_` (or
+  `rk_test_`). The billing routes then return `503 billing_unavailable`, and the rest of the
+  service runs normally.
+- Set the three `STRIPE_*` values on Render only after the session 6 backend is deployed:
+  1. Stripe dashboard, **test mode** → Developers → Webhooks → **Add endpoint**
+     `https://<render-service-host>/v1/billing/webhook`, with events
+     `checkout.session.completed`, `customer.subscription.updated`,
+     `customer.subscription.deleted` and `invoice.payment_failed`.
+  2. Copy that endpoint's signing secret into `STRIPE_WEBHOOK_SECRET`.
+  3. Set `STRIPE_SECRET_KEY` (`sk_test_…`) and `STRIPE_PRICE_ID` (the test-mode $2/month
+     `price_…`).
+  4. Render redeploys on an env change. Check `/v1/health`.
+- The Customer portal must have a saved configuration in test mode (Settings → Billing →
+  Customer portal), or `POST /v1/billing/portal-session` fails with `502`.
+
+**Duplicate subscription runbook (session 6).**
+- Trigger: a WARNING in the Render logs, `duplicate subscription ignored existing=sub_… new=sub_…`.
+  It means two checkouts for one account both completed. The backend kept the existing
+  subscription and ignored the new one, but Stripe is still billing both.
+- In the Stripe dashboard, open the **new** subscription id, cancel it **immediately**, and
+  refund its payment.
+- The account's own row is already correct; nothing to change in the database.
+
 Whenever a new variable is added to `.env.example`, add it here and to Render in the same
 change.
 
@@ -92,6 +116,12 @@ The fake request fails before account resolution, so it creates no rows.
   - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row for
     account `36f87f76-1ff4-4a13-809d-2d54d23b5745`. It raised the owner's question cap for
     the session 5 live tests. Deleting it is a production write, so it needs its own approval.
+    (Phase D session 6: deleted by the owner at live-test step L0 — *date and printed row to be
+    recorded here*.)
+  - **Old BYO ciphertext (session 6, live-test step L0):** before session 6, a replaced BYO key's
+    row kept its `encrypted_key`. The new code erases it on removal, replacement or decrypt
+    failure, but older rows needed a one-time wipe. *Count before, rows wiped, and date to be
+    recorded here.*
 
 ## Database migrations
 

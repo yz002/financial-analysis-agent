@@ -586,6 +586,10 @@ Errors:
   ```
   Use `prompt_byo_key`/`prompt_upgrade` to decide which upsell to show; `resets_at` is when the
   cap next clears.
+  (Amended Phase D session 6 (pending live verification): the daily and per-period counts
+  behind these caps exclude questions asked on a BYO key. A question asked while a key was
+  registered doesn't count toward the free or paid allowance after the key is removed. The
+  body is unchanged.)
 - `502` — an Anthropic API failure. Body is a generic message (`"Anthropic API error."`, or, for
   an authentication/key-rejection failure specifically, `"Anthropic API authentication failed."`
   or, if the account has a BYO key registered, `"Your Anthropic API key was rejected. Please
@@ -763,10 +767,34 @@ the moment it starts, so it's counted while it runs, not only once it's answered
 that's later answered, stopped or failed still counts once. Refused requests and replays of a
 finished `request_id` never count (see `/v1/ask` above).)
 
+(Amended Phase D session 6 (pending live verification): three additive fields. Every
+existing field keeps its meaning, and an older client that ignores the new ones still works.)
+```json
+{
+  "resets_at": "<ISO-8601 or null>",  // free: next 00:00 UTC; paid: current_period_end; byo_key: null
+  "has_byo_key": false,               // an active BYO key is registered
+  "subscription": null                // or, whenever a subscriptions row exists, whatever the tier:
+  // {"status": "active", "cancel_at_period_end": false, "current_period_end": "<ISO-8601>"}
+}
+```
+- **`subscription.status`** is Stripe's value verbatim: `active`, `trialing`, `past_due`,
+  `unpaid`, `incomplete`, `incomplete_expired`, `canceled` or `paused`.
+  - Only `active` and `trialing` make the tier `paid`. A `past_due` subscriber shows
+    `"tier": "free"` with `subscription.status = "past_due"`. Show "Payment problem" and offer
+    Manage subscription.
+  - A subscriber with an active BYO key shows `"tier": "byo_key"` with their subscription still
+    listed. The subscription keeps billing, so say so.
+- **`subscription.cancel_at_period_end`** is `true` once a cancellation is scheduled, whether
+  Stripe recorded it as `cancel_at_period_end` or as a `cancel_at` date. The tier stays `paid`
+  until Stripe ends the subscription.
+- **`questions_this_period`** counts from `current_period_start` with no upper bound. If Stripe's
+  renewal webhook is late, `period_ends_at` can be in the past while the count keeps running
+  against the cap. Show "renewal pending" rather than a past date.
+- **`questions_today`** and **`questions_this_period`** exclude questions asked on a BYO key.
+
 ### `POST /v1/byo-key`
-Auth required. Registers or rotates the caller's own Anthropic API key. **There is only this one
-route** — no GET/status route, no DELETE. Registering a new key always replaces (soft-deactivates)
-any currently active one; there is no separate removal endpoint.
+Auth required. Registers or rotates the caller's own Anthropic API key. Registering a new key
+always replaces (deactivates) any currently active one.
 
 Request:
 ```json
@@ -777,6 +805,28 @@ Response (200): `{"registered": true}`
 
 Error: `422` — `{"detail": "That doesn't look like a valid Anthropic API key."}` if the key
 fails a basic format check.
+
+(Amended Phase D session 6 (pending live verification):
+- **Leading and trailing whitespace is stripped** before the format check, and the stripped key
+  is what's stored.
+- **The key is verified with Anthropic before anything is stored**: one model-list call, which
+  generates no tokens and spends nothing. New errors, with nothing stored on either:
+  - `422 {"detail": {"error": "byo_key_rejected"}}`: Anthropic refused the key.
+  - `502 {"detail": {"error": "byo_key_check_failed"}}`: Anthropic couldn't be reached or
+    errored. Try again later.
+- **A replaced key's stored ciphertext is erased.** The row is kept for audit (created and last
+  used times), but the old key can't be recovered.
+- **Never store or log the key in the extension.** It exists only in the input field and this
+  request's body.)
+
+### `DELETE /v1/byo-key`
+(New, Phase D session 6 (pending live verification).) Auth required. No request body. Removes
+the caller's BYO key.
+- The active key is deactivated and its stored ciphertext erased.
+- The account's next question uses its free or paid tier.
+
+Response (200): `{"removed": true}`. Idempotent: it returns the same response when no key is
+registered.
 
 ### `POST /v1/billing/checkout-session`
 Auth required. **No request body.**
@@ -790,6 +840,51 @@ instant the person returns from checkout.
 
 Error: `500` — `{"detail": "STRIPE_PRICE_ID is not configured"}` — a server misconfiguration, not
 something the extension can act on beyond surfacing a generic error.
+
+(Amended Phase D session 6 (pending live verification):
+- **The `500` above is replaced** by `503 {"detail": {"error": "billing_unavailable"}}`.
+  Billing isn't configured on this server, or it's configured with anything other than a Stripe
+  **test-mode** key: live keys are refused during this phase.
+- `409 {"detail": {"error": "subscription_exists"}}`: the account already has an `active`,
+  `trialing`, `past_due` or `unpaid` subscription. Offer Manage subscription instead.
+- `502 {"detail": {"error": "billing_provider_error"}}`: Stripe failed. The message never
+  carries Stripe's text.
+- **Only open the returned URL if it starts with `https://checkout.stripe.com/`.**
+- The checkout page expires after 30 minutes.
+- A returning customer is checked out as the same Stripe customer, so their billing history
+  stays in one place.
+- The success and cancel pages tell the person to return to the extension.)
+
+### `POST /v1/billing/portal-session`
+(New, Phase D session 6 (pending live verification).) Auth required. **No request body.** Opens
+Stripe's hosted customer portal for the caller's own subscription: update the card, cancel, or
+renew a scheduled cancellation.
+
+Response (200): `{"portal_url": "https://billing.stripe.com/..."}`
+- Open it in a new tab, and **only if it starts with `https://billing.stripe.com/`**.
+- When the person is done, the portal's return link lands on `/v1/billing/return`, a static
+  "return to the extension" page.
+- As with checkout, the tier changes only when Stripe's webhook arrives. Refresh
+  `GET /v1/usage`; don't assume.
+
+Errors:
+- `404 {"detail": {"error": "no_billing_account"}}`: this account has never subscribed.
+- `503 {"detail": {"error": "billing_unavailable"}}`
+- `502 {"detail": {"error": "billing_provider_error"}}`
+
+### `POST /v1/billing/webhook` (Stripe only, not called by the extension)
+(Amended Phase D session 6 (pending live verification), recorded here for operators.)
+- **Signature:** checked before anything else. A missing or bad signature → `400`.
+- **Live mode:** an event with `livemode: true` → `400`, during the test-mode phase.
+- **Subscription state:** taken from Stripe's API at processing time, not from the event body.
+  A late or out-of-order event therefore can't roll the state back.
+- **Ignored events:** a checkout that isn't a subscription, or that names no known account, is
+  acknowledged (`200`) and ignored.
+- **Duplicate subscription:** when an account already has a different active, trialing,
+  past_due or unpaid subscription, a second completed checkout doesn't replace it. It's
+  acknowledged and logged with both subscription ids for manual cancellation and refund
+  (`DEPLOYMENT.md`).
+- **Redeliveries:** a redelivered event is acknowledged without being applied again.
 
 ---
 
@@ -813,7 +908,11 @@ implicit:
   backend's only involvement is §1a's code exchange.)
 - Conversation history listing/browsing and full tool-call-trace-on-demand endpoints — described
   in the original design doc but not implemented (see `/v1/ask`'s note in §6).
-- A `/v1/byo-key` removal endpoint — only registration/rotation exists today (see §6).
+- ~~A `/v1/byo-key` removal endpoint — only registration/rotation exists today (see §6).~~
+  (Amended Phase D session 6 (pending live verification): `DELETE /v1/byo-key` now exists, §6.)
+- Live-mode Stripe. Only test-mode keys are accepted (Phase D session 6).
+- Plan changes, proration, tax, receipts, dunning emails, and any billing UI beyond Stripe's
+  hosted Checkout and customer portal.
 - Account linking of any kind — a person's Google and Microsoft identities are always separate
   accounts, whatever their emails (§1's cross-provider note). An explicit "link another
   provider" action while signed in is future work, not built.

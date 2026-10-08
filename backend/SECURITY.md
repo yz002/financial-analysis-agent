@@ -251,6 +251,11 @@ so this can be done without a hard cutover, unlike the Fernet case above.
    checkout.session.completed` (Stripe CLI) or the dashboard's "send test
    webhook" — and confirm the request returns 200 and a new row lands in
    `stripe_webhook_events`.
+   (Amended Phase D session 6 (pending live verification): prefer the
+   dashboard's **Resend** on a real `checkout.session.completed` from a test
+   checkout. `stripe trigger` creates a checkout with no
+   `client_reference_id`, which the webhook now acknowledges and ignores by
+   design (§8). It still proves the signature and the 200, but nothing more.)
 4. Once confirmed, the old signing secret can be left to expire per Stripe's
    own grace period (no manual step required — Stripe stops offering it as
    valid after the rollover window).
@@ -450,3 +455,69 @@ are amended to match.
 5. **Future work, not built:** deliberately linking a second provider through an explicit "link
    another provider" action taken while signed in, requiring an authenticated session plus a
    fresh sign-in with the second provider, and never keyed on email.
+
+---
+
+## 8. Billing and BYO keys (Phase D session 6, pending live verification)
+
+**Stripe is test-mode only in this phase.**
+- `billing.py` refuses any `STRIPE_SECRET_KEY` that doesn't start with `sk_test_` or `rk_test_`.
+  The billing routes then return `503 billing_unavailable` and log one WARNING naming the
+  failed check, never the value.
+- The webhook rejects any event with `livemode: true` (`400`).
+- The service still starts with a live key. Only billing is refused, so a billing
+  misconfiguration can't take sign-in and `/v1/ask` down with it.
+
+**Webhook trust.** The webhook is unauthenticated apart from Stripe's signature.
+- **Signature first:** it's verified on the raw body before any database access. A bad or
+  missing signature → `400`.
+- **State:** taken from Stripe's API at processing time (`stripe.Subscription.retrieve`), never
+  from the event body. A delayed or out-of-order event can't roll a subscription back.
+- **Outside the transaction:** that call runs before the database transaction opens, so a slow
+  Stripe call never holds a transaction or the idempotency marker's lock.
+- **Which account:** comes only from `client_reference_id`, which this backend sets from the
+  authenticated caller when creating the checkout. No request field from a client ever selects
+  an account.
+- **Ignored, not retried:** a checkout that isn't a subscription, has a malformed reference, or
+  names an account that doesn't exist is acknowledged with `200` and ignored, with a WARNING
+  carrying only the event id and type. Returning `500` would make Stripe retry it for days.
+- **Duplicate subscription:** two checkouts created before either completed can both succeed.
+  When an account already holds a different `active`/`trialing`/`past_due`/`unpaid`
+  subscription, the second is not written over it. The event is acknowledged, and one WARNING
+  logs both subscription ids (ids only, no email).
+  **Runbook:** find the newer subscription id from that WARNING in the Stripe dashboard, cancel
+  it immediately, and refund its payment. Checkout pages expire after 30 minutes (Stripe's
+  minimum), which narrows this window but can't close it.
+- **Logging:** no customer email is logged (§5 still holds).
+
+**Checkout and portal.**
+- Both require a session and take no request body. They act only on the caller's own account:
+  - checkout uses `account.id`;
+  - the portal looks up the caller's own `subscriptions` row for the Stripe customer, and
+    returns `404 no_billing_account` without one.
+- Checkout refuses (`409`) when the caller already has a live subscription.
+- Card data never reaches this backend or the extension: both are Stripe-hosted pages.
+- The extension opens only `https://checkout.stripe.com/` and `https://billing.stripe.com/` URLs
+  from these responses.
+
+**BYO keys.**
+- **Registration verifies the key with Anthropic** (one model-list call, no tokens) before
+  anything is stored, and before any database session is opened. A rejected key gets `422`, an
+  unreachable Anthropic `502`, and nothing is stored in either case. The log line names only
+  the exception class, never its message.
+- **Key-check oracle (accepted):** anyone can already test a key directly against Anthropic's
+  API, so this route adds no capability beyond what they have. It still requires a signed-in
+  session.
+- **Whitespace:** leading and trailing whitespace is stripped before the format check, and the
+  stripped key is what's stored. Before this, an unstripped key could pass the check and then
+  fail at Anthropic.
+- **Erased ciphertext:** a key that's removed (`DELETE /v1/byo-key`), replaced, or found
+  undecryptable has its `encrypted_key` overwritten with empty bytes. The row is kept for audit
+  (`created_at`, `last_used_at`, `is_active = false`). Rows deactivated before this change still
+  held ciphertext; `DEPLOYMENT.md` records the one-time wipe.
+- **Not counted toward caps:** questions asked on a BYO key are recorded with
+  `usage_events.tier = 'byo_key'` at insert, and excluded from the free and paid counts.
+- **Request echo (noted only):** FastAPI's own `422` for a *malformed* request body echoes the
+  submitted input back to the same caller. That body could contain a key, but it only ever goes
+  back to the person who sent it, over TLS, and isn't logged. The extension never logs a BYO
+  error body.
