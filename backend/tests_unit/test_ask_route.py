@@ -457,10 +457,93 @@ def test_in_progress_counts_toward_the_question_caps():
             captured.append(statement)
             return type("R", (), {"scalar_one": lambda self: 0})()
 
-    gating._count_usage_events(_Session(), ACCOUNT_ID, datetime.now(timezone.utc), None)
+    gating._count_usage_events(_Session(), ACCOUNT_ID, datetime.now(timezone.utc))
     compiled = captured[0].compile(dialect=postgresql.dialect())
     counted = [v for v in compiled.params.values() if isinstance(v, (list, tuple))]
     assert any("in_progress" in values for values in counted)
+
+
+def _count_query_sql() -> str:
+    from app import gating
+
+    captured = []
+
+    class _Session:
+        def execute(self, statement):
+            captured.append(statement)
+            return type("R", (), {"scalar_one": lambda self: 0})()
+
+    gating._count_usage_events(_Session(), ACCOUNT_ID, datetime(2026, 10, 1, tzinfo=timezone.utc))
+    return _compile(captured[0])
+
+
+def test_an_in_progress_byo_question_is_excluded_from_the_count_while_still_running():
+    """Session 6: 'in_progress' is a counted outcome, and the same query excludes tier
+    'byo_key' -- so a (in_progress, byo_key) row never counts, even mid-run, while an
+    (in_progress, NULL/free/paid) row does. tests/test_tier_gating.py proves the same against
+    real Postgres."""
+    sql = _count_query_sql()
+    assert "'in_progress'" in sql
+    assert "usage_events.tier IS DISTINCT FROM 'byo_key'" in sql
+
+
+def test_the_count_has_no_upper_bound_on_occurred_at():
+    """A late renewal webhook can't freeze the paid count: only a lower bound is applied."""
+    sql = _count_query_sql()
+    assert "usage_events.occurred_at >= " in sql
+    assert "usage_events.occurred_at < " not in sql
+
+
+# --- tier is written when the row is inserted (session 6) -----------------------------------
+
+
+def test_the_in_progress_row_carries_its_tier_at_insert(world, monkeypatch):
+    monkeypatch.setattr(app_main, "run_agent", lambda question, **kwargs: _result(question))
+    assert _ask().status_code == 200
+    [row] = [o for s in world.sessions for o in s.added if isinstance(o, UsageEvent)]
+    assert row.outcome == "in_progress"  # as constructed -- the completion is a separate UPDATE
+    assert row.tier == "free"
+
+
+def test_the_rejected_row_carries_its_tier_at_insert(world, monkeypatch):
+    monkeypatch.setattr(app_main, "evaluate_ask_gate", _rejected_gate)
+    assert _ask().status_code == 429
+    [rejected] = [o for s in world.sessions for o in s.added if isinstance(o, UsageEvent)]
+    assert rejected.outcome == "rejected_daily_cap"
+    assert rejected.tier == "free"
+
+
+def test_a_byo_question_row_carries_tier_byo_key_at_insert(world, monkeypatch):
+    from db.models import ByoKey
+
+    key_id = uuid.uuid4()
+    world.rows[(ByoKey, key_id)] = ByoKey(
+        id=key_id, account_id=ACCOUNT_ID, encrypted_key=b"ciphertext", is_active=True
+    )
+    app_main.app.dependency_overrides[app_main.get_current_account] = lambda: Account(
+        id=ACCOUNT_ID, byo_key_id=key_id
+    )
+    monkeypatch.setattr(
+        app_main,
+        "evaluate_ask_gate",
+        lambda session, account, now: AskGateDecision(
+            tier="byo_key", allowed=True, questions_used=0, cap=None, resets_at=None,
+            reject_outcome=None, reject_error=None, prompt_byo_key=False, prompt_upgrade=False,
+        ),
+    )
+    monkeypatch.setattr(app_main, "decrypt_byo_key", lambda encrypted: "sk-ant-api03-" + "x" * 30)
+    seen = {}
+
+    def run_agent(question, **kwargs):
+        seen.update(kwargs)
+        return _result(question)
+
+    monkeypatch.setattr(app_main, "run_agent", run_agent)
+    assert _ask().status_code == 200
+    [row] = [o for s in world.sessions for o in s.added if isinstance(o, UsageEvent)]
+    assert row.outcome == "in_progress"
+    assert row.tier == "byo_key"
+    assert "client" in seen  # the run used the caller's own key
 
 
 def test_agent_logger_has_its_own_handler_and_does_not_propagate():

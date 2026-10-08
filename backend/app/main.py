@@ -124,7 +124,12 @@ from .ask_rules import (
     CSV_TOOLS,
 )
 from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
-from .gating import MAPPING_PROPOSAL_OUTCOME, evaluate_ask_gate, evaluate_mapping_proposal_gate
+from .gating import (
+    MAPPING_PROPOSAL_OUTCOME,
+    account_billing_status,
+    evaluate_ask_gate,
+    evaluate_mapping_proposal_gate,
+)
 from .history import MAX_PRIOR_TURNS, build_prior_messages
 from .schemas import (
     AskRequest,
@@ -147,6 +152,7 @@ from .schemas import (
     ProposeMappingResponse,
     RevokeAllSessionsResponse,
     UsageResponse,
+    UsageSubscription,
 )
 
 app = FastAPI(title="Sheets Add-on Backend")
@@ -598,6 +604,7 @@ def _charge(
                     occurred_at=now,
                     turn_id=None,
                     outcome=decision.reject_outcome,
+                    tier=decision.tier,
                 )
             )
             session.commit()
@@ -647,7 +654,9 @@ def _charge(
             byo_client = anthropic.Anthropic(api_key=raw_key, timeout=MODEL_CALL_TIMEOUT_SECONDS)
             byo_key.last_used_at = now
 
-        # Counted from here, even if the run crashes later (it then moves to 'error').
+        # Counted from here, even if the run crashes later (it then moves to 'error') -- unless
+        # tier is 'byo_key': set here, at insert, and never changed by the later transitions,
+        # so a BYO question is excluded from the caps even while it's still running.
         usage_event = UsageEvent(
             account_id=account.id,
             occurred_at=now,
@@ -655,6 +664,7 @@ def _charge(
             outcome=IN_PROGRESS,
             request_id=request_id,
             request_fingerprint=fingerprint,
+            tier=decision.tier,
         )
         session.add(usage_event)
         try:
@@ -1289,9 +1299,12 @@ def revoke_all_sessions(
 
 @app.get("/v1/usage", response_model=UsageResponse)
 def usage(account: Account = Depends(get_current_account)) -> UsageResponse:
+    """EXTENSION_INTEGRATION.md SS6 /v1/usage (amended Phase D session 6): the gate's view
+    plus resets_at, has_byo_key and the subscription's own state, whatever the tier."""
     session = get_session()
     try:
         decision = evaluate_ask_gate(session, account, datetime.now(timezone.utc))
+        status = account_billing_status(session, account)
     finally:
         session.close()
 
@@ -1299,6 +1312,17 @@ def usage(account: Account = Depends(get_current_account)) -> UsageResponse:
         account_id=str(account.id),
         tier=decision.tier,
         byo_key_required=decision.prompt_byo_key,
+        resets_at=decision.resets_at,
+        has_byo_key=status.has_byo_key,
+        subscription=(
+            UsageSubscription(
+                status=status.subscription.status,
+                cancel_at_period_end=status.subscription.cancel_at_period_end,
+                current_period_end=status.subscription.current_period_end,
+            )
+            if status.subscription is not None
+            else None
+        ),
     )
     if decision.tier == "free":
         response.questions_today = decision.questions_used

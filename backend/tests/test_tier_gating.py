@@ -52,7 +52,12 @@ def _seed_byo_key(session, account_id: str, is_active: bool) -> ByoKey:
 
 
 def _seed_subscription(
-    session, account_id: str, status: str, current_period_start: datetime, current_period_end: datetime
+    session,
+    account_id: str,
+    status: str,
+    current_period_start: datetime,
+    current_period_end: datetime,
+    cancel_at_period_end: bool = False,
 ) -> Subscription:
     subscription = Subscription(
         account_id=uuid.UUID(account_id),
@@ -61,16 +66,26 @@ def _seed_subscription(
         status=status,
         current_period_start=current_period_start,
         current_period_end=current_period_end,
+        cancel_at_period_end=cancel_at_period_end,
     )
     session.add(subscription)
     session.flush()
     return subscription
 
 
-def _seed_usage_events(session, account_id: str, count: int, occurred_at: datetime) -> None:
+def _seed_usage_events(
+    session,
+    account_id: str,
+    count: int,
+    occurred_at: datetime,
+    outcome: str = "answered",
+    tier: str | None = None,
+) -> None:
     for _ in range(count):
         session.add(
-            UsageEvent(account_id=uuid.UUID(account_id), occurred_at=occurred_at, outcome="answered")
+            UsageEvent(
+                account_id=uuid.UUID(account_id), occurred_at=occurred_at, outcome=outcome, tier=tier
+            )
         )
     session.flush()
 
@@ -393,6 +408,160 @@ def test_usage_endpoint_paid_tier_at_cap_prompts_byo_key(auth_session):
     body = resp.json()
     assert body["tier"] == "paid"
     assert body["byo_key_required"] is True
+
+
+# --- Phase D session 6: tier exclusion, the open-ended paid window, new /v1/usage fields -------
+
+
+def test_paid_usage_after_period_end_still_counts(auth_session):
+    """A late renewal webhook: the period has ended but the row still says active. The count
+    keeps running from current_period_start, so the cap still applies."""
+    account_id, _ = auth_session()
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        _seed_subscription(session, account_id, "active", now - timedelta(days=31), now - timedelta(days=1))
+        _seed_usage_events(session, account_id, PAID_MONTHLY_CAP, now - timedelta(hours=1))
+        session.commit()
+
+        decision = evaluate_ask_gate(session, _account(session, account_id), now)
+        assert decision.tier == "paid"
+        assert decision.questions_used == PAID_MONTHLY_CAP
+        assert decision.allowed is False
+    finally:
+        session.close()
+
+
+def test_byo_key_questions_dont_count_toward_the_free_cap_after_the_key_is_removed(auth_session):
+    account_id, _ = auth_session()
+    session = get_session()
+    try:
+        _seed_byo_key(session, account_id, is_active=False)  # registered earlier, now removed
+        now = datetime.now(timezone.utc)
+        _seed_usage_events(session, account_id, FREE_DAILY_CAP, now, tier="byo_key")
+        session.commit()
+
+        decision = evaluate_ask_gate(session, _account(session, account_id), now)
+        assert decision.tier == "free"
+        assert decision.questions_used == 0
+        assert decision.allowed is True
+    finally:
+        session.close()
+
+
+def test_an_in_progress_byo_question_is_excluded_while_still_running(auth_session):
+    """The Postgres twin of tests_unit's compiled-SQL check: an (in_progress, byo_key) row
+    doesn't count; an (in_progress, free) row does."""
+    account_id, _ = auth_session()
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        _seed_usage_events(session, account_id, 1, now, outcome="in_progress", tier="byo_key")
+        _seed_usage_events(session, account_id, 1, now, outcome="in_progress", tier="free")
+        session.commit()
+
+        decision = evaluate_ask_gate(session, _account(session, account_id), now)
+        assert decision.tier == "free"
+        assert decision.questions_used == 1
+    finally:
+        session.close()
+
+
+def test_legacy_null_tier_rows_still_count(auth_session):
+    account_id, _ = auth_session()
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        _seed_usage_events(session, account_id, FREE_DAILY_CAP, now, tier=None)
+        session.commit()
+
+        decision = evaluate_ask_gate(session, _account(session, account_id), now)
+        assert decision.questions_used == FREE_DAILY_CAP
+        assert decision.allowed is False
+    finally:
+        session.close()
+
+
+def test_usage_reports_a_past_due_subscription_under_the_free_tier(auth_session):
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        _seed_subscription(session, account_id, "past_due", now - timedelta(days=1), now + timedelta(days=29))
+        session.commit()
+    finally:
+        session.close()
+
+    body = client.get("/v1/usage", headers=headers).json()
+    assert body["tier"] == "free"
+    assert body["subscription"]["status"] == "past_due"
+    assert body["subscription"]["cancel_at_period_end"] is False
+    assert body["subscription"]["current_period_end"] is not None
+
+
+def test_usage_reports_a_scheduled_cancellation(auth_session):
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        _seed_subscription(
+            session, account_id, "active", now - timedelta(days=1), now + timedelta(days=29),
+            cancel_at_period_end=True,
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    body = client.get("/v1/usage", headers=headers).json()
+    assert body["tier"] == "paid"
+    assert body["subscription"] == {
+        "status": "active",
+        "cancel_at_period_end": True,
+        "current_period_end": body["period_ends_at"],
+    }
+    assert body["resets_at"] == body["period_ends_at"]
+
+
+def test_usage_reports_resets_at_and_has_byo_key(auth_session):
+    account_id, headers = auth_session()
+    body = client.get("/v1/usage", headers=headers).json()
+    assert body["tier"] == "free"
+    assert body["has_byo_key"] is False
+    assert body["subscription"] is None
+    resets_at = datetime.fromisoformat(body["resets_at"])
+    now = datetime.now(timezone.utc)
+    assert resets_at == now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    session = get_session()
+    try:
+        _seed_byo_key(session, account_id, is_active=True)
+        session.commit()
+    finally:
+        session.close()
+
+    body = client.get("/v1/usage", headers=headers).json()
+    assert body["tier"] == "byo_key"
+    assert body["has_byo_key"] is True
+    assert body["resets_at"] is None
+
+
+def test_ask_writes_the_tier_on_the_usage_row(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    monkeypatch.setattr(
+        app_main, "run_agent", lambda question, prior_messages=None, prior_tool_calls=None, excluded_phrases=None: _fake_result(question)
+    )
+    resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    session = get_session()
+    try:
+        row = session.execute(
+            text("SELECT outcome, tier FROM usage_events WHERE account_id = :id"), {"id": account_id}
+        ).fetchone()
+        assert row.outcome == "answered"
+        assert row.tier == "free"  # written at insert, unchanged by the completion
+    finally:
+        session.close()
 
 
 # --- dropped-column confirmation --------------------------------------------------------------

@@ -129,6 +129,12 @@ class ConfirmResponse(BaseModel):
     currency: str | None = None
 
 
+class UsageSubscription(BaseModel):
+    status: str  # Stripe's value verbatim
+    cancel_at_period_end: bool  # true once a cancellation is scheduled, by either Stripe field
+    current_period_end: datetime
+
+
 class UsageResponse(BaseModel):
     """
     Shape per the monetization amendment's SS7.2 (replaces the original free_window_ends_at
@@ -145,6 +151,12 @@ class UsageResponse(BaseModel):
     monthly_cap: int | None = None
     period_ends_at: datetime | None = None
     byo_key_required: bool
+    # Phase D session 6 (additive): when the current cap next clears (free: next 00:00 UTC;
+    # paid: current_period_end; byo_key: null), whether an active BYO key is registered, and
+    # the subscription's own state whatever the tier -- a past_due subscriber's tier is "free".
+    resets_at: datetime | None = None
+    has_byo_key: bool = False
+    subscription: UsageSubscription | None = None
 
 
 class CheckoutSessionResponse(BaseModel):

@@ -35,6 +35,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -273,6 +274,7 @@ class UsageEvent(Base):
         # Composite, not a single-column index on occurred_at alone -- the daily-cap query
         # (design doc SS2.2) always filters by account_id and a date range together.
         Index("ix_usage_events_account_id_occurred_at", "account_id", "occurred_at"),
+        CheckConstraint("tier IN ('free', 'paid', 'byo_key')", name="ck_usage_events_tier"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -289,3 +291,8 @@ class UsageEvent(Base):
     # attempt carries them -- a rejected (429) row never does, so the id stays usable.
     request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     request_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase D session 6 (migration 0006): the tier that paid for a question ('free' | 'paid' |
+    # 'byo_key'), set when a question row (in_progress or rejected_*) is inserted and never
+    # changed afterwards. app/gating.py excludes 'byo_key' rows from the caps. NULL on rows
+    # from before 0006 and on mapping_proposal rows -- NULL rows count, as they always did.
+    tier: Mapped[str | None] = mapped_column(Text, nullable=True)

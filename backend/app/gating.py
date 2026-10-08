@@ -17,6 +17,14 @@ per-question cost budget of under a cent, which a multi-round Claude tool-callin
 (src/agent/agent.py's DEFAULT_MAX_ITERATIONS=8, with cumulative tool-result context
 resent every round) plausibly exceeds several times over -- confirmed with the user this
 session rather than carried over from the design doc unexamined.
+
+Phase D session 6 (EXTENSION_INTEGRATION.md SS6 /v1/usage, amended session 6):
+- Questions asked on a BYO key (usage_events.tier = 'byo_key', migration 0006) never count
+  toward the free or paid caps.
+- The paid window counts from current_period_start with no upper bound. Rows can't exist in
+  the future, so the old `< current_period_end` bound only mattered once the period had ended
+  without Stripe's renewal webhook arriving -- and then it froze the count, leaving the
+  account uncapped. Now the count keeps running against the cap until the renewal arrives.
 """
 
 from dataclasses import dataclass
@@ -38,6 +46,15 @@ PAID_MONTHLY_CAP = 50
 # "in_progress" (Phase D session 5) counts too: a question that's still running is a real
 # attempt, so a burst of concurrent or long-running questions can't slip past the cap.
 _COUNTED_OUTCOMES = ("answered", "hit_iteration_cap", "error", "in_progress")
+
+# usage_events.tier of a question asked on the caller's own Anthropic key (migration 0006).
+# Those questions cost this service nothing, so they never count toward the free or paid caps
+# -- including while still in_progress, since tier is set when the row is inserted. NULL-tier
+# rows (before 0006) keep counting, as they always did.
+BYO_KEY_TIER = "byo_key"
+
+# Subscriptions in these states get the paid tier; every other state falls through to free.
+_PAID_STATUSES = ("active", "trialing")
 
 # Fresh model calls from POST /v1/csv/{id}/propose-mapping, per account, in a rolling 24h
 # window, regardless of tier (a proposal always uses the master key). Counted from
@@ -86,15 +103,34 @@ class AskGateDecision:
     prompt_upgrade: bool
 
 
-def _count_usage_events(session, account_id, start: datetime, end: datetime | None) -> int:
+def _count_usage_events(session, account_id, since: datetime) -> int:
+    """Counted question rows since `since`, excluding questions asked on a BYO key."""
     query = select(func.count()).select_from(UsageEvent).where(
         UsageEvent.account_id == account_id,
-        UsageEvent.occurred_at >= start,
+        UsageEvent.occurred_at >= since,
         UsageEvent.outcome.in_(_COUNTED_OUTCOMES),
+        UsageEvent.tier.is_distinct_from(BYO_KEY_TIER),
     )
-    if end is not None:
-        query = query.where(UsageEvent.occurred_at < end)
     return session.execute(query).scalar_one()
+
+
+def _active_byo_key(session, account) -> ByoKey | None:
+    if account.byo_key_id is None:
+        return None
+    byo_key = session.get(ByoKey, account.byo_key_id)
+    # is_active isn't spelled out verbatim in SS7.2's "account.byo_key_id IS NOT NULL"
+    # phrasing, but byo_keys.is_active exists precisely to let a revoked key stop granting
+    # access without deleting the audit row -- checking it here closes that gap rather than
+    # treating a revoked key as still-unlimited access.
+    if byo_key is not None and byo_key.is_active:
+        return byo_key
+    return None
+
+
+def _subscription(session, account_id) -> Subscription | None:
+    return session.execute(
+        select(Subscription).where(Subscription.account_id == account_id)
+    ).scalar_one_or_none()
 
 
 def evaluate_ask_gate(session, account, now: datetime) -> AskGateDecision:
@@ -103,36 +139,23 @@ def evaluate_ask_gate(session, account, now: datetime) -> AskGateDecision:
     against usage_events.occurred_at/subscriptions.current_period_* (both tz-aware
     DateTime columns) and used to derive the free tier's UTC-calendar-day boundary.
     """
-    if account.byo_key_id is not None:
-        byo_key = session.get(ByoKey, account.byo_key_id)
-        # is_active isn't spelled out verbatim in SS7.2's "account.byo_key_id IS NOT
-        # NULL" phrasing, but byo_keys.is_active exists precisely to let a revoked key
-        # stop granting access without deleting the audit row -- checking it here closes
-        # that gap rather than treating a revoked key as still-unlimited access.
-        if byo_key is not None and byo_key.is_active:
-            return AskGateDecision(
-                tier="byo_key",
-                allowed=True,
-                questions_used=0,
-                cap=None,
-                resets_at=None,
-                reject_outcome=None,
-                reject_error=None,
-                prompt_byo_key=False,
-                prompt_upgrade=False,
-            )
-
-    subscription = session.execute(
-        select(Subscription).where(Subscription.account_id == account.id)
-    ).scalar_one_or_none()
-
-    if subscription is not None and subscription.status in ("active", "trialing"):
-        used = _count_usage_events(
-            session,
-            account.id,
-            subscription.current_period_start,
-            subscription.current_period_end,
+    if _active_byo_key(session, account) is not None:
+        return AskGateDecision(
+            tier="byo_key",
+            allowed=True,
+            questions_used=0,
+            cap=None,
+            resets_at=None,
+            reject_outcome=None,
+            reject_error=None,
+            prompt_byo_key=False,
+            prompt_upgrade=False,
         )
+
+    subscription = _subscription(session, account.id)
+
+    if subscription is not None and subscription.status in _PAID_STATUSES:
+        used = _count_usage_events(session, account.id, subscription.current_period_start)
         allowed = used < PAID_MONTHLY_CAP
         return AskGateDecision(
             tier="paid",
@@ -150,7 +173,7 @@ def evaluate_ask_gate(session, account, now: datetime) -> AskGateDecision:
     # subscription row at all), which fall through here rather than being hard-blocked.
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     next_midnight = today_start + timedelta(days=1)
-    used = _count_usage_events(session, account.id, today_start, None)
+    used = _count_usage_events(session, account.id, today_start)
     allowed = used < FREE_DAILY_CAP
     return AskGateDecision(
         tier="free",
@@ -162,4 +185,37 @@ def evaluate_ask_gate(session, account, now: datetime) -> AskGateDecision:
         reject_error=None if allowed else "daily_cap_reached",
         prompt_byo_key=False,
         prompt_upgrade=not allowed,
+    )
+
+
+@dataclass
+class SubscriptionSummary:
+    status: str  # Stripe's value verbatim
+    cancel_at_period_end: bool
+    current_period_end: datetime
+
+
+@dataclass
+class AccountBillingStatus:
+    """What GET /v1/usage reports beyond the gate decision: whether a BYO key is active, and
+    the subscription's own state whatever the tier -- so a past_due subscriber (tier free) or a
+    subscriber with a BYO key (tier byo_key) still sees their subscription."""
+
+    has_byo_key: bool
+    subscription: SubscriptionSummary | None
+
+
+def account_billing_status(session, account) -> AccountBillingStatus:
+    subscription = _subscription(session, account.id)
+    return AccountBillingStatus(
+        has_byo_key=_active_byo_key(session, account) is not None,
+        subscription=(
+            SubscriptionSummary(
+                status=subscription.status,
+                cancel_at_period_end=subscription.cancel_at_period_end,
+                current_period_end=subscription.current_period_end,
+            )
+            if subscription is not None
+            else None
+        ),
     )
