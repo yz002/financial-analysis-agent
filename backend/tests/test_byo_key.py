@@ -43,6 +43,14 @@ def _byo_encryption_key(monkeypatch):
     monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", _TEST_ENCRYPTION_KEY)
 
 
+@pytest.fixture(autouse=True)
+def _anthropic_accepts_the_key(monkeypatch):
+    """Phase D session 6: POST /v1/byo-key asks Anthropic whether the key works before storing
+    it. The keys here are fake, so that check is stubbed to "ok"; its own classification is
+    covered without a database in tests_unit/test_byo_unit.py."""
+    monkeypatch.setattr(app_main, "_check_byo_key", lambda raw_key: "ok")
+
+
 def _seed_byo_key(session, account_id: str, is_active: bool) -> ByoKey:
     """Seeds an active byo_keys row directly and repoints accounts.byo_key_id at it --
     the account row itself already exists (created via a real /v1/auth/exchange call by the
@@ -162,6 +170,7 @@ def test_register_byo_key_replaces_prior_active_key(auth_session):
 
         old_key = session.get(ByoKey, first_key_id)
         assert old_key.is_active is False  # soft-deactivated, not deleted -- audit trail
+        assert old_key.encrypted_key == b""  # session 6: and its ciphertext erased
 
         new_key = session.get(ByoKey, account.byo_key_id)
         assert new_key.is_active is True
@@ -177,6 +186,104 @@ def test_register_byo_key_replaces_prior_active_key(auth_session):
         assert active_count == 1
     finally:
         session.close()
+
+
+# --- Phase D session 6: removal, and erased ciphertext --------------------------------------
+
+
+def _byo_rows(account_id: str):
+    session = get_session()
+    try:
+        return session.execute(
+            text(
+                "SELECT id, is_active, length(encrypted_key) AS ciphertext_length FROM byo_keys "
+                "WHERE account_id = :id ORDER BY created_at"
+            ),
+            {"id": account_id},
+        ).fetchall()
+    finally:
+        session.close()
+
+
+def _account_byo_key_id(account_id: str):
+    session = get_session()
+    try:
+        return session.get(Account, uuid.UUID(account_id)).byo_key_id
+    finally:
+        session.close()
+
+
+def test_remove_byo_key_erases_ciphertext_and_unsets_the_account(auth_session):
+    account_id, headers = auth_session()
+    assert client.post("/v1/byo-key", json={"api_key": _VALID_KEY}, headers=headers).status_code == 200
+
+    resp = client.delete("/v1/byo-key", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"removed": True}
+
+    assert _account_byo_key_id(account_id) is None
+    [row] = _byo_rows(account_id)  # kept for audit
+    assert row.is_active is False
+    assert row.ciphertext_length == 0
+
+    usage = client.get("/v1/usage", headers=headers).json()
+    assert usage["tier"] == "free"
+    assert usage["has_byo_key"] is False
+
+
+def test_remove_byo_key_is_idempotent_without_a_key(auth_session):
+    account_id, headers = auth_session()
+    for _ in range(2):
+        resp = client.delete("/v1/byo-key", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"removed": True}
+    assert _byo_rows(account_id) == []
+
+
+def test_registering_erases_every_earlier_ciphertext_including_old_inactive_rows(auth_session):
+    """A row deactivated before session 6 still held its ciphertext. Registering a key retires
+    every earlier row for the account, so those are erased too."""
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        session.add(
+            ByoKey(
+                account_id=uuid.UUID(account_id),
+                encrypted_key=encrypt_byo_key(_OTHER_VALID_KEY),
+                is_active=False,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    assert client.post("/v1/byo-key", json={"api_key": _VALID_KEY}, headers=headers).status_code == 200
+
+    rows = _byo_rows(account_id)
+    assert len(rows) == 2
+    active = [r for r in rows if r.is_active]
+    retired = [r for r in rows if not r.is_active]
+    assert len(active) == 1 and active[0].ciphertext_length > 0
+    assert len(retired) == 1 and retired[0].ciphertext_length == 0
+
+
+def test_decrypt_failure_erases_the_ciphertext(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        byo_key = _seed_byo_key(session, account_id, is_active=True)
+        session.commit()
+        byo_key_id = byo_key.id
+    finally:
+        session.close()
+
+    monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
+    assert resp.status_code == 500, resp.text
+
+    [row] = [r for r in _byo_rows(account_id) if r.id == byo_key_id]
+    assert row.is_active is False
+    assert row.ciphertext_length == 0
 
 
 # --- /v1/ask BYO-key wiring ---------------------------------------------------------------

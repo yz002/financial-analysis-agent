@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 import anthropic
 import stripe
@@ -136,6 +137,7 @@ from .schemas import (
     AskResponse,
     AuthExchangeRequest,
     AuthExchangeResponse,
+    ByoKeyRemoveResponse,
     ByoKeyRequest,
     ByoKeyResponse,
     CheckoutSessionResponse,
@@ -641,6 +643,8 @@ def _charge(
                     row = deactivate_session.get(ByoKey, byo_key.id)
                     if row is not None:
                         row.is_active = False
+                        # Unreadable anyway; erased like any retired key (Phase D session 6).
+                        row.encrypted_key = b""
                         deactivate_session.commit()
                 finally:
                     deactivate_session.close()
@@ -1334,31 +1338,72 @@ def usage(account: Account = Depends(get_current_account)) -> UsageResponse:
     return response
 
 
+# The registration check's own short timeout, separate from MODEL_CALL_TIMEOUT_SECONDS: listing
+# models is a single fast metadata call, and the person is waiting on the form.
+BYO_KEY_CHECK_TIMEOUT_SECONDS = 10
+
+
+def _check_byo_key(raw_key: str) -> Literal["ok", "rejected", "unavailable"]:
+    """
+    Asks Anthropic whether the key works by listing models: a metadata call that generates no
+    tokens, so it spends nothing on the caller's account. Runs with no DB session open. Only
+    the exception's class name is logged -- never str(e), and never the key.
+    """
+    client = anthropic.Anthropic(
+        api_key=raw_key, timeout=BYO_KEY_CHECK_TIMEOUT_SECONDS, max_retries=0
+    )
+    try:
+        client.models.list(limit=1)
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+        logger.warning("BYO key check: Anthropic refused the key (%s)", type(e).__name__)
+        return "rejected"
+    except anthropic.APIError as e:
+        logger.warning("BYO key check couldn't reach a verdict (%s)", type(e).__name__)
+        return "unavailable"
+    return "ok"
+
+
+def _retire_byo_keys(session, account_id: uuid.UUID) -> None:
+    """Deactivates every BYO key row this account has and erases its ciphertext. The rows stay
+    for audit (created_at, last_used_at); the old key can't be recovered from them, even with
+    BYO_KEY_ENCRYPTION_KEY (backend/SECURITY.md SS8)."""
+    session.execute(
+        update(ByoKey)
+        .where(ByoKey.account_id == account_id)
+        .values(is_active=False, encrypted_key=b"")
+    )
+
+
 @app.post("/v1/byo-key", response_model=ByoKeyResponse)
 def register_byo_key(
     request: ByoKeyRequest, account: Account = Depends(get_current_account)
 ) -> ByoKeyResponse:
     """
-    Registers (or rotates) the caller's own Anthropic API key. A new key always replaces
-    any currently active one for this account -- soft-deactivating the old byo_keys row
-    rather than rejecting the request -- matching is_active's stated audit-trail purpose
-    (design doc SS4) and giving a caller a one-call way to rotate a leaked/expired key,
-    since there's no separate removal endpoint (out of scope for Phase B session 8; see
-    NOTES.md).
+    Registers (or rotates) the caller's own Anthropic API key (EXTENSION_INTEGRATION.md SS6,
+    amended Phase D session 6). In order, with nothing stored unless every step passes:
+      1. strip whitespace, then the format check (422, the original string detail);
+      2. ask Anthropic whether the key works -- no tokens, no DB session open (422
+         byo_key_rejected, or 502 byo_key_check_failed);
+      3. encrypt, retire every earlier key (ciphertext erased), store the new one and point
+         the account at it, in one transaction.
     """
-    if not is_valid_byo_key_format(request.api_key):
+    raw_key = request.api_key.strip()
+    if not is_valid_byo_key_format(raw_key):
         raise HTTPException(
             status_code=422, detail="That doesn't look like a valid Anthropic API key."
         )
-    encrypted = encrypt_byo_key(request.api_key)
+
+    verdict = _check_byo_key(raw_key)
+    if verdict == "rejected":
+        raise HTTPException(status_code=422, detail={"error": "byo_key_rejected"})
+    if verdict == "unavailable":
+        raise HTTPException(status_code=502, detail={"error": "byo_key_check_failed"})
+
+    encrypted = encrypt_byo_key(raw_key)
 
     session = get_session()
     try:
-        session.execute(
-            update(ByoKey)
-            .where(ByoKey.account_id == account.id, ByoKey.is_active.is_(True))
-            .values(is_active=False)
-        )
+        _retire_byo_keys(session, account.id)
         new_key = ByoKey(account_id=account.id, encrypted_key=encrypted, is_active=True)
         session.add(new_key)
         session.flush()  # populate new_key.id before repointing the FK below
@@ -1370,6 +1415,23 @@ def register_byo_key(
         session.close()
 
     return ByoKeyResponse(registered=True)
+
+
+@app.delete("/v1/byo-key", response_model=ByoKeyRemoveResponse)
+def remove_byo_key(account: Account = Depends(get_current_account)) -> ByoKeyRemoveResponse:
+    """
+    Removes the caller's BYO key (EXTENSION_INTEGRATION.md SS6, new Phase D session 6): every
+    key row is deactivated with its ciphertext erased, and the account stops pointing at one,
+    so the next question uses the free or paid tier. Idempotent -- the same 200 with no key.
+    """
+    session = get_session()
+    try:
+        session.execute(update(Account).where(Account.id == account.id).values(byo_key_id=None))
+        _retire_byo_keys(session, account.id)
+        session.commit()
+    finally:
+        session.close()
+    return ByoKeyRemoveResponse(removed=True)
 
 
 def _billing_page(title: str, message: str) -> str:

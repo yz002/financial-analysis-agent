@@ -177,6 +177,10 @@ class ByoKeyResponse(BaseModel):
     registered: bool
 
 
+class ByoKeyRemoveResponse(BaseModel):
+    removed: bool
+
+
 class AuthExchangeRequest(BaseModel):
     provider: Literal["google", "microsoft"]
     # Microsoft: a pre-exchanged OAuth access token -- Azure's "Single-page application"
