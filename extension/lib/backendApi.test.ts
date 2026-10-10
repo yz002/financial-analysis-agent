@@ -3,6 +3,11 @@ import {
   ask,
   BackendApiError,
   confirmMapping,
+  createCheckoutSession,
+  createPortalSession,
+  getUsage,
+  registerByoKey,
+  removeByoKey,
   exchangeGoogleDataToken,
   exchangeToken,
   logout,
@@ -300,5 +305,76 @@ describe('ask (session 5)', () => {
     }));
     const other = (await ask('t', BODY).catch((e: unknown) => e)) as BackendApiError;
     expect(other.fromBackend).toBe(false);
+  });
+});
+
+describe('usage, billing and BYO key (Phase D session 6)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubFetch(json: unknown) {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => json });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('getUsage is a GET with the session token and no body', async () => {
+    const fetchMock = stubFetch({ tier: 'free' });
+    await getUsage('tok');
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/usage`);
+    expect(init.method).toBe('GET');
+    expect(init.headers['Authorization']).toBe('Bearer tok');
+    expect(init.body).toBeUndefined();
+    expect(init.headers['Content-Type']).toBeUndefined();
+  });
+
+  it('createCheckoutSession and createPortalSession are bodyless authenticated POSTs', async () => {
+    const fetchMock = stubFetch({ checkout_url: 'https://checkout.stripe.com/x' });
+    expect(await createCheckoutSession('tok')).toEqual({ checkout_url: 'https://checkout.stripe.com/x' });
+    stubFetch({});
+    const portalFetch = stubFetch({ portal_url: 'https://billing.stripe.com/p' });
+    expect(await createPortalSession('tok')).toEqual({ portal_url: 'https://billing.stripe.com/p' });
+
+    for (const [mock, path] of [
+      [fetchMock, '/v1/billing/checkout-session'],
+      [portalFetch, '/v1/billing/portal-session'],
+    ] as const) {
+      const [url, init] = mock.mock.calls[0]!;
+      expect(url).toBe(`${BACKEND_BASE_URL}${path}`);
+      expect(init.method).toBe('POST');
+      expect(init.headers['Authorization']).toBe('Bearer tok');
+      expect(init.body).toBeUndefined();
+    }
+  });
+
+  it('registerByoKey sends the key once, in the body', async () => {
+    const fetchMock = stubFetch({ registered: true });
+    await registerByoKey('tok', 'sk-ant-api03-abc');
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/byo-key`);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ api_key: 'sk-ant-api03-abc' });
+    expect(String(url)).not.toContain('sk-ant');
+  });
+
+  it('removeByoKey is an authenticated DELETE with no body', async () => {
+    const fetchMock = stubFetch({ removed: true });
+    expect(await removeByoKey('tok')).toEqual({ removed: true });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`${BACKEND_BASE_URL}/v1/byo-key`);
+    expect(init.method).toBe('DELETE');
+    expect(init.headers['Authorization']).toBe('Bearer tok');
+    expect(init.body).toBeUndefined();
+  });
+
+  it('a billing error keeps its structured detail', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 409, json: async () => ({ detail: { error: 'subscription_exists' } }),
+    }));
+    const error = (await createCheckoutSession('tok').catch((e: unknown) => e)) as BackendApiError;
+    expect(error.status).toBe(409);
+    expect(error.detail).toEqual({ error: 'subscription_exists' });
   });
 });

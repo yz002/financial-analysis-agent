@@ -135,7 +135,9 @@ button:disabled {
   border-color: var(--color-accent-text);
 }
 
-/* Cards: read panel (Phase D session 3b), mapping screen and active statement (session 4). */
+/* Cards: read panel (Phase D session 3b), mapping screen and active statement (session 4),
+   usage and billing (session 6). */
+#usage-panel,
 #read-panel,
 #mapping-panel,
 #statement-card {
@@ -536,4 +538,82 @@ button:disabled {
   font-size: var(--text-meta-size);
   line-height: var(--text-meta-line-height);
   color: var(--color-warning);
+}
+
+/* Usage and billing (Phase D session 6). */
+#usage-panel p {
+  margin: 0;
+}
+
+#app #usage-reset,
+#app #usage-notice,
+#app #byo-key-note,
+#byo-key-form label {
+  font-size: var(--text-meta-size);
+  font-weight: var(--text-meta-weight);
+  line-height: var(--text-meta-line-height);
+  color: var(--color-ink-mute);
+}
+
+#usage-reset:empty,
+#usage-notice:empty,
+#byo-key-note:empty {
+  display: none;
+}
+
+#usage-actions,
+#byo-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+#byo-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--color-hairline);
+}
+
+#byo-key-input {
+  font-family: var(--font-mono);
+  font-size: var(--text-button-size);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  padding: var(--space-xs);
+  border: 1px solid var(--color-border-input);
+  border-radius: var(--radius-input);
+  min-width: 0;
+}
+
+#usage-upgrade {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+#usage-upgrade:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+#usage-manage,
+#usage-refresh,
+#byo-key-save,
+#byo-key-remove {
+  background: var(--color-canvas);
+  color: var(--color-accent-text);
+  border-color: var(--color-border-input);
+}
+
+#usage-manage:hover:not(:disabled),
+#usage-refresh:hover:not(:disabled),
+#byo-key-save:hover:not(:disabled),
+#byo-key-remove:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-accent-text);
+}
+
+#byo-key-input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }

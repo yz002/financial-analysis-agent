@@ -7,15 +7,21 @@ import { ChatController } from './chat';
 import {
   ask,
   confirmMapping,
+  createCheckoutSession,
+  createPortalSession,
   exchangeToken,
+  getUsage,
   logout,
   parseCsv,
   proposeMapping,
+  registerByoKey,
+  removeByoKey,
   revokeAllSessions,
   BackendApiError,
   type ConfirmMappingResponse,
   type UnparsedCell,
 } from '../../lib/backendApi';
+import { UsageController } from './usage';
 import {
   buildConfirmRequest,
   carryOver,
@@ -165,7 +171,9 @@ const chat = new ChatController(
       }
       if (mapping) updateMappingValidation(mapping);
     },
-    send: (sessionToken, body, signal) => ask(sessionToken, body, signal),
+    // Every attempt changes the count (or hits the cap), so the usage line follows it.
+    send: (sessionToken, body, signal) =>
+      ask(sessionToken, body, signal).finally(() => void usage.refresh()),
     onUnauthorized: () => handleUnauthorized(),
     onStatementNeedsReconfirm: async (message) => {
       // The statement can't be used for questions any more (deleted, or confirmed before
@@ -180,6 +188,43 @@ const chat = new ChatController(
     sleep: abortableSleep,
   },
 );
+
+// Usage, billing and the person's own Anthropic key (Phase D session 6). Shown while signed in.
+const usage = new UsageController(
+  {
+    panel: required('#usage-panel'),
+    line: required('#usage-line'),
+    resetLine: required('#usage-reset'),
+    notice: required('#usage-notice'),
+    upgradeButton: required('#usage-upgrade'),
+    manageButton: required('#usage-manage'),
+    refreshButton: required('#usage-refresh'),
+    keyForm: required('#byo-key-form'),
+    keyInput: required('#byo-key-input'),
+    saveKeyButton: required('#byo-key-save'),
+    removeKeyButton: required('#byo-key-remove'),
+    keyNote: required('#byo-key-note'),
+  },
+  {
+    getSession: () => getStoredSession(),
+    getUsage,
+    createCheckoutSession,
+    createPortalSession,
+    registerByoKey,
+    removeByoKey,
+    openTab: async (url) => {
+      await browser.tabs.create({ url });
+    },
+    onUnauthorized: () => handleUnauthorized(),
+    isVisible: () => document.visibilityState === 'visible',
+    now: () => Date.now(),
+    sleep: abortableSleep,
+  },
+);
+
+// Coming back from a Stripe tab: the panel shows again (or its window regains focus).
+document.addEventListener('visibilitychange', () => usage.onVisible());
+window.addEventListener('focus', () => usage.onVisible());
 
 // The connected spreadsheet and the grid last previewed from it -- panel memory only.
 let connectedFile: ConnectedFile | null = null;
@@ -550,6 +595,7 @@ function renderSignedOut(errorMessage?: string): void {
   closeMappingPanel();
   lastConfirmed = null;
   chat.reset();
+  usage.reset();
   renderStatementCard(null);
   setDataConnection('');
   signedOutView?.removeAttribute('hidden');
@@ -575,6 +621,7 @@ function renderSignedIn(session: StoredSession, errorMessage?: string): void {
   // Restored from storage on every render, with no network call; the card's details from
   // the confirm response itself exist only in the panel that confirmed.
   if (statementCard?.hasAttribute('hidden')) void refreshStatementCard();
+  void usage.refresh();
 }
 
 function setBusy(isBusy: boolean): void {

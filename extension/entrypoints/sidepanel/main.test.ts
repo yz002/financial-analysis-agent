@@ -37,6 +37,16 @@ const SIDEPANEL_BODY = `
     </div>
     <div id="signed-in-view" hidden>
       <p id="account-info"></p>
+      <section id="usage-panel" hidden>
+        <p id="usage-line"></p><p id="usage-reset"></p><p id="usage-notice"></p>
+        <button id="usage-upgrade" type="button" hidden></button>
+        <button id="usage-manage" type="button" hidden></button>
+        <button id="usage-refresh" type="button"></button>
+        <form id="byo-key-form"><input id="byo-key-input" type="password" />
+          <button id="byo-key-save" type="submit"></button>
+          <button id="byo-key-remove" type="button" hidden></button>
+          <p id="byo-key-note"></p></form>
+      </section>
       <button id="connect-data" type="button">Connect data</button>
       <p id="data-connection"></p>
       <p id="data-note"></p>
@@ -120,7 +130,17 @@ const {
   chatResetMock,
   clearChatStateMock,
   chatDeps,
+  askMock,
+  usageRefreshMock,
+  usageResetMock,
+  usageOnVisibleMock,
+  usageDeps,
 } = vi.hoisted(() => ({
+  askMock: vi.fn(),
+  usageRefreshMock: vi.fn(),
+  usageResetMock: vi.fn(),
+  usageOnVisibleMock: vi.fn(),
+  usageDeps: { current: null as null | Record<string, (...args: unknown[]) => unknown> },
   chatShowMock: vi.fn(),
   chatSyncMock: vi.fn(),
   storageListeners: {
@@ -179,6 +199,7 @@ vi.mock('../../lib/backendApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/backendApi')>();
   return {
     ...actual,
+    ask: askMock,
     exchangeToken: exchangeTokenMock,
     logout: logoutMock,
     revokeAllSessions: revokeAllSessionsMock,
@@ -198,6 +219,18 @@ vi.mock('./chat', () => ({
     syncFromStorage = chatSyncMock;
     startNewConversation = chatStartNewConversationMock;
     reset = chatResetMock;
+  },
+}));
+
+// The usage panel has its own tests (usage.test.ts); here only main.ts's wiring of it is checked.
+vi.mock('./usage', () => ({
+  UsageController: class {
+    constructor(_elements: unknown, deps: Record<string, (...args: unknown[]) => unknown>) {
+      usageDeps.current = deps;
+    }
+    refresh = usageRefreshMock;
+    reset = usageResetMock;
+    onVisible = usageOnVisibleMock;
   },
 }));
 
@@ -289,6 +322,59 @@ beforeEach(() => {
   chatResetMock.mockReset();
   clearChatStateMock.mockReset().mockResolvedValue(undefined);
   chatDeps.current = null;
+  askMock.mockReset();
+  usageRefreshMock.mockReset().mockResolvedValue(null);
+  usageResetMock.mockReset();
+  usageOnVisibleMock.mockReset();
+  usageDeps.current = null;
+});
+
+describe('usage panel wiring (Phase D session 6)', () => {
+  it('refreshes usage when signed in, and resets it when signed out', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+    expect(usageRefreshMock).toHaveBeenCalled();
+    expect(usageResetMock).not.toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('#signout')!.click();
+    await flushAsync();
+    expect(usageResetMock).toHaveBeenCalled();
+  });
+
+  it('opens Stripe pages with browser.tabs.create', async () => {
+    const create = vi.spyOn(fakeBrowser.tabs, 'create').mockResolvedValue({} as never);
+    await loadSidepanel();
+    await usageDeps.current!.openTab!('https://checkout.stripe.com/c/pay/x');
+    expect(create).toHaveBeenCalledWith({ url: 'https://checkout.stripe.com/c/pay/x' });
+  });
+
+  it('refreshes usage after every question, answered or failed', async () => {
+    await loadSidepanel();
+    const send = chatDeps.current!.send! as (t: string, b: unknown, s: AbortSignal) => Promise<unknown>;
+    const signal = new AbortController().signal;
+
+    askMock.mockResolvedValueOnce({ final_answer: 'ok' });
+    await send('tok', { question: 'q' }, signal);
+    await flushAsync();
+    expect(usageRefreshMock).toHaveBeenCalledTimes(1);
+
+    askMock.mockRejectedValueOnce(new BackendApiError('capped', 429, { error: 'daily_cap_reached' }));
+    await expect(send('tok', { question: 'q' }, signal)).rejects.toBeInstanceOf(BackendApiError);
+    await flushAsync();
+    expect(usageRefreshMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks again when the panel becomes visible or its window regains focus', async () => {
+    await loadSidepanel();
+    // loadSidepanel re-imports main.ts into the same jsdom document for every test, so earlier
+    // tests' document/window listeners are still attached: check each event, not a total.
+    usageOnVisibleMock.mockClear();
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(usageOnVisibleMock).toHaveBeenCalled();
+    usageOnVisibleMock.mockClear();
+    window.dispatchEvent(new Event('focus'));
+    expect(usageOnVisibleMock).toHaveBeenCalled();
+  });
 });
 
 afterEach(() => {

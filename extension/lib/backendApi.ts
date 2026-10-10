@@ -25,19 +25,27 @@ export interface ExchangeTokenResponse {
   expires_at: string;
 }
 
-interface PostJsonOptions {
+interface RequestJsonOptions {
   body?: unknown;
   sessionToken?: string;
   signal?: AbortSignal;
 }
 
-async function postJson<T>(path: string, opts: PostJsonOptions): Promise<T> {
+async function postJson<T>(path: string, opts: RequestJsonOptions): Promise<T> {
+  return requestJson<T>('POST', path, opts);
+}
+
+async function requestJson<T>(
+  method: 'GET' | 'POST' | 'DELETE',
+  path: string,
+  opts: RequestJsonOptions,
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.sessionToken) headers['Authorization'] = `Bearer ${opts.sessionToken}`;
 
   const response = await fetch(`${BACKEND_BASE_URL}${path}`, {
-    method: 'POST',
+    method,
     headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
@@ -296,4 +304,58 @@ export async function logout(sessionToken: string): Promise<{ revoked: true }> {
 /** No request body per the contract. Always resolves {revoked: true} on 2xx. */
 export async function revokeAllSessions(sessionToken: string): Promise<{ revoked: true }> {
   return postJson<{ revoked: true }>('/v1/auth/sessions/revoke-all', { sessionToken });
+}
+
+// --- Usage, billing and BYO key (EXTENSION_INTEGRATION.md SS6, amended Phase D session 6) ---
+
+export type UsageTier = 'free' | 'paid' | 'byo_key';
+
+export interface UsageSubscription {
+  /** Stripe's value verbatim: active, trialing, past_due, unpaid, canceled, incomplete, ... */
+  status: string;
+  /** True once a cancellation is scheduled; the tier stays paid until Stripe ends it. */
+  cancel_at_period_end: boolean;
+  current_period_end: string;
+}
+
+export interface UsageResponse {
+  account_id: string;
+  tier: UsageTier;
+  questions_today: number | null;
+  daily_cap: number | null;
+  questions_this_period: number | null;
+  monthly_cap: number | null;
+  period_ends_at: string | null;
+  byo_key_required: boolean;
+  resets_at: string | null;
+  has_byo_key: boolean;
+  /** Reported whatever the tier: a past_due subscriber's tier is "free". */
+  subscription: UsageSubscription | null;
+}
+
+export async function getUsage(sessionToken: string): Promise<UsageResponse> {
+  return requestJson<UsageResponse>('GET', '/v1/usage', { sessionToken });
+}
+
+/** No request body. 409 subscription_exists, 503 billing_unavailable, 502 billing_provider_error. */
+export async function createCheckoutSession(sessionToken: string): Promise<{ checkout_url: string }> {
+  return postJson<{ checkout_url: string }>('/v1/billing/checkout-session', { sessionToken });
+}
+
+/** No request body. 404 no_billing_account, 503 billing_unavailable, 502 billing_provider_error. */
+export async function createPortalSession(sessionToken: string): Promise<{ portal_url: string }> {
+  return postJson<{ portal_url: string }>('/v1/billing/portal-session', { sessionToken });
+}
+
+/**
+ * The key is sent once, in this request's body, and never stored or logged by the extension.
+ * 422 (format: a string detail; or {"error": "byo_key_rejected"}), 502 byo_key_check_failed.
+ */
+export async function registerByoKey(sessionToken: string, apiKey: string): Promise<{ registered: true }> {
+  return postJson<{ registered: true }>('/v1/byo-key', { sessionToken, body: { api_key: apiKey } });
+}
+
+/** Idempotent: resolves {removed: true} whether or not a key was registered. */
+export async function removeByoKey(sessionToken: string): Promise<{ removed: true }> {
+  return requestJson<{ removed: true }>('DELETE', '/v1/byo-key', { sessionToken });
 }

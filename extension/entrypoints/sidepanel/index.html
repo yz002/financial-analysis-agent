@@ -21,6 +21,33 @@
 
       <div id="signed-in-view" hidden>
         <p id="account-info"></p>
+
+        <section id="usage-panel" aria-label="Usage and billing" hidden>
+          <p id="usage-line"></p>
+          <p id="usage-reset"></p>
+          <p id="usage-notice" role="status"></p>
+          <div id="usage-actions">
+            <button id="usage-upgrade" type="button" hidden>Upgrade: $2/month</button>
+            <button id="usage-manage" type="button" hidden>Manage subscription</button>
+            <button id="usage-refresh" type="button">Refresh</button>
+          </div>
+          <form id="byo-key-form" autocomplete="off">
+            <label for="byo-key-input">Or use your own Anthropic API key</label>
+            <input
+              id="byo-key-input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="sk-ant-…"
+            />
+            <div id="byo-key-actions">
+              <button id="byo-key-save" type="submit">Save key</button>
+              <button id="byo-key-remove" type="button" hidden>Remove key</button>
+            </div>
+            <p id="byo-key-note" role="status"></p>
+          </form>
+        </section>
+
         <button id="connect-data" type="button">Connect data</button>
         <p id="data-connection"></p>
         <p id="data-note"></p>
