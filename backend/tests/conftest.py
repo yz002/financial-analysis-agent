@@ -25,8 +25,23 @@ import app.main as app_main
 from app.main import app
 from app.oauth_providers import ProviderIdentity
 from db.base import get_session
+from tests_support.network_guard import block_external_apis
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_stripe_or_anthropic_calls(request, monkeypatch):
+    """
+    Phase D session 6: backend/.env can hold a real Stripe test key and a real Anthropic key,
+    so any unmocked call to either fails the test (tests_support/network_guard.py) -- raised
+    at the call, and checked again here at teardown in case app code swallowed the error.
+    Only a test marked @pytest.mark.real_stripe may reach Stripe; Anthropic is never allowed.
+    """
+    allow_stripe = request.node.get_closest_marker("real_stripe") is not None
+    attempts = block_external_apis(monkeypatch, allow_stripe=allow_stripe)
+    yield
+    assert not attempts, f"real external API call(s) attempted: {attempts}"
 
 
 @pytest.fixture

@@ -278,6 +278,9 @@ def test_decrypt_failure_erases_the_ciphertext(auth_session, monkeypatch):
         session.close()
 
     monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(
+        app_main, "run_agent", lambda *a, **k: pytest.fail("decrypt fails before any model call")
+    )
     resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
     assert resp.status_code == 500, resp.text
 

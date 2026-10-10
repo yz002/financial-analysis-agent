@@ -49,6 +49,17 @@ at request time in production.
 - The Customer portal must have a saved configuration in test mode (Settings → Billing →
   Customer portal), or `POST /v1/billing/portal-session` fails with `502`.
 
+**Backend test network guard (session 6).** `backend/.env` holds an `sk_test_` key and a
+`STRIPE_PRICE_ID` (presence checked 2026-10-08; values not yet checked against the Stripe
+dashboard). `backend/tests/conftest.py` therefore fails any test that makes a real Stripe or
+Anthropic API call (`backend/tests_support/network_guard.py`). The only exemption is
+`test_checkout_session_creation_hits_real_sandbox`, marked `real_stripe`. Session 6's targeted
+DB-backed run excludes it:
+```
+.venv/Scripts/python.exe -m pytest tests/test_billing.py tests/test_tier_gating.py tests/test_byo_key.py -k "not hits_real_sandbox"
+```
+It runs on its own at live-test step L0, after the key and price are checked in the dashboard.
+
 **Duplicate subscription runbook (session 6).**
 - Trigger: a WARNING in the Render logs, `duplicate subscription ignored existing=sub_… new=sub_…`.
   It means two checkouts for one account both completed. The backend kept the existing

@@ -602,6 +602,7 @@ def test_portal_session_uses_only_the_callers_own_customer(stripe_env, monkeypat
 # --- real checkout-session creation (deliberately unmocked) ----------------------------------
 
 
+@pytest.mark.real_stripe  # exempt from conftest's network guard -- the only such test
 @pytest.mark.skipif(
     not os.environ.get("STRIPE_SECRET_KEY", "").startswith("sk_test_")
     or not os.environ.get("STRIPE_PRICE_ID"),
