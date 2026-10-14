@@ -10,6 +10,7 @@ so a test that needs a session must supply its own fake.
 Run from backend/: `.venv/Scripts/python.exe -m pytest tests_unit`.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -34,3 +35,14 @@ def _no_database(monkeypatch):
     import app.main as app_main
 
     monkeypatch.setattr(app_main, "get_session", _refuse)
+
+
+@pytest.fixture(autouse=True)
+def _app_logs_reach_caplog(caplog):
+    """app/main.py gives the `app` logger its own stderr handler with propagate=False (so its
+    lines are never duplicated), which also keeps app.* records away from pytest's root-level
+    caplog handler. Attaching caplog's handler to `app` directly keeps caplog assertions working."""
+    app_logger = logging.getLogger("app")
+    app_logger.addHandler(caplog.handler)
+    yield
+    app_logger.removeHandler(caplog.handler)

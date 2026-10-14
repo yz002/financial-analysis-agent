@@ -15,6 +15,7 @@ X-Install-Id plumbing is replaced by two fixtures here:
   auth_headers ready to pass straight to TestClient as `headers=`.
 """
 
+import logging
 import uuid
 
 import pytest
@@ -42,6 +43,19 @@ def _no_real_stripe_or_anthropic_calls(request, monkeypatch):
     attempts = block_external_apis(monkeypatch, allow_stripe=allow_stripe)
     yield
     assert not attempts, f"real external API call(s) attempted: {attempts}"
+
+
+@pytest.fixture(autouse=True)
+def _app_logs_reach_caplog(caplog):
+    """app/main.py gives the `app` logger its own stderr handler with propagate=False (so its
+    lines are never duplicated), which also keeps app.* records away from pytest's root-level
+    caplog handler. Attaching caplog's handler to `app` directly keeps caplog assertions working
+    (test_billing.py's duplicate-subscription warning, test_google_data_token.py's no-logging
+    check)."""
+    app_logger = logging.getLogger("app")
+    app_logger.addHandler(caplog.handler)
+    yield
+    app_logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture

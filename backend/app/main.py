@@ -50,27 +50,41 @@ from db.models import (
     UsageEvent,
 )
 
-# No logging framework/handler config exists yet in this project -- this module-level
-# logger relies on Python's logging "handler of last resort" (WARNING+ to stderr with no
-# other setup) until a real one is added. logger.exception(...) below is still the right
-# call now, not a premature abstraction: it's the stdlib's own idiom for "log this with a
-# traceback," and switching to a configured handler later is a config change, not a
-# call-site change.
 logger = logging.getLogger(__name__)
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def configure_stderr_logger(name: str, level: int) -> logging.Logger:
+    """
+    Gives a logger its own stderr handler, which Render's service logs capture. Nothing else
+    configures logging for this app: uvicorn's default config covers only its own uvicorn.*
+    loggers, so without this an app warning reaches stderr only through Python's last-resort
+    handler -- a bare, unlabeled line, which stops entirely the moment anything configures the
+    root logger (Phase D session 6 live test: the billing guard's WARNING never showed).
+    propagate=False keeps lines from appearing twice if uvicorn or Render configures the root
+    logger; the handler check keeps a --reload re-import from stacking handlers.
+    """
+    configured = logging.getLogger(name)
+    if not configured.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        configured.addHandler(handler)
+    configured.setLevel(level)
+    configured.propagate = False
+    return configured
+
+
+# Every app.* logger (app.main, app.billing, app.gating, ...): WARNING and up. Every app warning
+# is metadata only -- ids, class names, outcome labels, never a key, email, question or answer
+# (backend/SECURITY.md SS4/SS8).
+APP_LOGGER_NAME = "app"
+configure_stderr_logger(APP_LOGGER_NAME, logging.WARNING)
+
 # src/agent/agent.py's per-model-call INFO line (iteration, duration_ms, stop reason, model --
-# metadata only, never question/answer text: backend/SECURITY.md SS4). The last-resort handler
-# above only shows WARNING and up, so this logger gets its own stderr handler, which Render's
-# service logs capture. propagate=False keeps lines from appearing twice if uvicorn or Render
-# configures the root logger; the handler check keeps a --reload re-import from stacking them.
+# metadata only, never question/answer text: backend/SECURITY.md SS4).
 AGENT_LOGGER_NAME = "src.agent.agent"
-_agent_logger = logging.getLogger(AGENT_LOGGER_NAME)
-if not _agent_logger.handlers:
-    _agent_handler = logging.StreamHandler()
-    _agent_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    _agent_logger.addHandler(_agent_handler)
-_agent_logger.setLevel(logging.INFO)
-_agent_logger.propagate = False
+configure_stderr_logger(AGENT_LOGGER_NAME, logging.INFO)
 
 # src/agent/agent.py lives one level above backend/ (see repo layout in
 # CLAUDE.md), but this module is normally run with backend/ as the working
