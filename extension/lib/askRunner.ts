@@ -25,6 +25,7 @@ export type AskFailure =
   | { kind: 'unauthorized' }
   | { kind: 'statement_mismatch' }
   | { kind: 'statement_needs_reconfirm' }
+  | { kind: 'byo_key_needs_readd' }
   | { kind: 'conversation_not_found' }
   | { kind: 'answer_failed' }
   | { kind: 'answer_lost' }
@@ -86,6 +87,7 @@ export function classifyAskError(err: unknown): typeof RETRY | AskFailure {
       if (
         code === 'statement_mismatch' ||
         code === 'statement_needs_reconfirm' ||
+        code === 'byo_key_needs_readd' ||
         code === 'answer_failed' ||
         code === 'answer_lost'
       ) {

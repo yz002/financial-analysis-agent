@@ -590,3 +590,67 @@ def test_no_statement_means_no_excluded_phrases(world, monkeypatch):
     monkeypatch.setattr(app_main, "run_agent", run_agent)
     assert _ask().status_code == 200
     assert seen["excluded_phrases"] == []
+
+
+# --- BYO key: encryption unconfigured, and decrypt failure (session 6 live test) -------------
+
+
+def _byo_world(world, monkeypatch):
+    from db.models import ByoKey
+
+    key_id = uuid.uuid4()
+    byo_key = ByoKey(id=key_id, account_id=ACCOUNT_ID, encrypted_key=b"ciphertext", is_active=True)
+    world.rows[(ByoKey, key_id)] = byo_key
+    app_main.app.dependency_overrides[app_main.get_current_account] = lambda: Account(
+        id=ACCOUNT_ID, byo_key_id=key_id
+    )
+    monkeypatch.setattr(
+        app_main,
+        "evaluate_ask_gate",
+        lambda session, account, now: AskGateDecision(
+            tier="byo_key", allowed=True, questions_used=0, cap=None, resets_at=None,
+            reject_outcome=None, reject_error=None, prompt_byo_key=False, prompt_upgrade=False,
+        ),
+    )
+    monkeypatch.setattr(app_main, "run_agent", lambda *a, **k: pytest.fail("no model call"))
+    return byo_key
+
+
+def test_byo_with_encryption_unconfigured_is_503_and_touches_and_counts_nothing(world, monkeypatch):
+    byo_key = _byo_world(world, monkeypatch)
+    monkeypatch.delenv("BYO_KEY_ENCRYPTION_KEY", raising=False)
+
+    resp = _ask()
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": {"error": "byo_unavailable"}}
+    assert byo_key.is_active is True and byo_key.encrypted_key == b"ciphertext"
+    assert not any(isinstance(o, UsageEvent) for s in world.sessions for o in s.added)
+    assert all(s.commits == 0 and s.executed == [] for s in world.sessions)  # nothing written
+    assert world.open_sessions() == []
+
+
+def test_byo_decrypt_failure_deactivates_and_unlinks_but_keeps_the_ciphertext(world, monkeypatch, caplog):
+    from cryptography.fernet import Fernet, InvalidToken
+
+    byo_key = _byo_world(world, monkeypatch)
+    monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    def _invalid(encrypted):
+        raise InvalidToken
+
+    monkeypatch.setattr(app_main, "decrypt_byo_key", _invalid)
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        resp = _ask()
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json() == {"detail": {"error": "byo_key_needs_readd"}}
+    assert byo_key.is_active is False
+    assert byo_key.encrypted_key == b"ciphertext"  # kept: never erased on a decrypt failure
+    [unlink] = [s for sess in world.sessions for s in sess.executed]
+    assert _compile(unlink).startswith("UPDATE accounts SET byo_key_id=NULL")
+    assert any(sess.commits == 1 for sess in world.sessions)  # committed in the locked session
+    assert not any(isinstance(o, UsageEvent) for s in world.sessions for o in s.added)  # not counted
+    [record] = [r for r in caplog.records if r.name == "app.main"]
+    assert str(byo_key.id) in record.getMessage() and "InvalidToken" in record.getMessage()
+    assert world.open_sessions() == []

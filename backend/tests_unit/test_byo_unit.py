@@ -204,3 +204,41 @@ def test_removing_a_key_unsets_the_account_and_erases_ciphertext(signed_in, fake
     assert {"byo_key_id": None, "id_1": ACCOUNT_ID} in params
     assert {"is_active": False, "encrypted_key": b"", "account_id_1": ACCOUNT_ID} in params
     assert fake_db[-1] == ("commit", None)
+
+
+# --- encryption not configured: 503, checked before Anthropic (session 6 live test) ----------
+
+
+def test_register_without_an_encryption_key_is_503_before_anthropic_or_the_database(
+    fake_anthropic, signed_in, monkeypatch, caplog
+):
+    monkeypatch.delenv("BYO_KEY_ENCRYPTION_KEY", raising=False)
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        resp = client.post("/v1/byo-key", json={"api_key": _KEY})
+    # conftest's get_session raises, so a 503 (not a 500) also proves no database access.
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": {"error": "byo_unavailable"}}
+    assert fake_anthropic.instances == []  # nothing sent to Anthropic
+    assert "BYO keys unavailable: BYO_KEY_ENCRYPTION_KEY is not set" in caplog.text
+
+
+def test_register_with_a_malformed_encryption_key_is_503(fake_anthropic, signed_in, monkeypatch, caplog):
+    monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", "not-a-fernet-key")
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        resp = client.post("/v1/byo-key", json={"api_key": _KEY})
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": {"error": "byo_unavailable"}}
+    assert fake_anthropic.instances == []
+    assert "not a valid Fernet key" in caplog.text
+    assert "not-a-fernet-key" not in caplog.text  # the reason names the check, never the value
+
+
+def test_the_byo_unavailable_response_and_log_never_carry_the_submitted_key(
+    fake_anthropic, signed_in, monkeypatch, caplog
+):
+    monkeypatch.delenv("BYO_KEY_ENCRYPTION_KEY", raising=False)
+    with caplog.at_level(logging.DEBUG, logger="app.main"):
+        resp = client.post("/v1/byo-key", json={"api_key": f"  {_KEY}  "})
+    assert resp.status_code == 503
+    assert _KEY not in resp.text
+    assert _KEY not in caplog.text

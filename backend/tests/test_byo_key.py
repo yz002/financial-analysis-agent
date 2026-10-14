@@ -267,7 +267,20 @@ def test_registering_erases_every_earlier_ciphertext_including_old_inactive_rows
     assert len(retired) == 1 and retired[0].ciphertext_length == 0
 
 
-def test_decrypt_failure_erases_the_ciphertext(auth_session, monkeypatch):
+def _usage_row_count(account_id: str) -> int:
+    session = get_session()
+    try:
+        return session.execute(
+            text("SELECT count(*) FROM usage_events WHERE account_id = :id"), {"id": account_id}
+        ).scalar_one()
+    finally:
+        session.close()
+
+
+def test_decrypt_failure_keeps_the_ciphertext_and_asks_to_readd(auth_session, monkeypatch):
+    """Session 6 policy (backend/SECURITY.md SS8): a valid but different Fernet key -- a
+    rotation, or a local .env differing from Render on the shared database -- deactivates and
+    unlinks the key but never erases its ciphertext, and the question isn't counted."""
     account_id, headers = auth_session()
     session = get_session()
     try:
@@ -282,11 +295,51 @@ def test_decrypt_failure_erases_the_ciphertext(auth_session, monkeypatch):
         app_main, "run_agent", lambda *a, **k: pytest.fail("decrypt fails before any model call")
     )
     resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
-    assert resp.status_code == 500, resp.text
+    assert resp.status_code == 409, resp.text
+    assert resp.json() == {"detail": {"error": "byo_key_needs_readd"}}
 
     [row] = [r for r in _byo_rows(account_id) if r.id == byo_key_id]
     assert row.is_active is False
-    assert row.ciphertext_length == 0
+    assert row.ciphertext_length > 0  # kept, not erased
+    assert _account_byo_key_id(account_id) is None
+    assert _usage_row_count(account_id) == 0  # not counted
+
+
+def test_ask_with_encryption_unconfigured_is_503_and_touches_no_key(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    session = get_session()
+    try:
+        byo_key = _seed_byo_key(session, account_id, is_active=True)
+        session.commit()
+        byo_key_id = byo_key.id
+    finally:
+        session.close()
+
+    monkeypatch.delenv("BYO_KEY_ENCRYPTION_KEY")
+    monkeypatch.setattr(
+        app_main, "run_agent", lambda *a, **k: pytest.fail("no model call without encryption")
+    )
+    resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": {"error": "byo_unavailable"}}
+
+    [row] = [r for r in _byo_rows(account_id) if r.id == byo_key_id]
+    assert row.is_active is True
+    assert row.ciphertext_length > 0
+    assert _account_byo_key_id(account_id) == byo_key_id
+    assert _usage_row_count(account_id) == 0
+
+
+def test_register_with_encryption_unconfigured_is_503_and_stores_nothing(auth_session, monkeypatch):
+    account_id, headers = auth_session()
+    monkeypatch.delenv("BYO_KEY_ENCRYPTION_KEY")
+    monkeypatch.setattr(
+        app_main, "_check_byo_key", lambda raw_key: pytest.fail("no Anthropic call without encryption")
+    )
+    resp = client.post("/v1/byo-key", json={"api_key": _VALID_KEY}, headers=headers)
+    assert resp.status_code == 503, resp.text
+    assert resp.json() == {"detail": {"error": "byo_unavailable"}}
+    assert _byo_rows(account_id) == []
 
 
 # --- /v1/ask BYO-key wiring ---------------------------------------------------------------
@@ -415,7 +468,8 @@ def test_ask_byo_key_decrypt_failure_deactivates_key_and_recovers_next_request(
     per backend/SECURITY.md's hard-cutover runbook) must deactivate the row rather than
     fail the same way on every subsequent request -- the next /v1/ask for this account
     should fall through gating.evaluate_ask_gate's byo_key.is_active check to the free
-    tier instead of repeating the decrypt error forever."""
+    tier instead of repeating the decrypt error forever. (Session 6: answered with
+    409 byo_key_needs_readd rather than a 500, and the ciphertext is kept.)"""
     account_id, headers = auth_session()
     session = get_session()
     try:
@@ -430,8 +484,8 @@ def test_ask_byo_key_decrypt_failure_deactivates_key_and_recovers_next_request(
     monkeypatch.setenv("BYO_KEY_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
     resp = client.post("/v1/ask", json={"question": "What was MSFT revenue?"}, headers=headers)
-    assert resp.status_code == 500, resp.text
-    assert "deactivated" in resp.json()["detail"]
+    assert resp.status_code == 409, resp.text
+    assert resp.json() == {"detail": {"error": "byo_key_needs_readd"}}
 
     session = get_session()
     try:

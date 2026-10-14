@@ -278,6 +278,9 @@ export function failureMessage(failure: AskFailure): string {
       return 'This statement needs to be confirmed again. Read the range and confirm it, then ask again.';
     case 'statement_mismatch':
       return 'This conversation is about a different statement.';
+    case 'byo_key_needs_readd':
+      // Session 6: the stored key couldn't be decrypted and was set aside (not counted).
+      return "Your saved key can't be used anymore. Please add it again.";
     case 'unauthorized':
       return 'Your session ended — please sign in again.';
     case 'server':

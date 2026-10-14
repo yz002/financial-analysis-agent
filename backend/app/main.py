@@ -28,6 +28,7 @@ from typing import Literal
 
 import anthropic
 import stripe
+from cryptography.fernet import InvalidToken
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
@@ -138,7 +139,13 @@ from .ask_rules import (
     turns_returned_statement_data,
     CSV_TOOLS,
 )
-from .crypto import decrypt_byo_key, encrypt_byo_key, is_valid_byo_key_format
+from .crypto import (
+    ByoUnavailable,
+    decrypt_byo_key,
+    encrypt_byo_key,
+    ensure_byo_encryption_configured,
+    is_valid_byo_key_format,
+)
 from .gating import (
     MAPPING_PROPOSAL_OUTCOME,
     account_billing_status,
@@ -580,6 +587,12 @@ class _Charge:
     tier: str | None = None
 
 
+def _byo_unavailable(e: ByoUnavailable) -> HTTPException:
+    # str(e) names the failed check ("... is not set"), never a value.
+    logger.warning("BYO keys unavailable: %s", e)
+    return HTTPException(status_code=503, detail={"error": "byo_unavailable"})
+
+
 def _lock_account(session, account_id: uuid.UUID) -> None:
     """Row-locks the account until the caller's transaction commits, so the gate check and the
     usage insert are serialized per account: two simultaneous questions can't both pass a cap
@@ -642,33 +655,36 @@ def _charge(
                 # no intervening commit could have removed it. Treat as an internal
                 # inconsistency rather than silently falling back to the master key.
                 raise HTTPException(status_code=500, detail="BYO key lookup failed unexpectedly.")
+            # Encryption not configured: a server problem, not this person's key. Nothing is
+            # touched and nothing is counted -- the session closes (rolling back, releasing the
+            # lock) before any usage row exists (backend/SECURITY.md SS8).
+            try:
+                ensure_byo_encryption_configured()
+            except ByoUnavailable as e:
+                raise _byo_unavailable(e) from None
             try:
                 raw_key = decrypt_byo_key(byo_key.encrypted_key)
-            except Exception as e:  # noqa: BLE001 -- never leak key material via a raised exception
-                # A decrypt failure here almost always means BYO_KEY_ENCRYPTION_KEY was
-                # rotated out from under this ciphertext (backend/SECURITY.md's Fernet
-                # rotation runbook is a hard cutover -- old ciphertext is unrecoverable by
-                # design). Deactivate the row so this doesn't repeat on every subsequent
-                # request: the next /v1/ask for this account falls through
-                # gating.evaluate_ask_gate's byo_key.is_active check straight to the
-                # paid/free tier instead of hitting this same dead end again.
-                deactivate_session = get_session()
-                try:
-                    row = deactivate_session.get(ByoKey, byo_key.id)
-                    if row is not None:
-                        row.is_active = False
-                        # Unreadable anyway; erased like any retired key (Phase D session 6).
-                        row.encrypted_key = b""
-                        deactivate_session.commit()
-                finally:
-                    deactivate_session.close()
+            except InvalidToken:
+                # A valid Fernet key that can't read this ciphertext: a rotation, or a
+                # valid-but-different BYO_KEY_ENCRYPTION_KEY (a local .env differing from Render
+                # on the shared database) -- indistinguishable here. So the key is deactivated
+                # and unlinked, but its ciphertext is KEPT: erasing it would let one
+                # misconfigured process destroy every BYO user's key (backend/SECURITY.md SS8).
+                # Done in this session: a second session couldn't update the account row this
+                # one holds locked. Committed (releasing the lock) before the question counts.
+                byo_key_id = byo_key.id  # copied before commit: reading it after would autobegin
+                byo_key.is_active = False
+                session.execute(
+                    update(Account).where(Account.id == account.id).values(byo_key_id=None)
+                )
+                session.commit()
+                logger.warning(
+                    "stored BYO key could not be decrypted and was deactivated byo_key_id=%s (%s)",
+                    byo_key_id, InvalidToken.__name__,
+                )
                 raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        "Stored BYO key could not be decrypted and has been deactivated; "
-                        "please re-register it."
-                    ),
-                ) from e
+                    status_code=409, detail={"error": "byo_key_needs_readd"}
+                ) from None
             byo_client = anthropic.Anthropic(api_key=raw_key, timeout=MODEL_CALL_TIMEOUT_SECONDS)
             byo_key.last_used_at = now
 
@@ -1396,9 +1412,12 @@ def register_byo_key(
     Registers (or rotates) the caller's own Anthropic API key (EXTENSION_INTEGRATION.md SS6,
     amended Phase D session 6). In order, with nothing stored unless every step passes:
       1. strip whitespace, then the format check (422, the original string detail);
-      2. ask Anthropic whether the key works -- no tokens, no DB session open (422
+      2. check that stored keys can be encrypted at all -- before anything is sent to
+         Anthropic (503 byo_unavailable; amended after the session 6 local live test, which
+         hit an unhandled 500 here after the Anthropic call when the key was missing);
+      3. ask Anthropic whether the key works -- no tokens, no DB session open (422
          byo_key_rejected, or 502 byo_key_check_failed);
-      3. encrypt, retire every earlier key (ciphertext erased), store the new one and point
+      4. encrypt, retire every earlier key (ciphertext erased), store the new one and point
          the account at it, in one transaction.
     """
     raw_key = request.api_key.strip()
@@ -1406,6 +1425,11 @@ def register_byo_key(
         raise HTTPException(
             status_code=422, detail="That doesn't look like a valid Anthropic API key."
         )
+
+    try:
+        ensure_byo_encryption_configured()
+    except ByoUnavailable as e:
+        raise _byo_unavailable(e) from None
 
     verdict = _check_byo_key(raw_key)
     if verdict == "rejected":

@@ -149,3 +149,11 @@ describe('error messages', () => {
     for (const message of messages) expect(message).not.toContain(key);
   });
 });
+
+describe('byo_unavailable (session 6 live test)', () => {
+  it('says saving a key is unavailable and that nothing was saved', () => {
+    expect(byoKeyErrorMessage(backend(503, { error: 'byo_unavailable' }))).toBe(
+      "Saving your own key isn't available right now. Nothing was saved.",
+    );
+  });
+});

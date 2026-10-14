@@ -236,5 +236,6 @@ describe('failureMessage', () => {
       "You've used all the questions for this billing period.",
     );
     expect(failureMessage({ kind: 'invalid_question' })).toContain('4,000 characters');
+    expect(failureMessage({ kind: 'byo_key_needs_readd' })).toBe("Your saved key can't be used anymore. Please add it again.");
   });
 });

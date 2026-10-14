@@ -122,6 +122,7 @@ export function byoKeyErrorMessage(err: unknown): string {
   if (err instanceof BackendApiError && err.fromBackend) {
     const code = errorCode(err);
     if (code === 'byo_key_rejected') return "Anthropic didn't accept that key. Check it and try again.";
+    if (code === 'byo_unavailable') return "Saving your own key isn't available right now. Nothing was saved.";
     if (code === 'byo_key_check_failed') {
       return "Couldn't check the key with Anthropic right now. Nothing was saved; try again in a moment.";
     }

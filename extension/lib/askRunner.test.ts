@@ -130,6 +130,7 @@ describe('runAsk', () => {
   it.each([
     [backend(409, { error: 'statement_mismatch' }), { kind: 'statement_mismatch' }],
     [backend(409, { error: 'statement_needs_reconfirm' }), { kind: 'statement_needs_reconfirm' }],
+    [backend(409, { error: 'byo_key_needs_readd' }), { kind: 'byo_key_needs_readd' }],
     [backend(409, { error: 'answer_failed' }), { kind: 'answer_failed' }],
     [backend(409, { error: 'answer_lost' }), { kind: 'answer_lost' }],
     [backend(422, { error: 'request_id_reused' }), { kind: 'request_id_reused' }],
