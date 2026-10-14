@@ -186,6 +186,12 @@ falls straight through `gating.evaluate_ask_gate`'s existing
 `byo_key.is_active` check to the paid/free tier instead of hitting the same
 decrypt failure on every call.
 
+(Amended Phase D session 6 (pending live verification): the decrypt-failure
+policy is now §8's "Decrypt failure keeps the ciphertext". A decrypt failure
+deactivates the key and unsets `accounts.byo_key_id`, but never erases
+`encrypted_key`, and a missing or malformed `BYO_KEY_ENCRYPTION_KEY` touches
+no key at all.)
+
 **Rotation steps:**
 1. Generate a new key:
    ```
@@ -511,10 +517,33 @@ are amended to match.
 - **Whitespace:** leading and trailing whitespace is stripped before the format check, and the
   stripped key is what's stored. Before this, an unstripped key could pass the check and then
   fail at Anthropic.
-- **Erased ciphertext:** a key that's removed (`DELETE /v1/byo-key`), replaced, or found
-  undecryptable has its `encrypted_key` overwritten with empty bytes. The row is kept for audit
-  (`created_at`, `last_used_at`, `is_active = false`). Rows deactivated before this change still
-  held ciphertext; `DEPLOYMENT.md` records the one-time wipe.
+- **Erased ciphertext:** a key that's removed (`DELETE /v1/byo-key`) or replaced has its
+  `encrypted_key` overwritten with empty bytes. The row is kept for audit (`created_at`,
+  `last_used_at`, `is_active = false`). Rows deactivated before this change still held
+  ciphertext; `DEPLOYMENT.md` records the one-time wipe. **Only those two explicit actions erase
+  a key.**
+- **Encryption not configured: no key is touched** (pending live verification). When
+  `BYO_KEY_ENCRYPTION_KEY` is missing, or isn't a valid Fernet key:
+  - `POST /v1/byo-key` returns `503 byo_unavailable` before calling Anthropic or opening a
+    database session;
+  - `POST /v1/ask` returns `503 byo_unavailable` to a BYO-key account before the question is
+    counted, and leaves the stored key as it is;
+  - one WARNING names the failed check, never a value.
+  Before this change, a missing key crashed registration with a 500 after the Anthropic call,
+  and `/v1/ask` treated it as a decrypt failure, which erased the stored key.
+- **Decrypt failure keeps the ciphertext** (pending live verification). When a configured, valid
+  Fernet key can't decrypt a stored key (`InvalidToken`), `/v1/ask`:
+  - deactivates that row and unsets `accounts.byo_key_id`, but **keeps `encrypted_key` as it
+    is**;
+  - logs one WARNING with the row id and the exception class name only;
+  - returns `409 byo_key_needs_readd` without counting the question.
+
+  **Why it isn't erased:** a valid but *different* `BYO_KEY_ENCRYPTION_KEY` (for example a local
+  `backend/.env` differing from Render while both share one database) looks exactly like a
+  rotation. Erasing on decrypt failure would let one misconfigured process permanently destroy
+  every BYO user's key. Keeping the ciphertext makes that mistake recoverable: fix the env var
+  and the old ciphertext decrypts again, though the row needs re-activating or the person
+  re-adds the key. After a genuine rotation it's simply unreadable, which §3.1 already accepts.
 - **Not counted toward caps:** questions asked on a BYO key are recorded with
   `usage_events.tier = 'byo_key'` at insert, and excluded from the free and paid counts.
 - **Request echo (noted only):** FastAPI's own `422` for a *malformed* request body echoes the

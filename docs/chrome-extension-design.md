@@ -1014,7 +1014,14 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
       statement, even while another document is open.
     - A newly added tab appeared only after reconnecting. Refresh the sheet list.
     - Optional: a soft warning when the chosen scale gives implausible values (e.g. revenue in
-      billions from a small sheet).
+      billions from a small sheet). *Session 6 live test: the owner confirmed the P&L tab as
+      thousands by mistake twice.*
+    - From the session 6 local live test (usage card):
+      - The reset time shows seconds. Show date and time to the minute.
+      - "More questions from …" reads oddly at 0 used. Show it only when some are used, or
+        say "Resets …".
+      - `GET /v1/usage` took 3–8 s locally (shared production database). Re-check on Render
+        before optimizing.
     - From the session 5 production run:
       - When another window starts a new conversation, show a short notice instead of the
         transcript silently disappearing.
@@ -1049,6 +1056,8 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     before and after, so they come from an earlier run whose teardown didn't complete. Delete
     them in a future, separately approved cleanup. Deleting an account cascades to all of its
     rows.
+    - *Session 6:* one of them, `51b10836…`, holds an active **fake** BYO key (seen in a
+      read-only check during the local live test). The cascade removes it with the account.
 
 **Migrations are manual** (session 4): Render never runs them. Its Pre-Deploy command isn't
 available on the current plan. Run an additive migration with `alembic upgrade head` against

@@ -601,6 +601,18 @@ Errors:
   account's BYO key has been deactivated server-side and the account has silently fallen through
   to the free/paid tier's normal caps; the extension should prompt the person to re-register
   their key.
+  (Amended Phase D session 6 (pending live verification): that `500` is replaced by the two
+  errors below, and neither counts the question.
+  - `409 {"detail": {"error": "byo_key_needs_readd"}}`: the account's stored key can't be
+    decrypted any more.
+    - The key is deactivated and the account no longer points at it, so the next question uses
+      the free or paid tier.
+    - The stored ciphertext is kept, not erased (`SECURITY.md` §8).
+    - Show "Your saved key can't be used anymore. Please add it again."
+  - `503 {"detail": {"error": "byo_unavailable"}}`: the server can't use stored keys right now
+    (its encryption key isn't configured).
+    - The account's key is left as it is.
+    - A server-side problem: show a generic error and try again later.)
 
 **Not currently available:** there is no endpoint to list past conversations or read a
 conversation's full turn history — `conversation_id` can be used to *continue* a thread via
@@ -818,6 +830,12 @@ fails a basic format check.
   used times), but the old key can't be recovered.
 - **Never store or log the key in the extension.** It exists only in the input field and this
   request's body.)
+
+(Amended Phase D session 6, after the local live test (pending live verification):
+`503 {"detail": {"error": "byo_unavailable"}}` when the server's encryption key isn't
+configured. It's checked after the format check and before the Anthropic check, so nothing is
+sent to Anthropic and nothing is stored. Show "Saving your own key isn't available right now.
+Nothing was saved.")
 
 ### `DELETE /v1/byo-key`
 (New, Phase D session 6 (pending live verification).) Auth required. No request body. Removes

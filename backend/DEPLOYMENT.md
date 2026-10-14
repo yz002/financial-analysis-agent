@@ -102,6 +102,41 @@ The fake request fails before account resolution, so it creates no rows.
   If it's lost, every stored `byo_keys.encrypted_key` becomes permanently unreadable, and
   every affected user has to re-register their key.
 - To rotate it, follow `SECURITY.md` §3.1 (hard cutover).
+- **Locally, copy it from Render; never generate a new one** (Phase D session 6). It was
+  missing from local `backend/.env` during the session 6 live test.
+  - Missing or malformed, the backend now answers BYO requests with `503 byo_unavailable` and
+    touches no key.
+  - A *valid but different* key is worse: stored keys fail to decrypt and get deactivated
+    (`409 byo_key_needs_readd`). The ciphertext is kept, so restoring the right key and
+    re-adding the key on the panel recovers, but don't rely on that.
+
+## Local development (Phase D session 6 findings)
+
+- **One uvicorn at a time on port 8000.**
+  - The repo lives in OneDrive. WatchFiles (`--reload`) restarts the server whenever OneDrive
+    touches a file.
+  - Closing a terminal with uvicorn still running leaves an **orphan process listening on
+    8000**. Windows lets a second process bind the same port, so a new uvicorn also reports
+    startup complete. In session 6, a week-old orphan answered requests with old code.
+  - **Stop uvicorn with Ctrl+C only**, never by closing the terminal. Before a live test, check
+    for exactly one listener:
+    ```powershell
+    Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object LocalAddress, OwningProcess
+    ```
+    Stop any extra process (`Stop-Process -Id <pid>`) before testing.
+- **Helper scripts saved inside `backend/` trigger `--reload`**, which restarts the server
+  mid-test. Keep one-off scripts outside the repo, for example in a temp folder.
+- **The Stripe CLI listener is unreliable on this network.** `stripe listen`'s websocket closes
+  (`websocket.Client.writePump … close sent`), and `stripe events resend` doesn't reach a
+  restarted listener. Test webhooks against the production endpoint registered in the Stripe
+  dashboard (test mode) instead: session 6 live-test steps L4–L8 moved to production P4–P7. As
+  of the session 6 local test, the sandbox had no registered webhook endpoints.
+- **Sandbox cleanup (session 6):** four orphan test-mode subscriptions were canceled in the
+  dashboard. One was from Phase B (2026-09-16); three came from local checkouts whose
+  webhooks were never delivered, so they had no `subscriptions` row.
+- **Leftover test account with a BYO key:** account `51b10836…` (`sub-*@example.com`,
+  created 2026-09-19) holds an active *fake* BYO key. It goes with the leftover-test-account
+  cleanup (`docs/chrome-extension-design.md` §10 item 13).
 
 ## `/v1/ask` timeouts and the per-call log (Phase D session 5, verified locally and in production, commit `aea7b33`)
 
@@ -130,8 +165,8 @@ The fake request fails before account resolution, so it creates no rows.
     (Phase D session 6: deleted by the owner at live-test step L0 — *date and printed row to be
     recorded here*.)
   - **Old BYO ciphertext (session 6, live-test step L0):** before session 6, a replaced BYO key's
-    row kept its `encrypted_key`. The new code erases it on removal, replacement or decrypt
-    failure, but older rows needed a one-time wipe. *Count before, rows wiped, and date to be
+    row kept its `encrypted_key`. The new code erases it on removal or replacement (never on a
+    decrypt failure), but older rows needed a one-time wipe. *Count before, rows wiped, and date to be
     recorded here.*
 
 ## Database migrations
