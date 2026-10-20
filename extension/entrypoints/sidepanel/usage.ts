@@ -61,6 +61,16 @@ export interface UsageDeps {
 export const STRIPE_POLL_INTERVAL_MS = 3_000;
 export const STRIPE_POLL_ATTEMPTS = 20;
 
+/**
+ * After the portal only: a portal change's customer.subscription.updated webhook can arrive after
+ * that minute (seen in session 6's production run), so keep checking quietly, every 15 s for
+ * about 2 more minutes, while the panel stays visible.
+ */
+export const PORTAL_SLOW_POLL_INTERVAL_MS = 15_000;
+export const PORTAL_SLOW_POLL_ATTEMPTS = 8;
+
+type PollResult = 'changed' | 'unchanged' | 'stopped' | 'hidden';
+
 export const WAITING_FOR_STRIPE_NOTE = 'Waiting for Stripe to confirm…';
 
 /** The Refresh button's label while its own refresh is in flight. */
@@ -75,7 +85,11 @@ export class UsageController {
   private inFlight: Promise<UsageResponse | null> | null = null;
   /** The billing fingerprint before the person was sent to Stripe; null when not waiting. */
   private awaitingChangeFrom: string | null = null;
+  /** Which Stripe page the person was sent to; only the portal gets the slow follow-up. */
+  private awaitingKind: 'checkout' | 'portal' | null = null;
   private poll: AbortController | null = null;
+  /** The slow portal follow-up: no waiting note, so the card shows its usual notice. */
+  private quietPoll = false;
   private busy = false;
   /** A Refresh click is in flight: the button says so and can't be pressed again. */
   private refreshing = false;
@@ -100,7 +114,9 @@ export class UsageController {
   reset(): void {
     this.poll?.abort();
     this.poll = null;
+    this.quietPoll = false;
     this.awaitingChangeFrom = null;
+    this.awaitingKind = null;
     this.last = null;
     this.el.keyInput.value = '';
     this.el.keyNote.textContent = '';
@@ -137,7 +153,8 @@ export class UsageController {
 
   /**
    * The panel became visible again (the person came back from a Stripe tab): refresh, and if
-   * they were sent to Stripe, keep checking until the change arrives or a minute passes.
+   * they were sent to Stripe, keep checking until the change arrives or a minute passes (about
+   * three minutes after the portal; see PORTAL_SLOW_POLL_*).
    */
   onVisible(): void {
     if (!this.deps.isVisible()) return;
@@ -169,7 +186,7 @@ export class UsageController {
     this.el.panel.hidden = false;
     this.el.line.textContent = view.line;
     this.el.resetLine.textContent = view.resetLine;
-    if (this.poll === null) this.el.notice.textContent = view.notice;
+    if (this.poll === null || this.quietPoll) this.el.notice.textContent = view.notice;
     this.el.upgradeButton.hidden = !view.actions.upgrade;
     this.el.manageButton.hidden = !view.actions.manage;
     this.el.removeKeyButton.hidden = !view.actions.removeKey;
@@ -204,6 +221,7 @@ export class UsageController {
         return;
       }
       this.awaitingChangeFrom = this.last ? billingFingerprint(this.last) : '';
+      this.awaitingKind = kind;
       await this.deps.openTab(url);
       this.el.notice.textContent =
         kind === 'checkout'
@@ -228,25 +246,55 @@ export class UsageController {
     const poll = new AbortController();
     this.poll = poll;
     const before = this.awaitingChangeFrom;
+    const kind = this.awaitingKind;
+    // Hidden during the slow follow-up: stop, but keep waiting, so the next onVisible resumes.
+    let paused = false;
     this.el.notice.textContent = WAITING_FOR_STRIPE_NOTE;
     try {
-      for (let attempt = 0; attempt < STRIPE_POLL_ATTEMPTS; attempt++) {
-        if (attempt > 0) await this.deps.sleep(STRIPE_POLL_INTERVAL_MS, poll.signal);
-        if (poll.signal.aborted) return;
-        const usage = await this.refresh();
-        if (poll.signal.aborted || usage === null) return;
-        if (billingFingerprint(usage) !== before) break;
-      }
+      const fast = await this.checkUntilChanged(poll, before, STRIPE_POLL_ATTEMPTS, STRIPE_POLL_INTERVAL_MS, false);
+      if (fast !== 'unchanged' || kind !== 'portal') return;
+      this.quietPoll = true;
+      if (this.last) this.render(this.last);
+      else this.el.notice.textContent = '';
+      const slow = await this.checkUntilChanged(poll, before, PORTAL_SLOW_POLL_ATTEMPTS, PORTAL_SLOW_POLL_INTERVAL_MS, true);
+      paused = slow === 'hidden';
     } catch {
       return; // aborted (signed out); reset() already cleared the panel
     } finally {
       if (this.poll === poll) {
         this.poll = null;
-        this.awaitingChangeFrom = null;
+        this.quietPoll = false;
+        if (!paused) {
+          this.awaitingChangeFrom = null;
+          this.awaitingKind = null;
+        }
         if (this.last) this.render(this.last);
         else this.el.notice.textContent = '';
       }
     }
+  }
+
+  /**
+   * Checks /v1/usage up to `attempts` times, `intervalMs` apart, until the billing fingerprint
+   * moves from `before`. The slow follow-up waits before its first check (the fast phase just
+   * checked) and stops when the panel is hidden.
+   */
+  private async checkUntilChanged(
+    poll: AbortController,
+    before: string | null,
+    attempts: number,
+    intervalMs: number,
+    slow: boolean,
+  ): Promise<PollResult> {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (slow || attempt > 0) await this.deps.sleep(intervalMs, poll.signal);
+      if (poll.signal.aborted) return 'stopped';
+      if (slow && !this.deps.isVisible()) return 'hidden';
+      const usage = await this.refresh();
+      if (poll.signal.aborted || usage === null) return 'stopped';
+      if (billingFingerprint(usage) !== before) return 'changed';
+    }
+    return 'unchanged';
   }
 
   private async saveKey(): Promise<void> {

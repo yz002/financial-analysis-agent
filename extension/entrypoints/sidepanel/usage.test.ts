@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type UsageResponse } from '../../lib/backendApi';
 import {
+  PORTAL_SLOW_POLL_ATTEMPTS,
+  PORTAL_SLOW_POLL_INTERVAL_MS,
   REFRESHING_LABEL,
   STRIPE_POLL_ATTEMPTS,
   UsageController,
@@ -263,6 +265,102 @@ describe('Upgrade and Manage subscription', () => {
     panel.onVisible(); // no longer waiting: a plain refresh
     await settle();
     expect(deps.getUsage).toHaveBeenCalledTimes(2 + STRIPE_POLL_ATTEMPTS);
+  });
+
+  it('after the portal, keeps checking quietly every 15 s and picks up a late cancellation', async () => {
+    const CANCELED: UsageResponse = {
+      ...PAID,
+      subscription: { ...PAID.subscription!, cancel_at_period_end: true },
+    };
+    const notices: string[] = [];
+    const responses = [PAID, ...Array<UsageResponse>(STRIPE_POLL_ATTEMPTS + 2).fill(PAID), CANCELED];
+    const { panel, deps } = makePanel(responses, {
+      sleep: vi.fn(async (ms: number) => {
+        if (ms === PORTAL_SLOW_POLL_INTERVAL_MS) notices.push($('#usage-notice').textContent ?? '');
+      }),
+    });
+    await panel.refresh();
+    $('#usage-manage').click();
+    await settle();
+    panel.onVisible();
+    await settle();
+    await settle();
+
+    // first load, the fast minute, then three slow checks
+    expect(deps.getUsage).toHaveBeenCalledTimes(1 + STRIPE_POLL_ATTEMPTS + 3);
+    expect(deps.sleep).toHaveBeenCalledWith(PORTAL_SLOW_POLL_INTERVAL_MS, expect.anything());
+    expect(notices.every((n) => n === '')).toBe(true); // no "Waiting for Stripe" in the slow phase
+    expect($('#usage-reset').textContent).toBe('Your subscription ends <2026-11-08T00:00:00Z>.');
+  });
+
+  it('after the portal with no change, stops after the slow checks', async () => {
+    const { panel, deps } = makePanel([PAID]);
+    await panel.refresh();
+    $('#usage-manage').click();
+    await settle();
+    panel.onVisible();
+    await settle();
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledTimes(1 + STRIPE_POLL_ATTEMPTS + PORTAL_SLOW_POLL_ATTEMPTS);
+    expect($('#usage-notice').textContent).toBe('');
+
+    panel.onVisible(); // no longer waiting: a plain refresh
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledTimes(2 + STRIPE_POLL_ATTEMPTS + PORTAL_SLOW_POLL_ATTEMPTS);
+  });
+
+  it('checkout gets no slow follow-up', async () => {
+    const { panel, deps } = makePanel([free()]);
+    await panel.refresh();
+    $('#usage-upgrade').click();
+    await settle();
+    panel.onVisible();
+    await settle();
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledTimes(1 + STRIPE_POLL_ATTEMPTS);
+    expect(deps.sleep).not.toHaveBeenCalledWith(PORTAL_SLOW_POLL_INTERVAL_MS, expect.anything());
+  });
+
+  it('a hidden panel pauses the slow follow-up, and showing it again resumes waiting', async () => {
+    let visible = true;
+    let slowSleeps = 0;
+    const { panel, deps } = makePanel([PAID], {
+      isVisible: () => visible,
+      sleep: vi.fn(async (ms: number) => {
+        if (ms === PORTAL_SLOW_POLL_INTERVAL_MS && ++slowSleeps === 2) visible = false;
+      }),
+    });
+    await panel.refresh();
+    $('#usage-manage').click();
+    await settle();
+    panel.onVisible();
+    await settle();
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledTimes(1 + STRIPE_POLL_ATTEMPTS + 1);
+
+    visible = true;
+    panel.onVisible(); // still waiting: polls again rather than a single refresh
+    await settle();
+    expect($('#usage-notice').textContent).toBe('');
+    expect((deps.getUsage as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(2 + STRIPE_POLL_ATTEMPTS + 1);
+  });
+
+  it('signing out stops the slow follow-up', async () => {
+    let slowSleeps = 0;
+    const { panel, deps } = makePanel([PAID], {
+      sleep: vi.fn(async (ms: number, signal: AbortSignal) => {
+        if (ms === PORTAL_SLOW_POLL_INTERVAL_MS && ++slowSleeps === 1) panel.reset();
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+      }),
+    });
+    await panel.refresh();
+    $('#usage-manage').click();
+    await settle();
+    panel.onVisible();
+    await settle();
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledTimes(1 + STRIPE_POLL_ATTEMPTS);
+    expect($('#usage-panel').hidden).toBe(true);
   });
 
   it('does nothing while the panel is hidden', async () => {
