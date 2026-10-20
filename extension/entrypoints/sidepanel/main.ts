@@ -22,6 +22,7 @@ import {
   type UnparsedCell,
 } from '../../lib/backendApi';
 import { UsageController } from './usage';
+import { defaultFormatTime } from '../../lib/usageModel';
 import {
   buildConfirmRequest,
   carryOver,
@@ -1079,7 +1080,8 @@ function suggestionFailureNote(err: unknown): string {
         : null;
     return (
       "You've used today's suggested mappings" +
-      (resetsAt ? ` (more from ${new Date(resetsAt).toLocaleString()})` : '') +
+      // A rolling window, not the UTC day, so "from <time>" (to the minute, as the usage card).
+      (resetsAt ? ` (more from ${defaultFormatTime(resetsAt)})` : '') +
       '. Choose what each column is yourself.'
     );
   }

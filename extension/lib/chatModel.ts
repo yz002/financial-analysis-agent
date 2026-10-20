@@ -9,6 +9,7 @@ import type {
   FigureCheck,
 } from './backendApi';
 import { roleLabel } from './mappingModel';
+import { defaultFormatTime } from './usageModel';
 
 /**
  * What the chat panel shows for an answer (Phase D session 5), as plain data -- no DOM here,
@@ -255,12 +256,21 @@ export function failureMessage(failure: AskFailure): string {
     case 'time_budget':
       return 'That question took too long and was stopped. Try asking a narrower question.';
     case 'cap': {
-      const when = failure.resetsAt
-        ? ` More are available from ${new Date(failure.resetsAt).toLocaleString()}.`
-        : '';
-      return failure.error === 'monthly_cap_reached'
-        ? `You've used all the questions for this billing period.${when}`
-        : `You've used today's questions.${when}`;
+      // Times to the minute, as on the usage card. Only the free daily limit resets at 00:00
+      // UTC (EXTENSION_INTEGRATION.md SS6 /v1/usage); the paid limit renews at the billing
+      // period's end, so it keeps "from <time>".
+      if (failure.error === 'monthly_cap_reached') {
+        const when = failure.resetsAt ? ` More are available from ${defaultFormatTime(failure.resetsAt)}.` : '';
+        return `You've used all the questions for this billing period.${when}`;
+      }
+      let when = '';
+      if (failure.resetsAt) {
+        when =
+          failure.error === 'daily_cap_reached'
+            ? ` More are available at 00:00 UTC (${defaultFormatTime(failure.resetsAt)} your time).`
+            : ` More are available from ${defaultFormatTime(failure.resetsAt)}.`;
+      }
+      return `You've used today's questions.${when}`;
     }
     case 'invalid_question':
       return `That question couldn't be sent. Questions can be up to ${QUESTION_MAX_LENGTH.toLocaleString('en-US')} characters.`;

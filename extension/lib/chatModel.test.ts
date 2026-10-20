@@ -8,6 +8,7 @@ import {
   NOT_TRACED_LABEL,
   segmentAnswer,
 } from './chatModel';
+import { defaultFormatTime } from './usageModel';
 
 const ANSWER = 'Revenue was 1.25 million and gross margin was 40.0%.';
 
@@ -232,6 +233,15 @@ describe('failureMessage', () => {
     expect(failureMessage({ kind: 'time_budget' })).toContain('took too long');
     expect(failureMessage({ kind: 'answer_lost' })).toBe("That question didn't finish. Ask it again.");
     expect(failureMessage({ kind: 'cap', error: 'daily_cap_reached', resetsAt: null })).toBe("You've used today's questions.");
+    const reset = '2026-10-21T00:00:00Z';
+    const when = defaultFormatTime(reset);
+    expect(failureMessage({ kind: 'cap', error: 'daily_cap_reached', resetsAt: reset })).toBe(
+      `You've used today's questions. More are available at 00:00 UTC (${when} your time).`,
+    );
+    expect(failureMessage({ kind: 'cap', error: 'monthly_cap_reached', resetsAt: '2026-11-20T10:07:42Z' })).toBe(
+      `You've used all the questions for this billing period. More are available from ${defaultFormatTime('2026-11-20T10:07:42Z')}.`,
+    );
+    expect(failureMessage({ kind: 'cap', error: 'monthly_cap_reached', resetsAt: '2026-11-20T10:07:42Z' })).not.toMatch(/UTC|:42\b/);
     expect(failureMessage({ kind: 'cap', error: 'monthly_cap_reached', resetsAt: null })).toBe(
       "You've used all the questions for this billing period.",
     );

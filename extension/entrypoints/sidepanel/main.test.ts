@@ -1523,6 +1523,20 @@ describe('mapping screen (session 4)', () => {
     expect(setActiveStatementMock).not.toHaveBeenCalled();
   });
 
+  it('a 429 with a reset time says when, to the minute, as "more from" (a rolling window, not UTC)', async () => {
+    proposeMappingMock.mockRejectedValue(
+      new BackendApiError('failed', 429, { error: 'mapping_cap_reached', resets_at: '2026-10-04T10:07:42+00:00' }),
+    );
+    await openMapping();
+
+    const { defaultFormatTime } = await import('../../lib/usageModel');
+    expect(el('#mapping-note').textContent).toBe(
+      `You've used today's suggested mappings (more from ${defaultFormatTime('2026-10-04T10:07:42+00:00')}). ` +
+        'Choose what each column is yourself.',
+    );
+    expect(el('#mapping-note').textContent).not.toMatch(/UTC|:42\b/);
+  });
+
   it('a 429 from the suggestion leaves every column for the person to map', async () => {
     proposeMappingMock.mockRejectedValue(
       new BackendApiError('failed', 429, { error: 'mapping_cap_reached', resets_at: null }),
