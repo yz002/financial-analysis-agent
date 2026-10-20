@@ -385,6 +385,26 @@ button:disabled {
   color: var(--color-ink);
 }
 
+/* Which statement the chat is about: a boxed line, so it's read before asking. */
+#app #chat-statement {
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-input);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+.chat-about-label {
+  font-weight: var(--text-section-weight);
+}
+
+.chat-about-note {
+  display: block;
+  font-size: var(--text-meta-size);
+  line-height: var(--text-meta-line-height);
+  color: var(--color-ink-mute);
+}
+
 #chat-log {
   display: flex;
   flex-direction: column;

@@ -203,8 +203,18 @@ describe('ChatController', () => {
     expect($('#chat-panel').hidden).toBe(false);
     const when = new Date(STATEMENT.confirmedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     expect($('#chat-statement').textContent).toBe(
-      `Answers come from Acme — Q3 P&L · 'P&L'!A3:C9 · numbers in thousands · confirmed ${when}.`,
+      `Asking about Acme — Q3 P&L · 'P&L'!A3:C9 · numbers in thousands · confirmed ${when}. ` +
+        'Answers use this statement, whichever tab is open.',
     );
+    expect($('#chat-statement .chat-about-label').textContent).toBe('Asking about');
+    expect($('#chat-statement .chat-about-source').textContent).toContain("Q3 P&L · 'P&L'!A3:C9");
+  });
+
+  it('the about line shows a statement name that looks like markup as text', async () => {
+    const { chat } = makeChat([]);
+    await chat.show({ ...STATEMENT, entityName: MARKUP, label: `${MARKUP} · 'P&L'!A1:B2` });
+    expect($('#chat-statement').querySelectorAll('img, script')).toHaveLength(0);
+    expect($('#chat-statement').textContent).toContain(MARKUP);
   });
 
   it('asks with the statement and a request id, then continues the same conversation', async () => {

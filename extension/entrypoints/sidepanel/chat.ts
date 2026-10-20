@@ -173,6 +173,9 @@ const WAITING_TEXT = 'Answering… this can take a few minutes. You can close th
 
 export const NEW_CONVERSATION_ELSEWHERE_NOTE = 'A new conversation was started in another window.';
 
+export const ABOUT_LABEL = 'Asking about';
+export const ABOUT_NOTE = 'Answers use this statement, whichever tab is open.';
+
 export class ChatController {
   private statement: ActiveStatement | null = null;
   private conversation: StoredConversation | null = null;
@@ -206,7 +209,15 @@ export class ChatController {
       this.el.panel.setAttribute('hidden', '');
       return;
     }
-    this.el.statementLine.textContent = `Answers come from ${describeStatement(statement)}.`;
+    // Which statement the chat is about, prominently: it follows the active statement, not
+    // whichever spreadsheet tab happens to be open.
+    this.el.statementLine.replaceChildren(
+      element('span', 'chat-about-label', ABOUT_LABEL),
+      document.createTextNode(' '),
+      element('span', 'chat-about-source', `${describeStatement(statement)}.`),
+      document.createTextNode(' '),
+      element('span', 'chat-about-note', ABOUT_NOTE),
+    );
     this.el.panel.removeAttribute('hidden');
 
     const stored = await getConversation();
