@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ActiveStatement } from './sessionStorage';
-import { describeStatement, statementSource } from './statementLabel';
+import { describeStatement, periodsText, statementSource } from './statementLabel';
 
 const BASE: ActiveStatement = {
   csvContextId: 'ctx-1',
@@ -24,6 +24,24 @@ describe('statementSource', () => {
 
   it('keeps a different business name in front of the file and range', () => {
     expect(statementSource({ ...BASE, entityName: 'Acme' })).toBe("Acme — FA Spike Test · 'P&L'!A3:G7");
+  });
+});
+
+describe('periodsText', () => {
+  it("uses the backend's count and cadence verbatim", () => {
+    expect(periodsText('quarterly', 4)).toBe('4 quarterly periods');
+    expect(periodsText('annual', 5)).toBe('5 annual periods');
+  });
+
+  it('no cadence: just the count, and "1 period" for one', () => {
+    expect(periodsText(null, 1)).toBe('1 period');
+    expect(periodsText(null, 3)).toBe('3 periods');
+  });
+
+  it('a statement stored before period_count keeps the old wording', () => {
+    expect(periodsText('quarterly', undefined)).toBe('quarterly periods');
+    expect(periodsText(null, undefined)).toBe('a single period');
+    expect(periodsText('annual', null)).toBe('annual periods');
   });
 });
 

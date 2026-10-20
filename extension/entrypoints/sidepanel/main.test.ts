@@ -1259,6 +1259,32 @@ describe('mapping screen (session 4)', () => {
     expect(hint).toBe(`Choose ${onesLabel} unless the sheet says its numbers are in thousands, millions or billions.`);
   });
 
+  it("the card shows the backend's period count with its cadence, and keeps it with the statement", async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse({ cadence: 'quarterly', period_count: 4 }));
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+
+    expect(setActiveStatementMock).toHaveBeenCalledWith(expect.objectContaining({ cadence: 'quarterly', periodCount: 4 }));
+    expect(el('#statement-summary').textContent).toContain('. 4 quarterly periods; numbers in thousands');
+  });
+
+  it('one period with no cadence reads "1 period"; an older backend without the count keeps the old wording', async () => {
+    confirmMappingMock.mockResolvedValueOnce(confirmResponse({ cadence: null, period_count: 1 }));
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+    expect(el('#statement-summary').textContent).toContain('. 1 period; numbers in thousands');
+
+    // No period_count in the response: nothing stored for it, and the old wording.
+    setActiveStatementMock.mockClear();
+    confirmMappingMock.mockResolvedValueOnce(confirmResponse({ cadence: 'quarterly' }));
+    await click('#change-mapping');
+    await click('#confirm-mapping');
+    expect(setActiveStatementMock.mock.calls[0]![0]).not.toHaveProperty('periodCount');
+    expect(el('#statement-summary').textContent).toContain('. Quarterly periods; numbers in thousands');
+  });
+
   it("pre-fills the business name without the file's extension", async () => {
     connectGoogleSheetMock.mockResolvedValue(fakeFile({ name: 'FA Spike Test.xlsx' }));
     await openMapping();
@@ -1736,6 +1762,15 @@ describe('active statement across panel loads and sign-ins (session 4)', () => {
     expect(isHidden('#change-mapping')).toBe(true);
     expect(parseCsvMock).not.toHaveBeenCalled();
     expect(proposeMappingMock).not.toHaveBeenCalled();
+  });
+
+  it("a restored card shows the stored period count; one stored before it still loads", async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue({ ...stored, periodCount: 6 });
+    await loadSidepanel();
+    expect(el('#statement-summary').textContent).toBe(
+      "Spike Co — FA Spike Test · 'P&L'!A3:C9. 6 annual periods; numbers in millions; currency GBP. Ready for questions.",
+    );
   });
 
   it('a restored card offers Read another range, which connects to the open tab from that click', async () => {

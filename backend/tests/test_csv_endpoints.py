@@ -111,6 +111,7 @@ def test_full_parse_propose_confirm_round_trip(auth_session, monkeypatch):
     assert confirmed["confirmed"] is True
     assert confirmed["errors"] == []
     assert confirmed["cadence"] == "quarterly"
+    assert confirmed["period_count"] == 2  # Phase D session 7: the stored rows, counted by the backend
     assert "total_assets" in confirmed["concepts_unavailable"]
     assert "revenue" not in confirmed["concepts_unavailable"]
 
@@ -153,6 +154,7 @@ def test_confirm_rejects_serial_number_in_period_column(auth_session):
     body = resp.json()
     assert body["confirmed"] is False
     assert any("45292" in e for e in body["errors"])
+    assert body["period_count"] is None  # only set on a successful confirm
 
     session = get_session()
     try:
@@ -603,6 +605,7 @@ def test_unparsed_cells_need_an_acknowledgement_bound_to_what_was_shown(auth_ses
     first = _confirm(headers, csv_context_id).json()
     assert first["confirmed"] is False
     assert first["requires_acknowledgement"] is True
+    assert first["period_count"] is None
     assert first["unparsed_cells"] == [
         {
             "cell": "'P&L'!C4", "source_row": 0, "column": "Net Income", "role": "net_income",
@@ -621,6 +624,18 @@ def test_unparsed_cells_need_an_acknowledgement_bound_to_what_was_shown(auth_ses
     ).json()
     assert confirmed["confirmed"] is True, confirmed
     assert confirmed["unparsed_cells"][0]["cell"] == "'P&L'!C4"
+    assert confirmed["period_count"] == 2  # the period with no Net Income is still a period
+
+
+def test_single_period_statement_has_no_cadence_and_a_period_count_of_one(auth_session):
+    _, headers = auth_session()
+    rows = [["Quarter Ending", "Total Revenue", "Net Income"], ["2024-01-01", "100000", "12000"]]
+    csv_context_id = _parse(headers, rows=rows).json()["csv_context_id"]
+
+    confirmed = _confirm(headers, csv_context_id).json()
+    assert confirmed["confirmed"] is True, confirmed
+    assert confirmed["cadence"] is None
+    assert confirmed["period_count"] == 1
 
 
 def test_acknowledgement_for_a_different_scale_or_mapping_is_not_accepted(auth_session):

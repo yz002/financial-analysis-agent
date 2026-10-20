@@ -540,6 +540,22 @@ optional, so older callers keep working.)
 - Tool results the agent sees for a confirmed statement now carry `units`, and each value's
   citation carries `sheet_scale`. That's internal, not part of this HTTP contract.
 
+(Amended Phase D session 7, pending live verification: unit-tested only, not yet seen live or
+in production. One additive response field. Older callers that ignore it keep working.)
+- **`period_count`** (integer or `null`, default `null`): how many periods the confirmed
+  statement holds, counted by the backend from the rows it stored. It's set only when
+  `confirmed` is `true`, and is `null` on every refusal and acknowledgement request.
+  ```json
+  {"confirmed": true, "cadence": "quarterly", "period_count": 4, ...}
+  ```
+- **`cadence`** values, unchanged: `"quarterly"`, `"annual"`, or `null` for a single-period
+  statement (fewer than 2 periods have no spacing to classify). Spacing that fits neither
+  cadence is refused in `errors[]`, so a confirmed statement with 2 or more periods always has
+  one.
+- The extension shows the count as received, with the cadence verbatim: "4 quarterly periods",
+  "1 period". It never counts rows itself. A statement stored before this field keeps its
+  earlier wording.
+
 ### `POST /v1/ask`
 Auth required. The main question-answering endpoint.
 

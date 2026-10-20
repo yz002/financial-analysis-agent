@@ -20,6 +20,19 @@ export function statementSource(statement: ActiveStatement): string {
   return `${entityName} — ${label}`;
 }
 
+/**
+ * How many periods, and their cadence, both exactly as the backend reported them at confirm
+ * (Phase D session 7): "4 quarterly periods", "4 periods" with no cadence, "1 period". Nothing is
+ * counted or inferred here. A statement stored before period_count existed keeps the old wording.
+ */
+export function periodsText(cadence: string | null, periodCount: number | null | undefined): string {
+  if (periodCount === null || periodCount === undefined) {
+    return cadence ? `${cadence} periods` : 'a single period';
+  }
+  const noun = periodCount === 1 ? 'period' : 'periods';
+  return cadence ? `${periodCount} ${cadence} ${noun}` : `${periodCount} ${noun}`;
+}
+
 function scaleText(scale: string): string {
   const label = SCALE_OPTIONS.find((o) => o.value === scale)?.label ?? scale;
   return `numbers in ${label.toLowerCase()}`;

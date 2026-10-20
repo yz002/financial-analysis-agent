@@ -127,6 +127,10 @@ class ConfirmResponse(BaseModel):
     ack_fingerprint: str | None = None
     scale: str | None = None
     currency: str | None = None
+    # Phase D session 7: how many periods the confirmed statement holds (its stored rows), so the
+    # extension shows the backend's count rather than counting anything itself. Set only when
+    # confirmed is true; None otherwise.
+    period_count: int | None = None
 
 
 class UsageSubscription(BaseModel):

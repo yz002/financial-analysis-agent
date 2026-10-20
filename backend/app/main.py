@@ -1151,6 +1151,7 @@ def confirm_mapping(
             concepts_unavailable=concepts_unavailable,
             errors=[],
             unparsed_cells=unparsed,
+            period_count=len(row.statement_data),
             **units,
         )
     finally:

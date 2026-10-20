@@ -49,6 +49,8 @@ export interface ActiveStatement {
   label: string; // e.g. "FA Spike Test · 'P&L'!A3:C9"
   confirmedAt: string; // ISO-8601
   cadence: string | null;
+  /** The backend's period count at confirm (session 7); absent on statements stored before it. */
+  periodCount?: number;
   scale: string;
   currency: string | null;
 }

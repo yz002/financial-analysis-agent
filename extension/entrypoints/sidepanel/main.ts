@@ -2,7 +2,7 @@ import { launchAuthFlow, AuthFlowError } from '../../lib/authFlow';
 import { abortableSleep } from '../../lib/askRunner';
 import { ANSWER_PENDING_NOTE } from '../../lib/chatModel';
 import { clearChatState, onChatStateChanged } from '../../lib/conversationStorage';
-import { statementSource } from '../../lib/statementLabel';
+import { periodsText, statementSource } from '../../lib/statementLabel';
 import { ChatController } from './chat';
 import {
   ask,
@@ -605,7 +605,7 @@ function renderStatementCard(statement: ActiveStatement | null, details: string[
     return;
   }
   if (statementSummary) {
-    const cadence = statement.cadence ? `${statement.cadence} periods` : 'a single period';
+    const cadence = periodsText(statement.cadence, statement.periodCount);
     statementSummary.textContent =
       `${statementSource(statement)}. ${cadence[0]!.toUpperCase()}${cadence.slice(1)}; ` +
       `numbers in ${describeScale(statement.scale).toLowerCase()}; currency ` +
@@ -1169,6 +1169,8 @@ async function statementConfirmed(m: MappingSession, response: ConfirmMappingRes
     label: `${m.file.name} · ${rangeLabel(m.grid)}`,
     confirmedAt: new Date().toISOString(),
     cadence: response.cadence,
+    // The backend's own count, kept with the statement so a restored card shows it too.
+    ...(typeof response.period_count === 'number' ? { periodCount: response.period_count } : {}),
     scale,
     currency: m.draft.currency,
   };

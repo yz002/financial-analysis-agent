@@ -178,6 +178,8 @@ export interface ConfirmMappingResponse {
   ack_fingerprint: string | null;
   scale: string | null;
   currency: string | null;
+  /** Session 7: the confirmed statement's period count; null unless confirmed, absent from an older backend. */
+  period_count?: number | null;
 }
 
 /**
