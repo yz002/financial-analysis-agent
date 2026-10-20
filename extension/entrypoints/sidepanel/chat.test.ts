@@ -4,7 +4,7 @@ import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type AskRequestBody, type AskResponse, type Citation } from '../../lib/backendApi';
 import { clearPendingAsk, getConversation, getPendingAsk, setConversation, setPendingAsk } from '../../lib/conversationStorage';
 import type { ActiveStatement } from '../../lib/sessionStorage';
-import { ChatController, renderAnswer, type ChatDeps } from './chat';
+import { ChatController, NEW_CONVERSATION_ELSEWHERE_NOTE, renderAnswer, type ChatDeps } from './chat';
 
 const MARKUP = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script>';
 
@@ -466,6 +466,56 @@ describe('ChatController.syncFromStorage (another window)', () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     expect($('#chat-notice').textContent).not.toContain('another window');
+  });
+
+  it('a new conversation started in another window replaces the transcript with a notice', async () => {
+    const { chat } = makeChat([answer()]);
+    await chat.show(STATEMENT);
+    await ask('Q?');
+    expect($('#chat-log').querySelectorAll('.chat-answer')).toHaveLength(1);
+
+    // Another window confirmed a statement: its own fresh conversation, with its own id.
+    await setConversation({
+      localId: 'other-window', csvContextId: 'ctx-1', statementLabel: 'Acme', conversationId: null, messages: [],
+    });
+    await chat.syncFromStorage();
+
+    expect($('#chat-log').children).toHaveLength(0);
+    expect($('#chat-notice').textContent).toBe(NEW_CONVERSATION_ELSEWHERE_NOTE);
+  });
+
+  it("no notice for this panel's own new conversation, more messages in the same one, or an empty transcript", async () => {
+    const { chat } = makeChat([answer(), answer()]);
+    await chat.show(STATEMENT);
+    await chat.syncFromStorage(); // nothing shown yet
+    expect($('#chat-notice').textContent).toBe('');
+
+    await ask('Q?');
+    const sameConversation = (await getConversation())!;
+    await setConversation({
+      ...sameConversation,
+      messages: [...sameConversation.messages, { role: 'question', text: 'Elsewhere?' }],
+    });
+    await chat.syncFromStorage(); // another window added to the same conversation
+    expect($('#chat-notice').textContent).toBe('');
+
+    await chat.startNewConversation(STATEMENT);
+    await chat.syncFromStorage(); // this panel's own new conversation
+    expect($('#chat-notice').textContent).toBe('');
+  });
+
+  it('the notice clears on the next question', async () => {
+    const { chat } = makeChat([answer(), answer()]);
+    await chat.show(STATEMENT);
+    await ask('Q?');
+    await setConversation({
+      localId: 'other-window', csvContextId: 'ctx-1', statementLabel: 'Acme', conversationId: null, messages: [],
+    });
+    await chat.syncFromStorage();
+    expect($('#chat-notice').textContent).toBe(NEW_CONVERSATION_ELSEWHERE_NOTE);
+
+    await ask('Next?');
+    expect($('#chat-notice').textContent).toBe('');
   });
 
   it('a conversation replaced by another window for another statement shows the New conversation offer', async () => {

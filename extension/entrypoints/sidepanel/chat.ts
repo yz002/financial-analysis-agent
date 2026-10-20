@@ -156,6 +156,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
 
 function freshConversation(statement: ActiveStatement): StoredConversation {
   return {
+    localId: crypto.randomUUID(),
     csvContextId: statement.csvContextId,
     statementLabel: describeStatement(statement),
     conversationId: null,
@@ -167,6 +168,8 @@ const ELSEWHERE_NOTE =
   'An answer is being prepared in another window. It will appear here when it arrives, or check again.';
 
 const WAITING_TEXT = 'Answering… this can take a few minutes. You can close the panel; the answer is kept.';
+
+export const NEW_CONVERSATION_ELSEWHERE_NOTE = 'A new conversation was started in another window.';
 
 export class ChatController {
   private statement: ActiveStatement | null = null;
@@ -224,10 +227,17 @@ export class ChatController {
    */
   async syncFromStorage(): Promise<void> {
     if (this.running || !this.statement) return;
+    const shown = this.conversation;
     const stored = await getConversation();
     this.conversation = stored ?? freshConversation(this.statement);
     this.renderTranscript();
     this.renderMismatch();
+    // Another window started a new conversation: say so rather than let the transcript
+    // silently disappear. Not for this panel's own new conversation (same id), nor when
+    // nothing was shown yet.
+    if (stored && shown && shown.messages.length > 0 && stored.localId !== shown.localId) {
+      this.setNotice(NEW_CONVERSATION_ELSEWHERE_NOTE);
+    }
     const pending = await getPendingAsk();
     if (this.running) return; // this panel started waiting meanwhile
     this.setPending(pending);

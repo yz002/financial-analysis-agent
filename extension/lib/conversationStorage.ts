@@ -18,6 +18,12 @@ export type ChatMessage =
   | { role: 'notice'; text: string };
 
 export interface StoredConversation {
+  /**
+   * Set when the panel starts a conversation (Phase D session 7), so another panel can tell a
+   * new conversation from more messages in the same one. Optional: a conversation stored before
+   * it existed still loads.
+   */
+  localId?: string;
   csvContextId: string;
   statementLabel: string;
   conversationId: string | null;
