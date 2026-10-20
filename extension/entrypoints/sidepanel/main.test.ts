@@ -53,8 +53,10 @@ const SIDEPANEL_BODY = `
       <section id="read-panel" hidden>
         <p id="file-as-of"></p>
         <select id="sheet-select"></select>
+        <p id="sheet-hint" class="hint">Added a tab? Click Connect data again to see it.</p>
         <input id="range-input" type="text" />
         <button id="read-range" type="button">Preview</button>
+        <p id="enter-hint" class="hint" hidden>Press Enter in the sheet before Preview: a cell still being edited isn't read.</p>
         <ul id="read-notices"></ul>
         <p id="preview-caption"></p>
         <table id="preview-table"></table>
@@ -852,6 +854,18 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
 
     expect(el('#file-as-of').textContent).toContain('Data as of last save:');
     expect(el('#file-as-of').textContent).toContain('may not appear yet');
+    expect(isHidden('#enter-hint')).toBe(true); // Excel reads the last save, not the live sheet
+  });
+
+  it('a Google Sheet shows the press-Enter hint; the new-tab hint is always there', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(isHidden('#enter-hint')).toBe(false);
+    expect(el('#enter-hint').textContent).toContain("a cell still being edited isn't read");
+    expect(el('#sheet-hint').textContent).toBe('Added a tab? Click Connect data again to see it.');
   });
 
   it('an Excel file refused before download shows why', async () => {

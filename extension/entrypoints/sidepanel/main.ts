@@ -106,6 +106,7 @@ const fileAsOf = document.querySelector<HTMLElement>('#file-as-of');
 const sheetSelect = document.querySelector<HTMLSelectElement>('#sheet-select');
 const rangeInput = document.querySelector<HTMLInputElement>('#range-input');
 const readRangeButton = document.querySelector<HTMLButtonElement>('#read-range');
+const enterHint = document.querySelector<HTMLElement>('#enter-hint');
 const readNotices = document.querySelector<HTMLElement>('#read-notices');
 const previewCaption = document.querySelector<HTMLElement>('#preview-caption');
 const previewTable = document.querySelector<HTMLTableElement>('#preview-table');
@@ -327,6 +328,9 @@ function showConnectedFile(file: ConnectedFile): void {
         'last minute or two may not appear yet.'
       : '';
   }
+  // Google reads the live sheet, but a cell still being typed into isn't visible to the API
+  // (chrome-extension-design.md SS10 item 9). Excel reads the last save, said just above.
+  if (enterHint) enterHint.hidden = file.provider !== 'google';
   readPanel?.removeAttribute('hidden');
 }
 

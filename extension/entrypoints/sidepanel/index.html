@@ -57,6 +57,7 @@
           <div class="field">
             <label for="sheet-select">Sheet</label>
             <select id="sheet-select"></select>
+            <p id="sheet-hint" class="hint">Added a tab? Click Connect data again to see it.</p>
           </div>
           <div class="field">
             <label for="range-input">Range</label>
@@ -69,6 +70,9 @@
             />
           </div>
           <button id="read-range" type="button">Preview</button>
+          <p id="enter-hint" class="hint" hidden>
+            Press Enter in the sheet before Preview: a cell still being edited isn't read.
+          </p>
           <ul id="read-notices"></ul>
           <p id="preview-caption"></p>
           <div class="table-scroll"><table id="preview-table"></table></div>

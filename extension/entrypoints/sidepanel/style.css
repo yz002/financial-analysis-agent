@@ -166,6 +166,7 @@ button:disabled {
 }
 
 #read-panel label,
+#app .hint,
 #app #file-as-of,
 #app #preview-caption,
 #read-notices,
