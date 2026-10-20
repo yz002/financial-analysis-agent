@@ -135,6 +135,7 @@ const statementCard = document.querySelector<HTMLElement>('#statement-card');
 const statementSummary = document.querySelector<HTMLElement>('#statement-summary');
 const statementWarnings = document.querySelector<HTMLElement>('#statement-warnings');
 const changeMappingButton = document.querySelector<HTMLButtonElement>('#change-mapping');
+const readAnotherButton = document.querySelector<HTMLButtonElement>('#read-another');
 const mappingPendingNote = document.querySelector<HTMLElement>('#mapping-pending-note');
 
 function required<T extends Element>(selector: string): T {
@@ -663,6 +664,7 @@ function setBusy(isBusy: boolean): void {
     confirmAnywayButton,
     ackBackButton,
     changeMappingButton,
+    readAnotherButton,
   ]) {
     if (control) control.disabled = isBusy;
   }
@@ -1228,6 +1230,17 @@ cancelMappingButton?.addEventListener('click', () => {
 });
 changeMappingButton?.addEventListener('click', () => {
   void handleChangeMapping();
+});
+readAnotherButton?.addEventListener('click', (event) => {
+  // The card's way back to reading (it has none after a reopen otherwise). With a file still
+  // connected in this panel, its read panel comes back with no network call; without one, this
+  // is a Connect data click, so any data grant still starts inside the person's own click.
+  if (connectedFile) {
+    clearStatus();
+    returnToReadPanel();
+    return;
+  }
+  void handleConnectData(event);
 });
 entityNameInput?.addEventListener('input', () => {
   if (!mapping) return;

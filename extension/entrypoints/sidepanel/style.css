@@ -116,6 +116,7 @@ button:disabled {
 #cancel-mapping,
 #ack-back,
 #change-mapping,
+#read-another,
 #signout,
 #revoke-all {
   background: var(--color-canvas);
@@ -131,6 +132,7 @@ button:disabled {
 #cancel-mapping:hover:not(:disabled),
 #ack-back:hover:not(:disabled),
 #change-mapping:hover:not(:disabled),
+#read-another:hover:not(:disabled),
 #signout:hover:not(:disabled),
 #revoke-all:hover:not(:disabled) {
   background: var(--color-surface);
@@ -341,7 +343,8 @@ button:disabled {
   color: var(--color-ink-secondary);
 }
 
-#mapping-actions {
+#mapping-actions,
+#statement-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-xs);

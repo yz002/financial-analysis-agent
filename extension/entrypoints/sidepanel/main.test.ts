@@ -88,6 +88,7 @@ const SIDEPANEL_BODY = `
         <p id="statement-summary"></p>
         <ul id="statement-warnings"></ul>
         <button id="change-mapping" type="button" hidden>Change mapping</button>
+        <button id="read-another" type="button">Read another range</button>
       </section>
       <section id="chat-panel" hidden>
         <p id="chat-statement"></p>
@@ -1648,6 +1649,25 @@ describe('mapping screen (session 4)', () => {
     expect(proposeMappingMock).toHaveBeenCalledTimes(1);
   });
 
+  it('Read another range after a confirm brings back the read panel and its preview, with no new read', async () => {
+    const file = fakeFile();
+    connectGoogleSheetMock.mockResolvedValue(file);
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+    expect(isHidden('#read-panel')).toBe(true);
+
+    await click('#read-another');
+
+    expect(isHidden('#read-panel')).toBe(false);
+    expect(isHidden('#send-data')).toBe(false);
+    expect(el('#preview-table').querySelectorAll('td')).toHaveLength(3);
+    expect(file.read).toHaveBeenCalledOnce();
+    expect(getDataTokenMock).toHaveBeenCalledTimes(2); // Connect data and Preview only
+    expect(isHidden('#statement-card')).toBe(false); // the active statement stays as it is
+  });
+
   it('a failed suggestion leaves no reset button', async () => {
     proposeMappingMock.mockRejectedValue(new BackendApiError('failed', 502, { error: 'x' }));
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1691,6 +1711,24 @@ describe('active statement across panel loads and sign-ins (session 4)', () => {
     expect(isHidden('#change-mapping')).toBe(true);
     expect(parseCsvMock).not.toHaveBeenCalled();
     expect(proposeMappingMock).not.toHaveBeenCalled();
+  });
+
+  it('a restored card offers Read another range, which connects to the open tab from that click', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    setActiveTabUrl(SHEET_URL);
+    getDataTokenMock.mockResolvedValue({ accessToken: 'ya29.t', email: 'data@example.com', scope: '' });
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+    expect(isHidden('#read-another')).toBe(false);
+    expect(isHidden('#read-panel')).toBe(true);
+
+    await click('#read-another');
+
+    expect(getDataTokenMock).toHaveBeenCalledOnce();
+    expect(getDataTokenMock.mock.calls[0]![1].click.type).toBe('click');
+    expect(isHidden('#read-panel')).toBe(false);
+    expect(connectionText()).toBe('Connected: Q3 P&L via data@example.com');
   });
 
   it('a new sign-in clears the active statement', async () => {
