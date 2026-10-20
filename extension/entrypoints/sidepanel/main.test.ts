@@ -1228,6 +1228,12 @@ describe('mapping screen (session 4)', () => {
     expect(el('#mapping-errors').textContent).toContain('Choose the units the numbers are in.');
   });
 
+  it("pre-fills the business name without the file's extension", async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile({ name: 'FA Spike Test.xlsx' }));
+    await openMapping();
+    expect(el<HTMLInputElement>('#entity-name').value).toBe('FA Spike Test');
+  });
+
   it('confirms with the scale sent explicitly, stores the active statement and shows it', async () => {
     confirmMappingMock.mockResolvedValue(confirmResponse());
     await openMapping();

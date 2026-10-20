@@ -26,6 +26,7 @@ import {
   buildConfirmRequest,
   carryOver,
   CURRENCY_OPTIONS,
+  defaultEntityName,
   newDraft,
   ROLE_OPTIONS,
   roleLabel,
@@ -990,7 +991,7 @@ async function sendForMapping(origin: MappingOrigin, previous: ConfirmedChoices 
       columns: response.columns,
       sampleRows: response.sample_rows,
       proposal: null,
-      draft: newDraft(response.columns, null, origin.file.name),
+      draft: newDraft(response.columns, null, defaultEntityName(origin.file.name)),
       serverErrors: [],
       acknowledgement: null,
     };

@@ -71,6 +71,15 @@ export const CURRENCY_OPTIONS: { value: string | null; label: string }[] = [
 
 export const ENTITY_NAME_MAX = 200;
 
+/** Spreadsheet file extensions only, so a name like "Acme Inc." keeps its trailing dot. */
+const SPREADSHEET_EXTENSION = /\.(xlsx|xlsm|xlsb|xls|csv)$/i;
+
+/** The business name pre-filled from a file name: "FA Spike Test.xlsx" becomes "FA Spike Test". */
+export function defaultEntityName(fileName: string): string {
+  const stripped = fileName.trim().replace(SPREADSHEET_EXTENSION, '').trim();
+  return stripped === '' ? fileName : stripped;
+}
+
 export interface ProposalEntry {
   csv_column: string;
   proposed_role: string;

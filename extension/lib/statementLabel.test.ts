@@ -17,6 +17,11 @@ describe('statementSource', () => {
     expect(statementSource(BASE)).toBe("FA Spike Test · 'P&L'!A3:G7");
   });
 
+  it("doesn't repeat a name pre-filled without the file's extension", () => {
+    const statement = { ...BASE, label: "FA Spike Test.xlsx · 'P&L'!A3:G7" };
+    expect(statementSource(statement)).toBe("FA Spike Test.xlsx · 'P&L'!A3:G7");
+  });
+
   it('keeps a different business name in front of the file and range', () => {
     expect(statementSource({ ...BASE, entityName: 'Acme' })).toBe("Acme — FA Spike Test · 'P&L'!A3:G7");
   });

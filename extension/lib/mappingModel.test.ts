@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildConfirmRequest,
   carryOver,
+  defaultEntityName,
   newDraft,
   ROLE_OPTIONS,
   validateDraft,
@@ -19,6 +20,22 @@ const PROPOSAL: ProposalEntry[] = [
 function ready(overrides: Partial<MappingDraft> = {}): MappingDraft {
   return { ...newDraft(COLUMNS, PROPOSAL, 'FA Spike Test'), scale: 'ones', ...overrides };
 }
+
+describe('defaultEntityName', () => {
+  it.each([
+    ['FA Spike Test.xlsx', 'FA Spike Test'],
+    ['Budget.XLSM', 'Budget'],
+    ['old.xls', 'old'],
+    ['binary.xlsb', 'binary'],
+    ['export.csv', 'export'],
+    ['Q3 P&L', 'Q3 P&L'], // Google Sheets names carry no extension
+    ['Acme Inc.', 'Acme Inc.'],
+    ['report.xlsx.bak', 'report.xlsx.bak'],
+    ['.xlsx', '.xlsx'], // never an empty name
+  ])('%s -> %s', (fileName, expected) => {
+    expect(defaultEntityName(fileName)).toBe(expected);
+  });
+});
 
 describe('newDraft', () => {
   it('takes roles from the proposal, and "Not used" for anything it skipped or got wrong', () => {

@@ -1,4 +1,4 @@
-import { SCALE_OPTIONS } from './mappingModel';
+import { defaultEntityName, SCALE_OPTIONS } from './mappingModel';
 import type { ActiveStatement } from './sessionStorage';
 
 /**
@@ -13,6 +13,10 @@ import type { ActiveStatement } from './sessionStorage';
 export function statementSource(statement: ActiveStatement): string {
   const { entityName, label } = statement;
   if (label === entityName || label.startsWith(`${entityName} · `)) return label;
+  // The name is pre-filled without the file's extension (defaultEntityName), while the label
+  // keeps the file name as it is: "FA Spike Test" with "FA Spike Test.xlsx · …" is no repeat.
+  const fileName = label.split(' · ')[0]!;
+  if (defaultEntityName(fileName) === entityName) return label;
   return `${entityName} — ${label}`;
 }
 
