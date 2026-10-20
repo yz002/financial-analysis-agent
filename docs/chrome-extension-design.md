@@ -1101,6 +1101,16 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     `ORDER BY confirmed_at DESC LIMIT 1` picked one of the rows in item 11, from another
     account, during a read-only check. Audit every app query that picks "the latest" row; use
     `DESC NULLS LAST` or filter `IS NOT NULL`.
+    - **Audited in session 7 (code read, no DB access): nothing to fix.**
+      - The only `ORDER BY` in `backend/app/` is `_recent_turns`'s `Turn.created_at.desc()`
+        (`backend/app/main.py`). `turns.created_at` is `nullable=False` with a server default
+        (`backend/db/models.py`), so no NULL can sort first.
+      - `backend/scripts/retention_cleanup.py` selects accounts with
+        `max(Conversation.last_turn_at) < cutoff`, grouped per account. `MAX` skips NULLs, and
+        an account whose conversations all have NULL `last_turn_at` gets a NULL maximum, which
+        fails the comparison. So a NULL never makes an account look dormant, which is the safe
+        direction for a delete.
+      - Re-check whenever a new "latest row" query is added.
 
 **From Phase D session 5** (backlog, not session 5 work):
 
