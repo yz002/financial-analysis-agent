@@ -60,6 +60,7 @@ const SIDEPANEL_BODY = `
         <ul id="read-notices"></ul>
         <p id="preview-caption"></p>
         <table id="preview-table"></table>
+        <button id="preview-toggle" type="button" hidden></button>
         <button id="send-data" type="button" hidden>Send to analysis</button>
       </section>
       <section id="mapping-panel" hidden>
@@ -1024,6 +1025,47 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     expect(clearStoredSessionMock).toHaveBeenCalled();
     expect(isHidden('#signed-out-view')).toBe(false);
     expect(isHidden('#read-panel')).toBe(true);
+  });
+
+  it('a long preview shows 10 rows with a Show all toggle, re-rendered with no new read', async () => {
+    const twelveRows = pnlGrid([
+      [textCell('Period'), textCell('Revenue')],
+      ...Array.from({ length: 12 }, (_, i) => [textCell(`2025-${String(i + 1).padStart(2, '0')}-28`), numberCell(i, String(i))]),
+    ]);
+    const file = fakeFile({ read: vi.fn(async () => twelveRows) });
+    connectGoogleSheetMock.mockResolvedValue(file);
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+
+    const dataRowsShown = () => el('#preview-table').querySelectorAll('tr').length - 2; // letters + header
+    expect(dataRowsShown()).toBe(10);
+    expect(el('#preview-caption').textContent).toContain('12 data rows × 2 columns · showing the first 10');
+    expect(isHidden('#preview-toggle')).toBe(false);
+    expect(el('#preview-toggle').textContent).toBe('Show all 12 rows');
+
+    await click('#preview-toggle');
+    expect(dataRowsShown()).toBe(12);
+    expect(el('#preview-caption').textContent).not.toContain('showing the first');
+    expect(el('#preview-toggle').textContent).toBe('Show first 10');
+
+    await click('#preview-toggle');
+    expect(dataRowsShown()).toBe(10);
+    expect(file.read).toHaveBeenCalledTimes(1);
+
+    // A new preview starts on the first 10 again.
+    await click('#preview-toggle');
+    await click('#read-range');
+    expect(dataRowsShown()).toBe(10);
+    expect(el('#preview-toggle').textContent).toBe('Show all 12 rows');
+  });
+
+  it('a short preview has no Show all toggle', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+    expect(isHidden('#preview-toggle')).toBe(true);
   });
 
   it('editing the range discards a stale preview', async () => {

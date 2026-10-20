@@ -111,6 +111,7 @@ button:disabled {
 #signin-microsoft,
 #connect-data,
 #read-range,
+#preview-toggle,
 #reset-mapping,
 #cancel-mapping,
 #ack-back,
@@ -125,6 +126,7 @@ button:disabled {
 #signin-microsoft:hover:not(:disabled),
 #connect-data:hover:not(:disabled),
 #read-range:hover:not(:disabled),
+#preview-toggle:hover:not(:disabled),
 #reset-mapping:hover:not(:disabled),
 #cancel-mapping:hover:not(:disabled),
 #ack-back:hover:not(:disabled),
@@ -213,6 +215,7 @@ button:disabled {
 }
 
 #read-range,
+#preview-toggle,
 #send-data {
   align-self: flex-start;
 }

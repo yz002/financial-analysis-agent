@@ -110,6 +110,7 @@ const enterHint = document.querySelector<HTMLElement>('#enter-hint');
 const readNotices = document.querySelector<HTMLElement>('#read-notices');
 const previewCaption = document.querySelector<HTMLElement>('#preview-caption');
 const previewTable = document.querySelector<HTMLTableElement>('#preview-table');
+const previewToggle = document.querySelector<HTMLButtonElement>('#preview-toggle');
 const sendDataButton = document.querySelector<HTMLButtonElement>('#send-data');
 const mappingPanel = document.querySelector<HTMLElement>('#mapping-panel');
 const mappingCaption = document.querySelector<HTMLElement>('#mapping-caption');
@@ -231,6 +232,8 @@ window.addEventListener('focus', () => usage.onVisible());
 let connectedFile: ConnectedFile | null = null;
 let connectedEmail = '';
 let previewGrid: NormalizedGrid | null = null;
+/** "Show all rows" for the current preview; every new preview starts on the first 10. */
+let previewShowAll = false;
 
 /** Where a confirmed mapping came from: enough to re-send the same rows for Change mapping. */
 interface MappingOrigin {
@@ -294,9 +297,11 @@ function setDataConnection(text: string, note = ''): void {
 
 function clearPreview(): void {
   previewGrid = null;
+  previewShowAll = false;
   readNotices?.replaceChildren();
   if (previewCaption) previewCaption.textContent = '';
   previewTable?.replaceChildren();
+  previewToggle?.setAttribute('hidden', '');
   sendDataButton?.setAttribute('hidden', '');
 }
 
@@ -359,7 +364,9 @@ function renderPreview(grid: NormalizedGrid): void {
   previewGrid = grid;
   const { range, rows } = grid;
   const width = rows[0]!.length;
-  const shown = rows.slice(0, PREVIEW_DATA_ROWS + 1);
+  const dataRows = rows.length - 1;
+  const truncated = dataRows > PREVIEW_DATA_ROWS && !previewShowAll;
+  const shown = truncated ? rows.slice(0, PREVIEW_DATA_ROWS + 1) : rows;
 
   const letters = document.createElement('tr');
   letters.append(headerCell('', 'address'));
@@ -378,13 +385,17 @@ function renderPreview(grid: NormalizedGrid): void {
   });
   previewTable?.replaceChildren(letters, ...body);
 
-  const dataRows = rows.length - 1;
   if (previewCaption) {
     previewCaption.replaceChildren(
       refSpan(rangeLabel(grid)),
       ` · ${dataRows} data row${dataRows === 1 ? '' : 's'} × ${width} column${width === 1 ? '' : 's'}` +
-        (dataRows > PREVIEW_DATA_ROWS ? ` · showing the first ${PREVIEW_DATA_ROWS}` : ''),
+        (truncated ? ` · showing the first ${PREVIEW_DATA_ROWS}` : ''),
     );
+  }
+  if (previewToggle) {
+    // Only the display changes: every row is always sent, whichever is shown.
+    previewToggle.hidden = dataRows <= PREVIEW_DATA_ROWS;
+    previewToggle.textContent = previewShowAll ? `Show first ${PREVIEW_DATA_ROWS}` : `Show all ${dataRows} rows`;
   }
   readNotices?.replaceChildren(
     ...grid.notices.map((notice) => {
@@ -655,6 +666,7 @@ function setReadBusy(busy: boolean): void {
   if (revokeAllButton) revokeAllButton.disabled = busy;
   if (connectDataButton) connectDataButton.disabled = busy;
   if (readRangeButton) readRangeButton.disabled = busy;
+  if (previewToggle) previewToggle.disabled = busy;
   if (sendDataButton) sendDataButton.disabled = busy;
   if (sheetSelect) sheetSelect.disabled = busy;
   if (rangeInput) rangeInput.disabled = busy;
@@ -1223,6 +1235,12 @@ sheetSelect?.addEventListener('change', () => {
 });
 rangeInput?.addEventListener('input', () => {
   clearPreview();
+});
+previewToggle?.addEventListener('click', () => {
+  // Re-rendered from the grid already read: no network call.
+  if (!previewGrid) return;
+  previewShowAll = !previewShowAll;
+  renderPreview(previewGrid);
 });
 signinGoogleButton?.addEventListener('click', () => {
   void handleSignIn('google');
