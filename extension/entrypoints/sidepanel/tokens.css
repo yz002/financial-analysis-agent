@@ -62,6 +62,12 @@
   --color-accent-text: #007d5f; /* adapted, darkened brand-green-deep: 5.12 / 4.78 */
   --color-danger: #b93a3a; /* adapted, darkened brand-error: 5.63 / 5.26 */
   --color-warning: #9a5f00; /* adapted, darkened brand-warn: 5.24 / 4.89 */
+  /* A disabled primary button: a neutral fill, not a faded accent (murky in dark mode). The
+     same pairing serves both themes, since these tokens follow it: ink-mute on hairline is
+     5.46 here and 5.99 in dark. The fill barely differs from the card, so it keeps a border. */
+  --color-disabled-fill: var(--color-hairline);
+  --color-on-disabled: var(--color-ink-mute);
+  --color-disabled-border: var(--color-border-input);
 
   /* Focus ring -- accessibility-critical sizing doesn't compress at panel width. */
   --focus-ring-width: 2px;
