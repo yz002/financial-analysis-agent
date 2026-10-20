@@ -174,12 +174,12 @@ The fake request fails before account resolution, so it creates no rows.
   - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row for
     account `36f87f76-1ff4-4a13-809d-2d54d23b5745`. It raised the owner's question cap for
     the session 5 live tests. Deleting it is a production write, so it needs its own approval.
-    (Phase D session 6: deleted by the owner at live-test step L0 — *date and printed row to be
-    recorded here*.)
+    (Phase D session 6: 1 row deleted during session 6 L0, by the owner. The date and the
+    printed row were not recorded at the time.)
   - **Old BYO ciphertext (session 6, live-test step L0):** before session 6, a replaced BYO key's
     row kept its `encrypted_key`. The new code erases it on removal or replacement (never on a
-    decrypt failure), but older rows needed a one-time wipe. *Count before, rows wiped, and date to be
-    recorded here.*
+    decrypt failure), but older rows needed a one-time wipe. The count before, the rows wiped and
+    the date were not recorded at the time.
 
 ## Database migrations
 

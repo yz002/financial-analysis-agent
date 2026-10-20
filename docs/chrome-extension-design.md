@@ -1047,9 +1047,10 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
       a dedicated disabled color token.
     - Optional: a manual light/dark/system theme switch. Today the panel follows the system
       setting only.
-    - **Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
+    - ~~**Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
       that raises the owner's question cap for session 5 live testing. It exists, for account
-      `36f87f76-1ff4-4a13-809d-2d54d23b5745` (`backend/DEPLOYMENT.md`).
+      `36f87f76-1ff4-4a13-809d-2d54d23b5745` (`backend/DEPLOYMENT.md`).~~ Done: 1 row deleted
+      during session 6 L0. The date and the printed row were not recorded at the time.
     - Answer markdown shows as raw text (`**`, backticks, tables). Consider a safe formatter
       (bold, code, lists, tables) built with createElement, or plain-text answers.
     - The source list repeats the same figure once per mention. Group it by figure and
