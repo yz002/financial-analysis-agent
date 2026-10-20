@@ -69,6 +69,7 @@ const SIDEPANEL_BODY = `
         <table id="mapping-table"></table>
         <input id="entity-name" type="text" />
         <select id="scale-select"></select>
+        <p id="scale-hint" class="hint">Choose Ones (as shown) unless the sheet says its numbers are in thousands, millions or billions.</p>
         <select id="currency-select"></select>
         <ul id="mapping-errors"></ul>
         <div id="ack-panel" hidden>
@@ -1246,6 +1247,16 @@ describe('mapping screen (session 4)', () => {
     const lines = [...el('#statement-warnings').querySelectorAll('li')].map((li) => li.textContent);
     expect(lines).toEqual(['Not mapped: Net income, Operating cash flow.']);
     expect(el('#statement-warnings').textContent).not.toMatch(/_/);
+  });
+
+  it("the shipped scale hint names the menu's own Ones label, and computes nothing", async () => {
+    const { readFileSync } = await import('node:fs');
+    const { SCALE_OPTIONS } = await import('../../lib/mappingModel');
+    // vitest runs from extension/ (jsdom's import.meta.url isn't a file: URL).
+    const html = readFileSync('entrypoints/sidepanel/index.html', 'utf8');
+    const hint = /<p id="scale-hint" class="hint">([\s\S]*?)<\/p>/.exec(html)?.[1]?.replace(/\s+/g, ' ').trim();
+    const onesLabel = SCALE_OPTIONS.find((o) => o.value === 'ones')!.label;
+    expect(hint).toBe(`Choose ${onesLabel} unless the sheet says its numbers are in thousands, millions or billions.`);
   });
 
   it("pre-fills the business name without the file's extension", async () => {
