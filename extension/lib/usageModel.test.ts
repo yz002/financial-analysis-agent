@@ -4,6 +4,7 @@ import {
   billingErrorMessage,
   billingFingerprint,
   byoKeyErrorMessage,
+  defaultFormatTime,
   isAllowedBillingUrl,
   usageView,
 } from './usageModel';
@@ -48,9 +49,15 @@ describe('usageView', () => {
   it('free: used of the daily cap, when more arrive, and Upgrade', () => {
     const view = usageView(usage(), NOW, fmt);
     expect(view.line).toBe('Free: 2 of 5 questions today');
-    expect(view.resetLine).toBe('More questions from <2026-10-09T00:00:00Z>.');
+    expect(view.resetLine).toBe('Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).');
     expect(view.notice).toBe('');
     expect(view.actions).toEqual({ upgrade: true, manage: false, removeKey: false });
+  });
+
+  it('free with none used yet: the same reset line, not "more questions from"', () => {
+    expect(usageView(usage({ questions_today: 0 }), NOW, fmt).resetLine).toBe(
+      'Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).',
+    );
   });
 
   it('paid: used of the period cap, the renewal date, and Manage instead of Upgrade', () => {
@@ -101,6 +108,15 @@ describe('usageView', () => {
     const view = usageView(paid({ tier: 'byo_key', has_byo_key: true }), NOW, fmt);
     expect(view.notice).toBe('Your $2/month subscription is still active. Use Manage subscription to cancel it.');
     expect(view.actions).toEqual({ upgrade: false, manage: true, removeKey: true });
+  });
+});
+
+describe('defaultFormatTime', () => {
+  it('shows the date and time to the minute, never seconds', () => {
+    // 10:07:42 UTC: whatever the runner's locale and zone, the seconds (42) must not appear.
+    const shown = defaultFormatTime('2026-10-09T10:07:42Z');
+    expect(shown).not.toMatch(/:42\b/);
+    expect(shown).toMatch(/\d{1,2}[:.]\d{2}/);
   });
 });
 

@@ -15,7 +15,9 @@ const ENDED_SUBSCRIPTION_STATUSES = new Set(['canceled', 'incomplete_expired']);
 
 export type FormatTime = (iso: string) => string;
 
-export const defaultFormatTime: FormatTime = (iso) => new Date(iso).toLocaleString();
+/** The browser's locale, to the minute: a reset or renewal time never needs seconds. */
+export const defaultFormatTime: FormatTime = (iso) =>
+  new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
 export interface UsageView {
   /** Tier and used/limit, e.g. "Free: 2 of 5 questions today". */
@@ -47,7 +49,9 @@ export function usageView(usage: UsageResponse, now: Date, formatTime: FormatTim
     }
   } else {
     line = `Free: ${usage.questions_today ?? 0} of ${usage.daily_cap ?? 0} questions today`;
-    if (usage.resets_at) resetLine = `More questions from ${formatTime(usage.resets_at)}.`;
+    // The free limit resets at 00:00 UTC (EXTENSION_INTEGRATION.md SS6 /v1/usage), so say so
+    // rather than show only a local time; the same line whether or not any are used yet.
+    if (usage.resets_at) resetLine = `Resets daily at 00:00 UTC (${formatTime(usage.resets_at)} your time).`;
   }
 
   let notice = '';

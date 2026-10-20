@@ -87,7 +87,7 @@ describe('showing usage', () => {
     await panel.refresh();
     expect($('#usage-panel').hidden).toBe(false);
     expect($('#usage-line').textContent).toBe('Free: 1 of 5 questions today');
-    expect($('#usage-reset').textContent).toBe('More questions from <2026-10-09T00:00:00Z>.');
+    expect($('#usage-reset').textContent).toBe('Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).');
     expect($('#usage-upgrade').hidden).toBe(false);
     expect($('#usage-manage').hidden).toBe(true);
     expect($('#byo-key-remove').hidden).toBe(true);
