@@ -2,14 +2,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type UsageResponse } from '../../lib/backendApi';
-import { STRIPE_POLL_ATTEMPTS, UsageController, WAITING_FOR_STRIPE_NOTE, type UsageDeps } from './usage';
+import {
+  REFRESHING_LABEL,
+  STRIPE_POLL_ATTEMPTS,
+  UsageController,
+  WAITING_FOR_STRIPE_NOTE,
+  type UsageDeps,
+} from './usage';
 
 const PANEL = `
   <section id="usage-panel" hidden>
     <p id="usage-line"></p><p id="usage-reset"></p><p id="usage-notice"></p>
     <button id="usage-upgrade" type="button" hidden></button>
     <button id="usage-manage" type="button" hidden></button>
-    <button id="usage-refresh" type="button"></button>
+    <button id="usage-refresh" type="button">Refresh</button>
     <form id="byo-key-form"><input id="byo-key-input" type="password" />
       <button id="byo-key-save" type="submit"></button>
       <button id="byo-key-remove" type="button" hidden></button>
@@ -119,6 +125,73 @@ describe('showing usage', () => {
     panel.reset();
     expect($('#usage-panel').hidden).toBe(true);
     expect($<HTMLInputElement>('#byo-key-input').value).toBe('');
+  });
+});
+
+/** A promise the test settles by hand, to look at the panel while a request is in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('the Refresh button', () => {
+  it('says "Updating…" and is disabled while its refresh runs, then restores', async () => {
+    const pending = deferred<UsageResponse>();
+    const { deps } = makePanel([free()], { getUsage: vi.fn(() => pending.promise) });
+    const button = $<HTMLButtonElement>('#usage-refresh');
+    button.click();
+    await settle();
+    expect(button.textContent).toBe(REFRESHING_LABEL);
+    expect(button.disabled).toBe(true);
+
+    button.click(); // ignored while in flight
+    pending.resolve(free());
+    await settle();
+    expect(deps.getUsage).toHaveBeenCalledOnce();
+    expect(button.textContent).toBe('Refresh');
+    expect(button.disabled).toBe(false);
+    expect($('#usage-line').textContent).toBe('Free: 1 of 5 questions today');
+  });
+
+  it('restores after a failed refresh, with the existing failure line', async () => {
+    const pending = deferred<UsageResponse>();
+    makePanel([free()], { getUsage: vi.fn(() => pending.promise) });
+    const button = $<HTMLButtonElement>('#usage-refresh');
+    button.click();
+    await settle();
+    pending.reject(backend(500, 'boom'));
+    await settle();
+    expect(button.textContent).toBe('Refresh');
+    expect(button.disabled).toBe(false);
+    expect($('#usage-line').textContent).toBe("Couldn't load your usage. Select Refresh to try again.");
+  });
+
+  it('stays disabled while a billing request is still running', async () => {
+    const usage = deferred<UsageResponse>();
+    const checkout = deferred<{ checkout_url: string }>();
+    makePanel([free()], {
+      getUsage: vi.fn(() => usage.promise),
+      createCheckoutSession: vi.fn(() => checkout.promise),
+    });
+    const button = $<HTMLButtonElement>('#usage-refresh');
+    button.click();
+    await settle();
+    $('#usage-upgrade').click();
+    await settle();
+
+    usage.resolve(free());
+    await settle();
+    expect(button.textContent).toBe('Refresh');
+    expect(button.disabled).toBe(true); // Upgrade is still waiting on the backend
+
+    checkout.resolve({ checkout_url: 'https://checkout.stripe.com/c/pay/cs_test_1' });
+    await settle();
+    expect(button.disabled).toBe(false);
   });
 });
 

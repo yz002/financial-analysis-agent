@@ -63,6 +63,9 @@ export const STRIPE_POLL_ATTEMPTS = 20;
 
 export const WAITING_FOR_STRIPE_NOTE = 'Waiting for Stripe to confirm…';
 
+/** The Refresh button's label while its own refresh is in flight. */
+export const REFRESHING_LABEL = 'Updating…';
+
 function isUnauthorized(err: unknown): boolean {
   return err instanceof BackendApiError && err.status === 401;
 }
@@ -74,14 +77,18 @@ export class UsageController {
   private awaitingChangeFrom: string | null = null;
   private poll: AbortController | null = null;
   private busy = false;
+  /** A Refresh click is in flight: the button says so and can't be pressed again. */
+  private refreshing = false;
+  private readonly refreshLabel: string;
 
   constructor(
     private readonly el: UsageElements,
     private readonly deps: UsageDeps,
   ) {
+    this.refreshLabel = el.refreshButton.textContent ?? '';
     el.upgradeButton.addEventListener('click', () => void this.openBilling('checkout'));
     el.manageButton.addEventListener('click', () => void this.openBilling('portal'));
-    el.refreshButton.addEventListener('click', () => void this.refresh());
+    el.refreshButton.addEventListener('click', () => void this.refreshFromButton());
     el.removeKeyButton.addEventListener('click', () => void this.removeKey());
     el.keyForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -109,6 +116,23 @@ export class UsageController {
       });
     }
     return this.inFlight;
+  }
+
+  /** Refresh, clicked: shows "Updating…" and disables the button until the request settles. */
+  private async refreshFromButton(): Promise<void> {
+    if (this.refreshing) return;
+    this.setRefreshing(true);
+    try {
+      await this.refresh();
+    } finally {
+      this.setRefreshing(false);
+    }
+  }
+
+  private setRefreshing(refreshing: boolean): void {
+    this.refreshing = refreshing;
+    this.el.refreshButton.textContent = refreshing ? REFRESHING_LABEL : this.refreshLabel;
+    this.el.refreshButton.disabled = refreshing || this.busy;
   }
 
   /**
@@ -162,6 +186,7 @@ export class UsageController {
     ]) {
       button.disabled = busy;
     }
+    if (this.refreshing) this.el.refreshButton.disabled = true;
   }
 
   private async openBilling(kind: 'checkout' | 'portal'): Promise<void> {
