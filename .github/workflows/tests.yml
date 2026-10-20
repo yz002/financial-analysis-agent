@@ -32,3 +32,31 @@ jobs:
           # env var to be present at all, cache hits or not.
           SEC_USER_AGENT: "CI test runner ci@example.com"
         run: pytest
+
+  # The Chrome extension's type check and unit tests (Phase D session 7). No secrets and no
+  # network services: vitest mocks the browser and the backend. The backend suite isn't run
+  # here; it needs a database (backend/DEPLOYMENT.md, "Backlog: CI coverage").
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v7
+        with:
+          # Node 24: the local development version (v24.14.0), and within every tool's engines
+          # range (vitest ^22.12 || ^24, wxt >=22, vite >=22.12).
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run compile
+
+      - name: Run tests
+        run: npm test
