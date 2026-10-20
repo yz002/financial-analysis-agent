@@ -1228,6 +1228,25 @@ describe('mapping screen (session 4)', () => {
     expect(el('#mapping-errors').textContent).toContain('Choose the units the numbers are in.');
   });
 
+  it('the card lists unmapped concepts on one line with plain labels, not internal names', async () => {
+    confirmMappingMock.mockResolvedValue(
+      confirmResponse({
+        concepts_unavailable: ['net_income', 'operating_cash_flow'],
+        warnings: [
+          "No column was mapped to net_income; every period's value for it will be unavailable.",
+          "No column was mapped to operating_cash_flow; every period's value for it will be unavailable.",
+        ],
+      }),
+    );
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+
+    const lines = [...el('#statement-warnings').querySelectorAll('li')].map((li) => li.textContent);
+    expect(lines).toEqual(['Not mapped: Net income, Operating cash flow.']);
+    expect(el('#statement-warnings').textContent).not.toMatch(/_/);
+  });
+
   it("pre-fills the business name without the file's extension", async () => {
     connectGoogleSheetMock.mockResolvedValue(fakeFile({ name: 'FA Spike Test.xlsx' }));
     await openMapping();

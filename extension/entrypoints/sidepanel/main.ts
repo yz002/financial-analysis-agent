@@ -25,6 +25,7 @@ import { UsageController } from './usage';
 import {
   buildConfirmRequest,
   carryOver,
+  confirmedStatementDetails,
   CURRENCY_OPTIONS,
   defaultEntityName,
   newDraft,
@@ -1183,7 +1184,7 @@ async function statementConfirmed(m: MappingSession, response: ConfirmMappingRes
   closeMappingPanel();
   readPanel?.setAttribute('hidden', '');
 
-  const details = [...response.warnings];
+  const details = confirmedStatementDetails(response.warnings, response.concepts_unavailable ?? []);
   if (response.unparsed_cells.length) {
     details.push(
       `No value for: ${response.unparsed_cells

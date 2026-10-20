@@ -186,6 +186,27 @@ export function validateDraft(draft: MappingDraft): DraftValidation {
   };
 }
 
+/**
+ * The backend's warning for each recommended concept left unmapped, word for word
+ * (src/analysis/csv_statement.py, normalize). Only an exact match is replaced: if that wording
+ * ever changes, the warning simply shows as well, and nothing is hidden.
+ */
+function unmappedConceptWarning(concept: string): string {
+  return `No column was mapped to ${concept}; every period's value for it will be unavailable.`;
+}
+
+/**
+ * The statement card's detail lines after a confirm: the concepts left unmapped
+ * (`concepts_unavailable`) as one line of plain labels, then every other warning as the
+ * backend words it.
+ */
+export function confirmedStatementDetails(warnings: string[], conceptsUnavailable: string[]): string[] {
+  const replaced = new Set(conceptsUnavailable.map(unmappedConceptWarning));
+  const others = warnings.filter((w) => !replaced.has(w));
+  if (conceptsUnavailable.length === 0) return others;
+  return [`Not mapped: ${conceptsUnavailable.map(roleLabel).join(', ')}.`, ...others];
+}
+
 export interface ConfirmRequestBody {
   mapping: Record<string, string>;
   entity_name: string;

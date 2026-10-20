@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildConfirmRequest,
   carryOver,
+  confirmedStatementDetails,
   defaultEntityName,
   newDraft,
   ROLE_OPTIONS,
@@ -34,6 +35,34 @@ describe('defaultEntityName', () => {
     ['.xlsx', '.xlsx'], // never an empty name
   ])('%s -> %s', (fileName, expected) => {
     expect(defaultEntityName(fileName)).toBe(expected);
+  });
+});
+
+describe('confirmedStatementDetails', () => {
+  const backendWarning = (concept: string) =>
+    `No column was mapped to ${concept}; every period's value for it will be unavailable.`;
+
+  it('replaces the per-concept warnings with one line of plain labels, in the order given', () => {
+    const warnings = [
+      backendWarning('net_income'),
+      backendWarning('operating_cash_flow'),
+      'Rows 7 and 8 share a period end.',
+      backendWarning('total_assets'),
+    ];
+    expect(confirmedStatementDetails(warnings, ['net_income', 'total_assets', 'operating_cash_flow'])).toEqual([
+      'Not mapped: Net income, Total assets, Operating cash flow.',
+      'Rows 7 and 8 share a period end.',
+    ]);
+  });
+
+  it('keeps a warning whose wording no longer matches, rather than hiding it', () => {
+    const drifted = 'Nothing was mapped to net_income.';
+    expect(confirmedStatementDetails([drifted], ['net_income'])).toEqual(['Not mapped: Net income.', drifted]);
+  });
+
+  it('with nothing unmapped, the warnings are unchanged', () => {
+    expect(confirmedStatementDetails(['A warning.'], [])).toEqual(['A warning.']);
+    expect(confirmedStatementDetails([], [])).toEqual([]);
   });
 });
 
