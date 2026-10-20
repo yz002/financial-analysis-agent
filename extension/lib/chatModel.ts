@@ -202,6 +202,28 @@ export function describeCitation(citation: Citation): CitationView {
   };
 }
 
+/** One entry in an answer's source list: a figure, and how many times the answer cites it. */
+export interface SourceGroup {
+  view: CitationView;
+  mentions: number;
+}
+
+/**
+ * The source list, with a figure the answer repeats listed once. Citations are merged only when
+ * their figure text, status and matches (cells, values, formulas, filings) are all identical,
+ * so the same figure from different provenance stays separate. First-mention order is kept.
+ */
+export function groupCitations(citations: Citation[]): SourceGroup[] {
+  const groups = new Map<string, SourceGroup>();
+  for (const citation of citations) {
+    const key = JSON.stringify([citation.raw_text, citation.status, citation.matches]);
+    const group = groups.get(key);
+    if (group) group.mentions += 1;
+    else groups.set(key, { view: describeCitation(citation), mentions: 1 });
+  }
+  return [...groups.values()];
+}
+
 export interface FigureCheckBanner {
   tone: 'ok' | 'warn' | 'none';
   text: string;

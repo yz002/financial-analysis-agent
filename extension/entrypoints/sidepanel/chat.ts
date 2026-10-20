@@ -6,9 +6,11 @@ import {
   DISCARD_LABEL,
   failureMessage,
   figureCheckBanner,
+  groupCitations,
   ITERATION_CAP_NOTICE,
   QUESTION_MAX_LENGTH,
   segmentAnswer,
+  type SourceGroup,
   type SourceLine,
 } from '../../lib/chatModel';
 import {
@@ -99,10 +101,10 @@ function sourceList(lines: SourceLine[]): HTMLUListElement {
   return list;
 }
 
-function citationItem(citation: Citation): HTMLLIElement {
-  const view = describeCitation(citation);
+function citationItem({ view, mentions }: SourceGroup): HTMLLIElement {
   const item = element('li', `chat-source chat-source--${view.status}`);
   item.append(element('span', 'chat-source-figure', view.figure));
+  if (mentions > 1) item.append(element('span', 'chat-source-count', `×${mentions} mentions`));
   if (view.statusLabel) item.append(element('span', 'chat-source-status', view.statusLabel));
   if (view.lines.length) item.append(sourceList(view.lines));
   return item;
@@ -141,7 +143,7 @@ export function renderAnswer(response: AskResponse): HTMLElement {
     const sources = element('section', 'chat-sources');
     sources.append(element('h3', undefined, 'Where the figures come from'));
     const list = element('ol');
-    list.append(...cited.map(citationItem));
+    list.append(...groupCitations(cited).map(citationItem));
     sources.append(list);
     article.append(sources);
   }

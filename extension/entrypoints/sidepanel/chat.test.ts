@@ -173,6 +173,20 @@ describe('renderAnswer: text from the backend or the sheet never becomes markup'
     expect(renderAnswer(answer()).querySelector('.chat-cap-notice')).toBeNull();
   });
 
+  it('a figure repeated in the answer is listed once in the sources, with its count', () => {
+    const final_answer = 'Revenue was 1.25 million; yes, 1.25 million.';
+    const second = final_answer.lastIndexOf('1.25 million');
+    const first = answer().citations[0]!;
+    const article = renderAnswer(answer({
+      final_answer,
+      citations: [first, { ...first, figure_index: 1, start: second, end: second + 12 }],
+    }));
+    expect(article.querySelectorAll('.chat-answer-text .figure')).toHaveLength(2); // both still marked
+    expect(article.querySelectorAll('.chat-sources li.chat-source')).toHaveLength(1);
+    expect(article.querySelector('.chat-source-count')!.textContent).toBe('×2 mentions');
+    expect(renderAnswer(answer()).querySelector('.chat-source-count')).toBeNull();
+  });
+
   it('lists where each figure comes from, with the cell in its own element', () => {
     const article = renderAnswer(answer());
     expect(article.querySelector('.chat-sources .ref')!.textContent).toBe("'P&L'!B4");

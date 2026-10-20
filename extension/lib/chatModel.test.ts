@@ -5,6 +5,7 @@ import {
   describeCitation,
   failureMessage,
   figureCheckBanner,
+  groupCitations,
   NOT_TRACED_LABEL,
   segmentAnswer,
 } from './chatModel';
@@ -188,6 +189,34 @@ describe('describeCitation', () => {
       matches: [{ kind: 'tool', value: 1, turn_id: null, source: { tool_name: 'forecast_metric', json_path: 'x' } }],
     }));
     expect(projection.lines[0]!.text).toBe('A projection from forecast_metric, not a filed or entered figure');
+  });
+});
+
+describe('groupCitations', () => {
+  const cell = (cellRef: string, value: number) => ({
+    kind: 'cell' as const, value, turn_id: null,
+    source: { cell: cellRef, concept: 'revenue', column: 'Revenue', period_end: '2025-03-31', read_value: String(value), sheet_scale: 'ones' },
+  });
+
+  it('lists a figure the answer repeats once, with its count, in first-mention order', () => {
+    const groups = groupCitations([
+      citation({ raw_text: '1.25 million', start: 0, end: 12, matches: [cell("'P&L'!B4", 1250000)] }),
+      citation({ raw_text: '40.0%', start: 20, end: 25, status: 'untraced' }),
+      citation({ raw_text: '1.25 million', start: 40, end: 52, matches: [cell("'P&L'!B4", 1250000)] }),
+    ]);
+    expect(groups.map((g) => [g.view.figure, g.mentions])).toEqual([
+      ['1.25 million', 2],
+      ['40.0%', 1],
+    ]);
+  });
+
+  it('keeps the same figure from different provenance, or with a different status, separate', () => {
+    const groups = groupCitations([
+      citation({ raw_text: '1.25 million', matches: [cell("'P&L'!B4", 1250000)] }),
+      citation({ raw_text: '1.25 million', matches: [cell("'P&L'!B6", 1250000)] }),
+      citation({ raw_text: '1.25 million', status: 'ambiguous', matches: [cell("'P&L'!B4", 1250000)] }),
+    ]);
+    expect(groups.map((g) => g.mentions)).toEqual([1, 1, 1]);
   });
 });
 
