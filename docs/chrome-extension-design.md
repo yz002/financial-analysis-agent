@@ -870,8 +870,9 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
    `POST /v1/billing/checkout-session` (open the returned URL in a new tab, and don't assume the
    account's tier updated on return, per contract §6's own stated webhook-latency caveat);
    `POST /v1/byo-key` registration form.
-   *(Amended Phase D session 6 (pending live verification). Planning found that the backend
-   needed changes before the panel could be correct. They're specified in
+   *(Done. Amended Phase D session 6, verified in production 2026-10-20, commit `c5b4474`
+   (Render, Stripe test mode, sandbox "Fintel sandbox"); the results are below. Planning found
+   that the backend needed changes before the panel could be correct. They're specified in
    `EXTENSION_INTEGRATION.md` §6, amended session 6, with security notes in
    `backend/SECURITY.md` §8:*
    - *Test-mode guard: live Stripe keys are refused, and the billing routes say
@@ -880,7 +881,7 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
      ordering can't roll it back. Unknown references are acknowledged and ignored. A duplicate
      subscription is kept out and logged for manual refund.*
    - *Checkout: refused when a subscription is already live. It reuses the Stripe customer and
-     expires after 30 minutes.*
+     expires after 31 minutes (Stripe's 30-minute minimum plus a minute).*
    - *A new customer-portal endpoint, for Manage subscription.*
    - *`/v1/usage`: reports `resets_at`, `has_byo_key` and the subscription's state (past_due,
      scheduled cancellation) whatever the tier. A late renewal webhook can no longer leave a
@@ -893,10 +894,53 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
        (`usage_events.tier`).*
    - *Extension: a usage panel (used/limit, tier, reset time), Upgrade and Manage subscription
      opening Stripe in a new tab, Refresh, and an add/remove form for a BYO key that's never
-     stored or logged in the extension.)*
+     stored or logged in the extension.*
+   - ***Production checks, 2026-10-20 (commit `c5b4474`), all passed:***
+     1. *Webhook endpoint (test mode, API version `2026-08-26.dahlia`, the four events in
+        `backend/DEPLOYMENT.md`): an unsigned POST returned 400.*
+     2. *Checkout: the success URL was `https`, the webhook was delivered with 200, and the
+        panel switched to Paid without a manual refresh.*
+     3. *A paid question was counted with tier `paid`: 1 of 50.*
+     4. *Idempotency: resending `checkout.session.completed` returned 200 with no state change
+        (`updated_at` unchanged, a single marker row). A later accidental resend of
+        `customer.subscription.updated` also changed nothing.*
+     5. *Cancel at period end in the portal:*
+        - *this Stripe API version sets `cancel_at`, and `cancel_at_period_end` stays false;*
+        - *the backend's check (`cancel_at_period_end` or `cancel_at` set) caught it;*
+        - *the database showed the cancellation scheduled, and the panel showed "Your
+          subscription ends 11/20/2026".*
+     6. *Immediate cancel: `customer.subscription.deleted` set the status to `canceled`, and
+        the panel went back to Free.*
+     7. *After the cancel, Free showed "1 of 5": today's paid question counts toward the free
+        daily limit. By design, now documented in `EXTENSION_INTEGRATION.md` §6
+        `/v1/usage`.*
+     8. *BYO key:*
+        - *saving it passed Anthropic's key check;*
+        - *a question was answered on it and wasn't counted (Free stayed 1 of 5);*
+        - *Remove showed "Key removed".*
+     9. *Render logs: no matches for `sk-ant`, `whsec` or `sk_test`. BYO request lines are
+        metadata only (method, path, status).*
+   - ***Verified locally, not in production:***
+     - *the test-mode guard (a dummy `sk_live_` key gave 503, after an orphan uvicorn process
+       answering with old code was stopped);*
+     - *a fake key refused with `byo_key_rejected`;*
+     - *a removed key's ciphertext erased in the database.*
+   - ***Not live-tested; covered by tests:***
+     - *livemode rejection, ignored or unknown-account events, and the duplicate-subscription
+       guard;*
+     - *checkout's `409`/`502` and customer reuse;*
+     - *the 31-minute expiry;*
+     - *`503 byo_unavailable` and the decrypt-failure `409 byo_key_needs_readd`. The local test
+       hit the missing-key case only before the fix, as a 500.*
+   - ***Findings:*** *the Stripe CLI listener is unreliable on the developer's network, so
+     webhooks were verified in production. Also: orphan uvicorn processes on Windows, and
+     `BYO_KEY_ENCRYPTION_KEY` copied from Render. All three are in `backend/DEPLOYMENT.md`,
+     "Local development".)*
 7. **Polish + manual QA pass** across both OAuth providers and both spreadsheet platforms
    end-to-end (sign-in → file read → mapping confirm → ask → usage/billing surfacing). No new
    endpoints or scopes — a verification session, not a feature one.
+   *(Next, after session 6. Includes the §10 item 10 polish list, and re-checking `/v1/usage`
+   latency on Render.)*
 
 ---
 
@@ -1022,6 +1066,15 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
         say "Resets …".
       - `GET /v1/usage` took 3–8 s locally (shared production database). Re-check on Render
         before optimizing.
+    - From the session 6 production run (2026-10-20):
+      - The Refresh button gives no visible feedback. Show a brief "Updating…" or disable it
+        while loading.
+      - The poll after Manage subscription (every 3 s for up to a minute) can end before
+        `customer.subscription.updated` arrives, so a scheduled cancellation appears late (the
+        next refresh shows it). Consider a longer window after Manage, or a single later
+        re-check.
+      - The free-tier reset time is shown in local time (e.g. "10/21/2026, 3:00:00 AM"). Make
+        it clear this is the reset at 00:00 UTC.
     - From the session 5 production run:
       - When another window starts a new conversation, show a short notice instead of the
         transcript silently disappearing.
@@ -1058,6 +1111,12 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
     rows.
     - *Session 6:* one of them, `51b10836…`, holds an active **fake** BYO key (seen in a
       read-only check during the local live test). The cascade removes it with the account.
+
+**From Phase D session 6** (backlog, before live-mode Stripe):
+
+14. **Decide access-log IP retention/redaction before live mode** (see `backend/SECURITY.md`
+    §4). The uvicorn access log on Render records each request's client IP address. It's not a
+    secret, but it is personal data.
 
 **Migrations are manual** (session 4): Render never runs them. Its Pre-Deploy command isn't
 available on the current plan. Run an additive migration with `alembic upgrade head` against

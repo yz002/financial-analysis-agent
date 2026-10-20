@@ -186,8 +186,8 @@ falls straight through `gating.evaluate_ask_gate`'s existing
 `byo_key.is_active` check to the paid/free tier instead of hitting the same
 decrypt failure on every call.
 
-(Amended Phase D session 6 (pending live verification): the decrypt-failure
-policy is now §8's "Decrypt failure keeps the ciphertext". A decrypt failure
+(Amended Phase D session 6 (pending live verification: unit-tested only): the
+decrypt-failure policy is now §8's "Decrypt failure keeps the ciphertext". A decrypt failure
 deactivates the key and unsets `accounts.byo_key_id`, but never erases
 `encrypted_key`, and a missing or malformed `BYO_KEY_ENCRYPTION_KEY` touches
 no key at all.)
@@ -257,9 +257,9 @@ so this can be done without a hard cutover, unlike the Fernet case above.
    checkout.session.completed` (Stripe CLI) or the dashboard's "send test
    webhook" — and confirm the request returns 200 and a new row lands in
    `stripe_webhook_events`.
-   (Amended Phase D session 6 (pending live verification): prefer the
+   (Amended Phase D session 6, verified in production 2026-10-20: prefer the
    dashboard's **Resend** on a real `checkout.session.completed` from a test
-   checkout. `stripe trigger` creates a checkout with no
+   checkout. Resending one gave 200 with no state change. `stripe trigger` creates a checkout with no
    `client_reference_id`, which the webhook now acknowledges and ignores by
    design (§8). It still proves the signature and the 200, but nothing more.)
 4. Once confirmed, the old signing secret can be left to expire per Stripe's
@@ -321,6 +321,15 @@ added across sessions 3-9, not just this session's) and `src/` (imported by
     iteration, `duration_ms`, stop reason and model. **The uvicorn access log includes the
     client IP address** (for example on `POST /v1/ask` lines), alongside the method, path and
     status. No question or answer content is logged.
+- **Phase D session 6 (verified in production 2026-10-20, commit `c5b4474`).**
+  - **Production log review:** Render's logs had no matches for `sk-ant`, `whsec` or `sk_test`.
+    The BYO request lines (`POST`/`DELETE /v1/byo-key`, and questions answered on a BYO key)
+    carried only the method, path and status.
+  - **The stderr-fallback note above is out of date.** As of commit `32e052a`, `app.*` warnings
+    go through the app's own formatted stderr handler (`app/main.py`'s
+    `configure_stderr_logger`).
+  - **Every session 6 warning is metadata only:** failed-check names, event, subscription and
+    row ids, exception class names.
 
 ---
 
@@ -464,13 +473,18 @@ are amended to match.
 
 ---
 
-## 8. Billing and BYO keys (Phase D session 6, pending live verification)
+## 8. Billing and BYO keys (Phase D session 6)
+
+*Status:* verified in production on 2026-10-20 (commit `c5b4474`, Stripe test mode). Items
+marked otherwise below were verified locally only, or are still pending live verification and
+covered by tests.
 
 **Stripe is test-mode only in this phase.**
 - `billing.py` refuses any `STRIPE_SECRET_KEY` that doesn't start with `sk_test_` or `rk_test_`.
   The billing routes then return `503 billing_unavailable` and log one WARNING naming the
-  failed check, never the value.
-- The webhook rejects any event with `livemode: true` (`400`).
+  failed check, never the value. *Verified locally, not in production.*
+- The webhook rejects any event with `livemode: true` (`400`). *Not live-tested; covered by
+  tests.*
 - The service still starts with a live key. Only billing is refused, so a billing
   misconfiguration can't take sign-in and `/v1/ask` down with it.
 
@@ -479,6 +493,10 @@ are amended to match.
   missing signature → `400`.
 - **State:** taken from Stripe's API at processing time (`stripe.Subscription.retrieve`), never
   from the event body. A delayed or out-of-order event can't roll a subscription back.
+  - *Verified:* resending `checkout.session.completed`, and later `customer.subscription.updated`,
+    changed nothing.
+  - *Verified:* on API version `2026-08-26.dahlia`, a portal cancellation sets `cancel_at`
+    (`cancel_at_period_end` stays false). The "either field" check recorded it.
 - **Outside the transaction:** that call runs before the database transaction opens, so a slow
   Stripe call never holds a transaction or the idempotency marker's lock.
 - **Which account:** comes only from `client_reference_id`, which this backend sets from the
@@ -492,8 +510,9 @@ are amended to match.
   subscription, the second is not written over it. The event is acknowledged, and one WARNING
   logs both subscription ids (ids only, no email).
   **Runbook:** find the newer subscription id from that WARNING in the Stripe dashboard, cancel
-  it immediately, and refund its payment. Checkout pages expire after 30 minutes (Stripe's
-  minimum), which narrows this window but can't close it.
+  it immediately, and refund its payment. Checkout pages expire after 31 minutes (Stripe's
+  30-minute minimum plus a minute for latency), which narrows this window but can't close it.
+  *Ignored events and the duplicate guard: not live-tested; covered by tests.*
 - **Logging:** no customer email is logged (§5 still holds).
 
 **Checkout and portal.**
@@ -522,7 +541,8 @@ are amended to match.
   `last_used_at`, `is_active = false`). Rows deactivated before this change still held
   ciphertext; `DEPLOYMENT.md` records the one-time wipe. **Only those two explicit actions erase
   a key.**
-- **Encryption not configured: no key is touched** (pending live verification). When
+- **Encryption not configured: no key is touched** (pending live verification; unit-tested
+  only. The local live test hit this condition before the fix, as a 500). When
   `BYO_KEY_ENCRYPTION_KEY` is missing, or isn't a valid Fernet key:
   - `POST /v1/byo-key` returns `503 byo_unavailable` before calling Anthropic or opening a
     database session;
@@ -531,7 +551,7 @@ are amended to match.
   - one WARNING names the failed check, never a value.
   Before this change, a missing key crashed registration with a 500 after the Anthropic call,
   and `/v1/ask` treated it as a decrypt failure, which erased the stored key.
-- **Decrypt failure keeps the ciphertext** (pending live verification). When a configured, valid
+- **Decrypt failure keeps the ciphertext** (pending live verification; unit-tested only). When a configured, valid
   Fernet key can't decrypt a stored key (`InvalidToken`), `/v1/ask`:
   - deactivates that row and unsets `accounts.byo_key_id`, but **keeps `encrypted_key` as it
     is**;

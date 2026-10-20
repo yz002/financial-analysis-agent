@@ -586,8 +586,8 @@ Errors:
   ```
   Use `prompt_byo_key`/`prompt_upgrade` to decide which upsell to show; `resets_at` is when the
   cap next clears.
-  (Amended Phase D session 6 (pending live verification): the daily and per-period counts
-  behind these caps exclude questions asked on a BYO key. A question asked while a key was
+  (Amended Phase D session 6, verified in production 2026-10-20, commit `c5b4474`: the daily
+  and per-period counts behind these caps exclude questions asked on a BYO key. A question asked while a key was
   registered doesn't count toward the free or paid allowance after the key is removed. The
   body is unchanged.)
 - `502` — an Anthropic API failure. Body is a generic message (`"Anthropic API error."`, or, for
@@ -601,8 +601,9 @@ Errors:
   account's BYO key has been deactivated server-side and the account has silently fallen through
   to the free/paid tier's normal caps; the extension should prompt the person to re-register
   their key.
-  (Amended Phase D session 6 (pending live verification): that `500` is replaced by the two
-  errors below, and neither counts the question.
+  (Amended Phase D session 6 (pending live verification: unit-tested only, not exercised in the
+  2026-10-20 production run): that `500` is replaced by the two errors below, and neither
+  counts the question.
   - `409 {"detail": {"error": "byo_key_needs_readd"}}`: the account's stored key can't be
     decrypted any more.
     - The key is deactivated and the account no longer points at it, so the next question uses
@@ -779,8 +780,12 @@ the moment it starts, so it's counted while it runs, not only once it's answered
 that's later answered, stopped or failed still counts once. Refused requests and replays of a
 finished `request_id` never count (see `/v1/ask` above).)
 
-(Amended Phase D session 6 (pending live verification): three additive fields. Every
-existing field keeps its meaning, and an older client that ignores the new ones still works.)
+(Amended Phase D session 6, verified in production 2026-10-20, commit `c5b4474`: three
+additive fields. Every existing field keeps its meaning, and an older client that ignores the
+new ones still works. Seen live:
+- the panel switched to Paid after checkout, without a manual refresh;
+- it showed "Your subscription ends 11/20/2026" once a cancellation was scheduled;
+- it went back to Free after an immediate cancel.)
 ```json
 {
   "resets_at": "<ISO-8601 or null>",  // free: next 00:00 UTC; paid: current_period_end; byo_key: null
@@ -803,6 +808,12 @@ existing field keeps its meaning, and an older client that ignores the new ones 
   renewal webhook is late, `period_ends_at` can be in the past while the count keeps running
   against the cap. Show "renewal pending" rather than a past date.
 - **`questions_today`** and **`questions_this_period`** exclude questions asked on a BYO key.
+- **After a subscription ends, today's paid questions count toward the free daily limit.** This
+  is by design: the free tier counts every question asked since 00:00 UTC, whatever tier it was
+  asked under (BYO-key questions excepted).
+  - Seen in production on 2026-10-20: one paid question, then an immediate cancel, and the panel
+    showed "Free: 1 of 5 questions today".
+  - Not a double charge: the question was counted once, in each window it falls in.
 
 ### `POST /v1/byo-key`
 Auth required. Registers or rotates the caller's own Anthropic API key. Registering a new key
@@ -818,7 +829,11 @@ Response (200): `{"registered": true}`
 Error: `422` — `{"detail": "That doesn't look like a valid Anthropic API key."}` if the key
 fails a basic format check.
 
-(Amended Phase D session 6 (pending live verification):
+(Amended Phase D session 6, verified 2026-10-20 in production (commit `c5b4474`):
+- **in production:** a real key passed Anthropic's check and was saved, and a question was
+  answered on it;
+- **in the local live test:** a well-formed fake key was refused with `byo_key_rejected`, and a
+  replaced or removed key's ciphertext was erased.
 - **Leading and trailing whitespace is stripped** before the format check, and the stripped key
   is what's stored.
 - **The key is verified with Anthropic before anything is stored**: one model-list call, which
@@ -831,15 +846,19 @@ fails a basic format check.
 - **Never store or log the key in the extension.** It exists only in the input field and this
   request's body.)
 
-(Amended Phase D session 6, after the local live test (pending live verification):
+(Amended Phase D session 6, after the local live test (pending live verification: unit-tested
+only. The local live test hit this condition before the fix, as an unhandled 500; the fixed
+`503` hasn't been seen live):
 `503 {"detail": {"error": "byo_unavailable"}}` when the server's encryption key isn't
 configured. It's checked after the format check and before the Anthropic check, so nothing is
 sent to Anthropic and nothing is stored. Show "Saving your own key isn't available right now.
 Nothing was saved.")
 
 ### `DELETE /v1/byo-key`
-(New, Phase D session 6 (pending live verification).) Auth required. No request body. Removes
-the caller's BYO key.
+(New, Phase D session 6. Verified in production 2026-10-20, commit `c5b4474`: Remove showed "Key
+removed". The local live test confirmed the database side: `is_active` false, the ciphertext
+erased and `accounts.byo_key_id` unset.) Auth required. No request body. Removes the caller's
+BYO key.
 - The active key is deactivated and its stored ciphertext erased.
 - The account's next question uses its free or paid tier.
 
@@ -859,22 +878,29 @@ instant the person returns from checkout.
 Error: `500` — `{"detail": "STRIPE_PRICE_ID is not configured"}` — a server misconfiguration, not
 something the extension can act on beyond surfacing a generic error.
 
-(Amended Phase D session 6 (pending live verification):
+(Amended Phase D session 6. Verified in production 2026-10-20, commit `c5b4474`, unless marked
+otherwise: checkout opened on Stripe, the success URL was `https`, the webhook was delivered
+with `200`, and the panel switched to Paid without a manual refresh.
 - **The `500` above is replaced** by `503 {"detail": {"error": "billing_unavailable"}}`.
   Billing isn't configured on this server, or it's configured with anything other than a Stripe
-  **test-mode** key: live keys are refused during this phase.
+  **test-mode** key: live keys are refused during this phase. *Verified locally, not in
+  production* (production runs a test key).
 - `409 {"detail": {"error": "subscription_exists"}}`: the account already has an `active`,
-  `trialing`, `past_due` or `unpaid` subscription. Offer Manage subscription instead.
+  `trialing`, `past_due` or `unpaid` subscription. Offer Manage subscription instead. *Not
+  live-tested; covered by tests.*
 - `502 {"detail": {"error": "billing_provider_error"}}`: Stripe failed. The message never
-  carries Stripe's text.
+  carries Stripe's text. *Not live-tested; covered by tests.*
 - **Only open the returned URL if it starts with `https://checkout.stripe.com/`.**
-- The checkout page expires after 30 minutes.
+- The checkout page expires after 31 minutes: Stripe's 30-minute minimum plus a minute for
+  request latency. *Implemented, not live-verified.*
 - A returning customer is checked out as the same Stripe customer, so their billing history
-  stays in one place.
+  stays in one place. *Not live-tested.*
 - The success and cancel pages tell the person to return to the extension.)
 
 ### `POST /v1/billing/portal-session`
-(New, Phase D session 6 (pending live verification).) Auth required. **No request body.** Opens
+(New, Phase D session 6. Verified in production 2026-10-20, commit `c5b4474`: Manage
+subscription opened the portal, and a cancel at period end there reached the panel. The
+`404`/`503`/`502` errors are covered by tests, not live-tested.) Auth required. **No request body.** Opens
 Stripe's hosted customer portal for the caller's own subscription: update the card, cancel, or
 renew a scheduled cancellation.
 
@@ -891,18 +917,31 @@ Errors:
 - `502 {"detail": {"error": "billing_provider_error"}}`
 
 ### `POST /v1/billing/webhook` (Stripe only, not called by the extension)
-(Amended Phase D session 6 (pending live verification), recorded here for operators.)
-- **Signature:** checked before anything else. A missing or bad signature → `400`.
-- **Live mode:** an event with `livemode: true` → `400`, during the test-mode phase.
+(Amended Phase D session 6, recorded here for operators. Verified in production 2026-10-20,
+commit `c5b4474`, unless marked otherwise. The endpoint uses API version `2026-08-26.dahlia`
+with the four events listed in `DEPLOYMENT.md`.)
+- **Signature:** checked before anything else. A missing or bad signature → `400` (an unsigned
+  POST gave `400`).
+- **Live mode:** an event with `livemode: true` → `400`, during the test-mode phase. *Not
+  live-tested; covered by tests.*
 - **Subscription state:** taken from Stripe's API at processing time, not from the event body.
   A late or out-of-order event therefore can't roll the state back.
+  - **This Stripe API version records a portal "cancel at period end" in `cancel_at`**, and
+    `cancel_at_period_end` stays `false`. The backend treats either field as "cancellation
+    scheduled", so the database showed the cancellation and the panel showed "Your
+    subscription ends 11/20/2026".
+  - `customer.subscription.deleted` (an immediate cancel) set the status to `canceled`, and the
+    panel went back to Free.
 - **Ignored events:** a checkout that isn't a subscription, or that names no known account, is
-  acknowledged (`200`) and ignored.
+  acknowledged (`200`) and ignored. *Not live-tested; covered by tests.*
 - **Duplicate subscription:** when an account already has a different active, trialing,
   past_due or unpaid subscription, a second completed checkout doesn't replace it. It's
   acknowledged and logged with both subscription ids for manual cancellation and refund
-  (`DEPLOYMENT.md`).
+  (`DEPLOYMENT.md`). *Not live-tested; covered by tests.*
 - **Redeliveries:** a redelivered event is acknowledged without being applied again.
+  - Resending `checkout.session.completed` gave `200` with no state change (`updated_at`
+    unchanged, a single marker row).
+  - A later accidental resend of `customer.subscription.updated` also changed nothing.
 
 ---
 
@@ -927,7 +966,8 @@ implicit:
 - Conversation history listing/browsing and full tool-call-trace-on-demand endpoints — described
   in the original design doc but not implemented (see `/v1/ask`'s note in §6).
 - ~~A `/v1/byo-key` removal endpoint — only registration/rotation exists today (see §6).~~
-  (Amended Phase D session 6 (pending live verification): `DELETE /v1/byo-key` now exists, §6.)
+  (Amended Phase D session 6, verified in production 2026-10-20: `DELETE /v1/byo-key` now
+  exists, §6.)
 - Live-mode Stripe. Only test-mode keys are accepted (Phase D session 6).
 - Plan changes, proration, tax, receipts, dunning emails, and any billing UI beyond Stripe's
   hosted Checkout and customer portal.

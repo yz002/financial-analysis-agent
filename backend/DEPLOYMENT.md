@@ -18,25 +18,32 @@ and it needs only `DATABASE_URL`.
 | `GOOGLE_CLIENT_ID` | Google sign-in (server-side code exchange) | Added 2026-09-29 |
 | `GOOGLE_CLIENT_SECRET` | Google sign-in (server-side code exchange) | Added 2026-09-29 |
 | `BYO_KEY_ENCRYPTION_KEY` | Encrypting/decrypting stored BYO Anthropic keys | Added 2026-09-29 |
-| `STRIPE_SECRET_KEY` | Checkout Session creation, subscription lookups | **Deliberately unset** |
-| `STRIPE_WEBHOOK_SECRET` | Verifying Stripe webhook signatures | **Deliberately unset** |
-| `STRIPE_PRICE_ID` | `/v1/billing/checkout-session` | **Deliberately unset** |
+| `STRIPE_SECRET_KEY` | Checkout Session creation, subscription lookups | Set, **test mode** (`sk_test_`), Phase D session 6; in use 2026-10-20 |
+| `STRIPE_WEBHOOK_SECRET` | Verifying Stripe webhook signatures | Set from the dashboard endpoint's signing secret, Phase D session 6 |
+| `STRIPE_PRICE_ID` | `/v1/billing/checkout-session` | Set, the test-mode $2/month price, Phase D session 6 |
 
 **Finding, 2026-09-29:** production had only `DATABASE_URL`, `ANTHROPIC_API_KEY` and
 `SEC_USER_AGENT`. Google sign-in and BYO-key registration could not have worked in production
 before then. `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `BYO_KEY_ENCRYPTION_KEY` were added
 that day.
 
-**`STRIPE_*` stay unset until Phase D session 6.** They need a production webhook endpoint
+**`STRIPE_*` stayed unset until Phase D session 6** (set since, in test mode; see below). They need a production webhook endpoint
 registered in the Stripe dashboard (in test mode), whose signing secret becomes
 `STRIPE_WEBHOOK_SECRET`. The `whsec_…` secret printed by the local `stripe listen` CLI only
 works for local forwarding and must not be used on Render. Until then, billing endpoints fail
 at request time in production.
 
-**Phase D session 6 (pending live verification): Stripe is test-mode only.**
+**Phase D session 6: Stripe is test-mode only.**
 - The billing code refuses any `STRIPE_SECRET_KEY` that doesn't start with `sk_test_` (or
   `rk_test_`). The billing routes then return `503 billing_unavailable`, and the rest of the
-  service runs normally.
+  service runs normally. *Verified locally* (a dummy `sk_live_` key gave 503 and opened no
+  Stripe tab), once an orphan uvicorn process had been stopped (see "Local development").
+  Not exercised in production, which runs a test key.
+- **Production webhook endpoint (verified 2026-10-20, commit `c5b4474`):**
+  - registered in the test-mode sandbox ("Fintel sandbox"), API version `2026-08-26.dahlia`;
+  - events `checkout.session.completed`, `customer.subscription.updated`,
+    `customer.subscription.deleted` and `invoice.payment_failed`;
+  - an unsigned POST returns 400.
 - Set the three `STRIPE_*` values on Render only after the session 6 backend is deployed:
   1. Stripe dashboard, **test mode** → Developers → Webhooks → **Add endpoint**
      `https://<render-service-host>/v1/billing/webhook`, with events
@@ -130,7 +137,8 @@ The fake request fails before account resolution, so it creates no rows.
   (`websocket.Client.writePump … close sent`), and `stripe events resend` doesn't reach a
   restarted listener. Test webhooks against the production endpoint registered in the Stripe
   dashboard (test mode) instead: session 6 live-test steps L4–L8 moved to production P4–P7. As
-  of the session 6 local test, the sandbox had no registered webhook endpoints.
+  of the session 6 local test, the sandbox had no registered webhook endpoints. Session 6's
+  webhook verification was done this way, in production, on 2026-10-20.
 - **Sandbox cleanup (session 6):** four orphan test-mode subscriptions were canceled in the
   dashboard. One was from Phase B (2026-09-16); three came from local checkouts whose
   webhooks were never delivered, so they had no `subscriptions` row.
@@ -156,6 +164,10 @@ The fake request fails before account resolution, so it creates no rows.
 
 ## Production deploys
 
+- **`c5b4474`, verified 2026-10-20 (Phase D session 6).** Stripe in test mode (sandbox "Fintel
+  sandbox"), with the webhook endpoint above. No new migrations beyond `0006_usage_event_tier`,
+  which was applied before the push (2026-10-08). The production results are recorded in
+  `docs/chrome-extension-design.md` §9 item 6.
 - **`aea7b33`, 2026-10-06 (Phase D session 5).** `/v1/health` returned
   `{"status":"ok","db":"ok","commit":"aea7b33c7aef255dfc5b852e2e6c0a53fef536ce"}`. No new
   migrations beyond `0005_ask_request_state`, which was applied before the push.
