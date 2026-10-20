@@ -10,9 +10,11 @@ import {
   ITERATION_CAP_NOTICE,
   QUESTION_MAX_LENGTH,
   segmentAnswer,
+  type AnswerSegment,
   type SourceGroup,
   type SourceLine,
 } from '../../lib/chatModel';
+import { keepsRangesWhole, parseAnswer, type Block, type Inline, type Run } from '../../lib/answerMarkdown';
 import {
   clearChatState,
   clearPendingAsk,
@@ -110,6 +112,128 @@ function citationItem({ view, mentions }: SourceGroup): HTMLLIElement {
   return item;
 }
 
+/** A cited figure, marked exactly as segmentAnswer cut it: its text, status class and marker. */
+function appendFigure(parent: HTMLElement, citation: Citation, text: string): void {
+  const view = describeCitation(citation);
+  parent.append(element('span', `figure figure--${view.status}`, text));
+  if (view.statusLabel) parent.append(element('span', 'figure-marker', view.statusLabel));
+}
+
+interface FigureRange {
+  start: number;
+  end: number;
+  citation: Citation;
+}
+
+/** Each figure segment's [start, end) in the answer, from segmentAnswer's own segments. */
+function figureRanges(segments: AnswerSegment[]): FigureRange[] {
+  const ranges: FigureRange[] = [];
+  let position = 0;
+  for (const segment of segments) {
+    if (segment.kind === 'figure') {
+      ranges.push({ start: position, end: position + segment.text.length, citation: segment.citation });
+    }
+    position += segment.text.length;
+  }
+  return ranges;
+}
+
+const STYLE_TAG = { bold: 'strong', italic: 'em', code: 'code' } as const;
+
+/** One run of the answer, in its bold/italic/code elements, with any figures inside it marked. */
+function appendRun(parent: HTMLElement, answer: string, run: Run, figures: FigureRange[]): void {
+  let target = parent;
+  for (const style of run.styles) {
+    const styled = document.createElement(STYLE_TAG[style]);
+    target.append(styled);
+    target = styled;
+  }
+  let position = run.start;
+  for (const figure of figures) {
+    if (figure.start < run.start || figure.end > run.end) continue;
+    if (figure.start > position) target.append(document.createTextNode(answer.slice(position, figure.start)));
+    appendFigure(target, figure.citation, answer.slice(figure.start, figure.end));
+    position = figure.end;
+  }
+  if (position < run.end) target.append(document.createTextNode(answer.slice(position, run.end)));
+}
+
+function appendInline(parent: HTMLElement, answer: string, inline: Inline, figures: FigureRange[]): void {
+  for (const run of inline) appendRun(parent, answer, run, figures);
+}
+
+function blockElement(block: Block, answer: string, figures: FigureRange[]): HTMLElement {
+  if (block.kind === 'paragraph') {
+    const p = element('p');
+    block.lines.forEach((line, index) => {
+      if (index > 0) p.append(document.createElement('br'));
+      appendInline(p, answer, line, figures);
+    });
+    return p;
+  }
+  if (block.kind === 'bullets' || block.kind === 'numbered') {
+    const list = block.kind === 'bullets' ? element('ul') : element('ol');
+    if (block.kind === 'numbered' && block.start !== 1) (list as HTMLOListElement).start = block.start;
+    for (const item of block.items) {
+      const li = element('li');
+      appendInline(li, answer, item, figures);
+      list.append(li);
+    }
+    return list;
+  }
+  const table = element('table', 'chat-table');
+  const head = element('thead');
+  const headRow = element('tr');
+  for (const cell of block.header) {
+    const th = element('th');
+    appendInline(th, answer, cell, figures);
+    headRow.append(th);
+  }
+  head.append(headRow);
+  const body = element('tbody');
+  for (const row of block.rows) {
+    const tr = element('tr');
+    for (const cell of row) {
+      const td = element('td');
+      appendInline(td, answer, cell, figures);
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+  table.append(head, body);
+  const scroll = element('div', 'table-scroll');
+  scroll.append(table);
+  return scroll;
+}
+
+/**
+ * The answer text, with its light markdown (lib/answerMarkdown.ts) shown as elements and every
+ * cited figure marked in place, inside whatever bold, list item or table cell holds it. Figures
+ * come first: no markdown delimiter is taken from inside one. If any figure still wouldn't sit
+ * whole inside one run, the answer is shown exactly as before: plain text with its line breaks.
+ * Only the display changes: the sources list and the banner use the citations and the raw
+ * final_answer, untouched.
+ */
+function answerText(answer: string, citations: Citation[]): HTMLElement {
+  const segments = segmentAnswer(answer, citations);
+  const figures = figureRanges(segments);
+  const ranges = figures.map((f) => [f.start, f.end] as const);
+  const blocks = parseAnswer(answer, ranges);
+
+  if (!keepsRangesWhole(blocks, ranges)) {
+    const text = element('p', 'chat-answer-text');
+    for (const segment of segments) {
+      if (segment.kind === 'text') text.append(document.createTextNode(segment.text));
+      else appendFigure(text, segment.citation, segment.text);
+    }
+    return text;
+  }
+
+  const container = element('div', 'chat-answer-text chat-answer-text--formatted');
+  for (const block of blocks) container.append(blockElement(block, answer, figures));
+  return container;
+}
+
 /**
  * One answer: the figure-check banner, the iteration-cap notice when it applies, the answer
  * text with each checked figure marked, and the sources behind every figure.
@@ -126,17 +250,7 @@ export function renderAnswer(response: AskResponse): HTMLElement {
     article.append(notice);
   }
 
-  const text = element('p', 'chat-answer-text');
-  for (const segment of segmentAnswer(response.final_answer, citations)) {
-    if (segment.kind === 'text') {
-      text.append(document.createTextNode(segment.text));
-      continue;
-    }
-    const view = describeCitation(segment.citation);
-    text.append(element('span', `figure figure--${view.status}`, segment.text));
-    if (view.statusLabel) text.append(element('span', 'figure-marker', view.statusLabel));
-  }
-  article.append(text);
+  article.append(answerText(response.final_answer, citations));
 
   const cited = citations.filter((c) => c.matches.length || c.status !== 'traced');
   if (cited.length) {

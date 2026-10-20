@@ -194,6 +194,140 @@ describe('renderAnswer: text from the backend or the sheet never becomes markup'
   });
 });
 
+describe('renderAnswer: light markdown, built from elements and text nodes only', () => {
+  /** A citation for the first `raw` at or after `from` in `text`. */
+  function cite(text: string, raw: string, status: Citation['status'] = 'untraced', from = 0): Citation {
+    const start = text.indexOf(raw, from);
+    if (start === -1) throw new Error(`"${raw}" not in answer`);
+    return { figure_index: 0, raw_text: raw, start, end: start + raw.length, status, matches: [] };
+  }
+
+  function render(final_answer: string, citations: Citation[] = []): HTMLElement {
+    const article = renderAnswer(answer({ final_answer, citations, figure_check: { figures: [] } }));
+    document.body.append(article);
+    return article;
+  }
+
+  const text = (article: HTMLElement) => article.querySelector('.chat-answer-text')!;
+
+  it('script tags, onerror images and javascript: links stay literal text, with no element created', () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const hostile = [
+      '<script>alert(1)</script>',
+      '<img src=x onerror=alert(1)>',
+      '[x](javascript:alert(1))',
+    ];
+    const final_answer =
+      `${hostile[0]}\n\n**${hostile[1]}**\n\n- ${hostile[2]}\n\n| A | B |\n|---|---|\n| ${hostile[0]} | ${hostile[2]} |`;
+    const article = render(final_answer);
+
+    expect(article.querySelectorAll('script, img, a, iframe, object, embed')).toHaveLength(0);
+    for (const literal of hostile) expect(article.textContent).toContain(literal);
+    expect(article.querySelector('strong')!.textContent).toBe(hostile[1]);
+    expect(article.querySelector('li')!.textContent).toBe(hostile[2]);
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect((window as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
+  it('bold, italic, inline code, lists and line breaks become elements', () => {
+    const article = render('Revenue was **up** and *steady*, see `B4`.\nSecond line\n\n- one\n- two\n\n1. first\n2. second');
+    const answerText = text(article);
+    expect(answerText.querySelector('strong')!.textContent).toBe('up');
+    expect(answerText.querySelector('em')!.textContent).toBe('steady');
+    expect(answerText.querySelector('code')!.textContent).toBe('B4');
+    const p = answerText.querySelector('p')!;
+    expect(p.querySelectorAll('br')).toHaveLength(1);
+    expect(p.textContent).toBe('Revenue was up and steady, see B4.Second line');
+    expect([...answerText.querySelectorAll('ul > li')].map((li) => li.textContent)).toEqual(['one', 'two']);
+    expect([...answerText.querySelectorAll('ol > li')].map((li) => li.textContent)).toEqual(['first', 'second']);
+    expect(answerText.textContent).not.toContain('\n');
+  });
+
+  it('an unclosed ** or ` stays literal', () => {
+    const article = render('Revenue **grew and see `B4');
+    expect(text(article).querySelectorAll('strong, em, code')).toHaveLength(0);
+    expect(text(article).textContent).toBe('Revenue **grew and see `B4');
+  });
+
+  it('"revenue * margin", "2 * 3" and a "-4.6%" line stay as written', () => {
+    const final_answer = 'revenue * margin and 2 * 3\n-4.6% was the margin\n-$120 was the loss';
+    const article = render(final_answer, [cite(final_answer, '-4.6%')]);
+    expect(text(article).querySelectorAll('em, strong, ul, ol')).toHaveLength(0);
+    expect(text(article).textContent).toBe('revenue * margin and 2 * 3-4.6%Not traced to your data was the margin-$120 was the loss');
+    expect(text(article).querySelector('.figure')!.textContent).toBe('-4.6%');
+  });
+
+  it('a figure inside bold keeps its span, status class and marker', () => {
+    const final_answer = 'Revenue was **1.25 million** this quarter.';
+    const article = render(final_answer, [cite(final_answer, '1.25 million')]);
+    const figure = text(article).querySelector('strong > .figure')!;
+    expect(figure.className).toBe('figure figure--untraced');
+    expect(figure.textContent).toBe('1.25 million');
+    expect(figure.nextElementSibling!.className).toBe('figure-marker');
+    expect(figure.nextElementSibling!.textContent).toBe('Not traced to your data');
+  });
+
+  it('a figure inside a table cell and a list item keeps its mark; the sources list is unchanged', () => {
+    const final_answer = '| Quarter | Revenue |\n|---|---|\n| Q1 | 1.25 million |\n\n- Margin was 40.0%';
+    const citations = [
+      { ...cite(final_answer, '1.25 million', 'traced'), matches: answer().citations[0]!.matches },
+      cite(final_answer, '40.0%'),
+    ];
+    const article = render(final_answer, citations);
+
+    const cellFigure = text(article).querySelector('table td .figure')!;
+    expect(cellFigure.textContent).toBe('1.25 million');
+    expect(cellFigure.className).toBe('figure figure--traced');
+    expect(text(article).querySelector('li .figure--untraced')!.textContent).toBe('40.0%');
+    // The sources still come from the citations, as before.
+    const sources = [...article.querySelectorAll('.chat-sources li.chat-source .chat-source-figure')].map((s) => s.textContent);
+    expect(sources).toEqual(['1.25 million', '40.0%']);
+    expect(article.querySelector('.chat-sources .ref')!.textContent).toBe("'P&L'!B4");
+  });
+
+  it('a figure that straddles a ** keeps its text; those stars stay literal', () => {
+    const final_answer = 'Revenue **1.25** million.';
+    const article = render(final_answer, [cite(final_answer, '1.25** million')]);
+    expect(text(article).querySelector('strong')).toBeNull();
+    expect(text(article).querySelector('.figure')!.textContent).toBe('1.25** million');
+    expect(text(article).textContent).toContain('Revenue **');
+  });
+
+  it('a ragged table pads short rows and keeps a long row\'s extra cells as literal text', () => {
+    const article = render('| A | B | C |\n|---|---|---|\n| 1 |\n| 1 | 2 | 3 | 4 |');
+    const rows = [...text(article).querySelectorAll('tbody tr')].map((tr) => [...tr.children].map((td) => td.textContent));
+    expect(rows).toEqual([
+      ['1', '', ''],
+      ['1', '2', '3 | 4'],
+    ]);
+    expect([...text(article).querySelectorAll('thead th')].map((th) => th.textContent)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('a figure across a line break falls back to the plain answer, marked as before', () => {
+    const final_answer = 'Revenue was **1.25\nmillion**.';
+    const article = render(final_answer, [cite(final_answer, '1.25\nmillion')]);
+    const answerText = text(article);
+    expect(answerText.tagName).toBe('P');
+    expect(answerText.classList.contains('chat-answer-text--formatted')).toBe(false);
+    expect(answerText.textContent).toBe('Revenue was **1.25\nmillionNot traced to your data**.');
+    expect(answerText.querySelector('.figure')!.textContent).toBe('1.25\nmillion');
+  });
+
+  it('the banner and the stored answer are untouched by the formatting', () => {
+    const final_answer = '**Revenue** was 1.25 million.';
+    const response = answer({
+      final_answer,
+      citations: [{ ...answer().citations[0]!, start: final_answer.indexOf('1.25'), end: final_answer.indexOf('1.25') + 12 }],
+    });
+    const before = JSON.stringify(response);
+    const article = renderAnswer(response);
+    expect(JSON.stringify(response)).toBe(before); // final_answer and citations not modified
+    expect(article.querySelector('.figure-check')!.textContent).toBe(
+      renderAnswer(answer()).querySelector('.figure-check')!.textContent,
+    );
+  });
+});
+
 describe('ChatController', () => {
   it('needs a confirmed statement: hidden without one, shown with one', async () => {
     const { chat } = makeChat([]);

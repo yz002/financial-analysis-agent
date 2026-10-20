@@ -440,6 +440,32 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* Light markdown (lib/answerMarkdown.ts), built from elements and text nodes only. */
+.chat-answer-text--formatted {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+#app .chat-answer-text--formatted p,
+.chat-answer-text--formatted ul,
+.chat-answer-text--formatted ol {
+  margin: 0;
+}
+
+.chat-answer-text--formatted ul,
+.chat-answer-text--formatted ol {
+  padding-left: var(--space-lg);
+}
+
+.chat-answer-text--formatted code {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  padding: 0 var(--space-xxs);
+  border-radius: var(--radius-input);
+  background: var(--color-surface);
+}
+
 .figure {
   font-weight: 600;
 }
