@@ -262,6 +262,11 @@ interface MappingSession extends MappingOrigin {
   columns: string[];
   sampleRows: string[][];
   proposal: ProposalEntry[] | null;
+  /**
+   * What the reset button goes back to: the suggestion on a fresh send, or the confirmed roles
+   * on Change mapping (which asks for no suggestion). null hides the button.
+   */
+  reset: { roles: Record<string, string>; label: string } | null;
   draft: MappingDraft;
   serverErrors: string[];
   acknowledgement: { fingerprint: string; cells: UnparsedCell[] } | null;
@@ -275,6 +280,9 @@ let answerPending = false;
 const SAMPLE_VALUES_SHOWN = 3;
 
 const PREVIEW_DATA_ROWS = 10;
+
+const RESET_TO_SUGGESTION = 'Reset to suggestion';
+const RESET_TO_CONFIRMED = 'Reset to confirmed mapping';
 
 const PROVIDER_LABEL: Record<AuthProvider, string> = {
   google: 'Google',
@@ -504,7 +512,10 @@ function updateMappingValidation(m: MappingSession): void {
   });
   if (confirmMappingButton) confirmMappingButton.disabled = busy || answerPending || !result.canConfirm;
   if (confirmAnywayButton) confirmAnywayButton.disabled = busy || answerPending;
-  if (resetMappingButton) resetMappingButton.hidden = m.proposal === null;
+  if (resetMappingButton) {
+    resetMappingButton.hidden = m.reset === null;
+    if (m.reset) resetMappingButton.textContent = m.reset.label;
+  }
 }
 
 function renderAcknowledgement(m: MappingSession): void {
@@ -991,6 +1002,7 @@ async function sendForMapping(origin: MappingOrigin, previous: ConfirmedChoices 
       columns: response.columns,
       sampleRows: response.sample_rows,
       proposal: null,
+      reset: null,
       draft: newDraft(response.columns, null, defaultEntityName(origin.file.name)),
       serverErrors: [],
       acknowledgement: null,
@@ -999,6 +1011,7 @@ async function sendForMapping(origin: MappingOrigin, previous: ConfirmedChoices 
     if (mappingNote) mappingNote.textContent = '';
     if (previous) {
       m.draft = carryOver(m.draft, previous);
+      m.reset = { roles: { ...m.draft.roles }, label: RESET_TO_CONFIRMED };
       clearStatus();
       showMappingPanel(m);
       return;
@@ -1033,6 +1046,7 @@ async function suggestMapping(sessionToken: string, m: MappingSession): Promise<
     const response = await proposeMapping(sessionToken, m.csvContextId);
     if (mapping !== m) return;
     m.proposal = response.proposal;
+    m.reset = { roles: rolesFromProposal(m.columns, response.proposal), label: RESET_TO_SUGGESTION };
     m.draft = { ...m.draft, ...newDraft(m.columns, response.proposal, m.draft.entityName) };
     if (mappingNote) mappingNote.textContent = response.note ?? '';
     clearStatus();
@@ -1200,10 +1214,10 @@ ackBackButton?.addEventListener('click', () => {
   if (mapping) draftChanged(mapping);
 });
 resetMappingButton?.addEventListener('click', () => {
-  // Back to the stored suggestion -- no network call.
+  // Back to the stored suggestion, or to the confirmed mapping -- no network call.
   const m = mapping;
-  if (!m || !m.proposal) return;
-  m.draft.roles = rolesFromProposal(m.columns, m.proposal);
+  if (!m || !m.reset) return;
+  m.draft.roles = { ...m.reset.roles };
   draftChanged(m);
   renderMappingTable(m);
 });

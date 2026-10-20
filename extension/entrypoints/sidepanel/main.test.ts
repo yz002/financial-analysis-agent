@@ -1604,6 +1604,38 @@ describe('mapping screen (session 4)', () => {
     expect(el<HTMLSelectElement>('#currency-select').value).toBe('EUR');
   });
 
+  it('Change mapping offers Reset to confirmed mapping, which restores the confirmed roles', async () => {
+    confirmMappingMock.mockResolvedValue(confirmResponse());
+    parseCsvMock.mockResolvedValue({
+      csv_context_id: 'ctx-123', columns: ['Period', 'Revenue', 'Margin'],
+      sample_rows: [['2025-03-31', '1250000', '0.6145038167938931']], parse_error: null,
+    });
+    await openMapping();
+    expect(el('#reset-mapping').textContent).toBe('Reset to suggestion');
+    choose('#scale-select', 'thousands');
+    choose(roleSelect('Margin'), 'net_income'); // the confirmed mapping differs from the suggestion
+    await click('#confirm-mapping');
+
+    await click('#change-mapping');
+    expect(isHidden('#reset-mapping')).toBe(false);
+    expect(el('#reset-mapping').textContent).toBe('Reset to confirmed mapping');
+
+    choose(roleSelect('Margin'), 'unmapped');
+    choose(roleSelect('Revenue'), 'unmapped');
+    await click('#reset-mapping');
+
+    expect(roleSelect('Margin').value).toBe('net_income');
+    expect(roleSelect('Revenue').value).toBe('revenue');
+    expect(proposeMappingMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed suggestion leaves no reset button', async () => {
+    proposeMappingMock.mockRejectedValue(new BackendApiError('failed', 502, { error: 'x' }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await openMapping();
+    expect(isHidden('#reset-mapping')).toBe(true);
+  });
+
   it('Back returns to the preview without confirming anything', async () => {
     await openMapping();
 
