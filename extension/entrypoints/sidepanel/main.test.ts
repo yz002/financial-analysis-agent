@@ -1081,6 +1081,27 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
     expect(isHidden('#send-data')).toBe(true);
     expect(el('#preview-table').children).toHaveLength(0);
   });
+
+  it('changing the sheet discards a stale preview: Send hidden, table and caption cleared', async () => {
+    connectGoogleSheetMock.mockResolvedValue(fakeFile());
+    await loadSidepanel();
+    await clickConnect();
+    await click('#read-range');
+    expect(isHidden('#send-data')).toBe(false);
+    expect(el('#preview-caption').textContent).not.toBe('');
+
+    el<HTMLSelectElement>('#sheet-select').value = 'Notes';
+    el('#sheet-select').dispatchEvent(new Event('change'));
+
+    expect(isHidden('#send-data')).toBe(true);
+    expect(el('#preview-table').children).toHaveLength(0);
+    expect(el('#preview-caption').textContent).toBe('');
+    expect(el<HTMLInputElement>('#range-input').value).toBe('');
+
+    // Send now has nothing to send: a click (were it visible) posts nothing.
+    await click('#send-data');
+    expect(parseCsvMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('a successful sign-in starts with no data-access state', () => {
