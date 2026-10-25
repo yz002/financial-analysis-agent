@@ -54,6 +54,16 @@ describe('usageView', () => {
     expect(view.actions).toEqual({ upgrade: true, manage: false, removeKey: false });
   });
 
+  it.each([
+    [6, 'Free: 6 questions counted today (daily limit 5)'], // over: paid questions after a subscription ended
+    [5, 'Free: 5 of 5 questions today'],
+    [4, 'Free: 4 of 5 questions today'],
+  ])('free with %i used against a cap of 5: %s', (used, line) => {
+    const view = usageView(usage({ questions_today: used }), NOW, fmt);
+    expect(view.line).toBe(line);
+    expect(view.resetLine).toBe('Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).');
+  });
+
   it('free with none used yet: the same reset line, not "more questions from"', () => {
     expect(usageView(usage({ questions_today: 0 }), NOW, fmt).resetLine).toBe(
       'Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).',

@@ -48,7 +48,15 @@ export function usageView(usage: UsageResponse, now: Date, formatTime: FormatTim
       resetLine = `Renews ${formatTime(periodEnd)}.`;
     }
   } else {
-    line = `Free: ${usage.questions_today ?? 0} of ${usage.daily_cap ?? 0} questions today`;
+    const used = usage.questions_today ?? 0;
+    const cap = usage.daily_cap ?? 0;
+    // Over the cap is legitimate: after a subscription ends, today's paid questions count toward
+    // the free limit (EXTENSION_INTEGRATION.md SS6 /v1/usage). Shown as the backend's two numbers,
+    // never clamped, but not as "6 of 5".
+    line =
+      used > cap
+        ? `Free: ${used} question${used === 1 ? '' : 's'} counted today (daily limit ${cap})`
+        : `Free: ${used} of ${cap} questions today`;
     // The free limit resets at 00:00 UTC (EXTENSION_INTEGRATION.md SS6 /v1/usage), so say so
     // rather than show only a local time; the same line whether or not any are used yet.
     if (usage.resets_at) resetLine = `Resets daily at 00:00 UTC (${formatTime(usage.resets_at)} your time).`;
