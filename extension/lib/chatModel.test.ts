@@ -5,6 +5,7 @@ import {
   describeCitation,
   failureMessage,
   figureCheckBanner,
+  formulaLabel,
   groupCitations,
   NOT_TRACED_LABEL,
   segmentAnswer,
@@ -58,6 +59,33 @@ const MARGIN = citation({
   ],
 });
 
+describe('formulaLabel', () => {
+  it.each([
+    ['gross_profit / revenue', 'Gross profit / Revenue'],
+    ['(revenue - revenue_prior) / revenue_prior', '(Revenue - Prior-period revenue) / Prior-period revenue'],
+    ['(net_income - net_income_prior) / net_income_prior', '(Net income - Prior-period net income) / Prior-period net income'],
+    ['operating_cash_flow - capex', 'Operating cash flow - Capital expenditure'],
+    ['net_income_ttm / stockholders_equity', "Net income over the last four quarters / Stockholders' equity"],
+    [
+      'sum of net_income for this quarter and the 3 quarters before it',
+      'sum of Net income for this quarter and the 3 quarters before it',
+    ],
+  ])('%s reads as %s', (formula, label) => {
+    expect(formulaLabel(formula)).toBe(label);
+  });
+
+  it('leaves a word it does not recognize as written', () => {
+    expect(formulaLabel('ebitda / revenue')).toBe('ebitda / Revenue');
+    expect(formulaLabel('period_end - unmapped_prior')).toBe('period_end - unmapped_prior');
+  });
+
+  it("only changes the display: the citation's formula is untouched", () => {
+    const before = JSON.stringify(MARGIN);
+    describeCitation(MARGIN);
+    expect(JSON.stringify(MARGIN)).toBe(before);
+  });
+});
+
 describe('segmentAnswer', () => {
   it('splits the answer into text and cited figures at the citation offsets', () => {
     expect(segmentAnswer(ANSWER, [MARGIN, REVENUE])).toEqual([
@@ -106,7 +134,7 @@ describe('describeCitation', () => {
   it('a derived value shows its formula and every input cell, never a single cell', () => {
     const [line] = describeCitation(MARGIN).lines;
     expect(line!.ref).toBeNull();
-    expect(line!.text).toBe('Gross margin, period ending 2025-03-31 = gross_profit / revenue');
+    expect(line!.text).toBe('Gross margin, period ending 2025-03-31 = Gross profit / Revenue');
     expect(line!.children.map((c) => [c.ref, c.text])).toEqual([
       ["'P&L'!C4", '= 500 (as read, in thousands) · Gross profit, period ending 2025-03-31'],
       ["'P&L'!B4", '= 1250 (as read, in thousands) · Revenue, period ending 2025-03-31'],

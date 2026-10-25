@@ -8,7 +8,7 @@ import type {
   CitationStatus,
   FigureCheck,
 } from './backendApi';
-import { roleLabel } from './mappingModel';
+import { PERIOD_ROLE, roleLabel, UNMAPPED_ROLE } from './mappingModel';
 import { defaultFormatTime } from './usageModel';
 
 /**
@@ -163,8 +163,29 @@ function inputLine(input: CitationInput): SourceLine {
   return sourceLine(input.source, conceptLabel(input.role));
 }
 
+/** A formula word as plain text: a concept, its prior period, or the TTM sum; null if not one. */
+function formulaTerm(token: string): string | null {
+  if (token === 'net_income_ttm') return 'Net income over the last four quarters';
+  const prior = token.endsWith('_prior');
+  const concept = prior ? token.slice(0, -'_prior'.length) : token;
+  if (concept === PERIOD_ROLE || concept === UNMAPPED_ROLE) return null;
+  const label = roleLabel(concept);
+  if (label === concept) return null; // not a concept: left as written
+  // "Prior-period revenue", never "Revenue, prior period": a comma reads as a separator here.
+  return prior ? `Prior-period ${label.charAt(0).toLowerCase()}${label.slice(1)}` : label;
+}
+
+/**
+ * The backend's formula (concept names, e.g. "gross_profit / revenue") with each concept it
+ * recognizes in plain words: "Gross profit / Revenue". Display only -- the citation's formula
+ * itself is untouched, and any other word is left exactly as written.
+ */
+export function formulaLabel(formula: string): string {
+  return formula.replace(/\b[a-z][a-z0-9_]*\b/g, (token) => formulaTerm(token) ?? token);
+}
+
 function computationLine(computation: CitationComputation): SourceLine {
-  const formula = computation.formula ? ` = ${computation.formula}` : '';
+  const formula = computation.formula ? ` = ${formulaLabel(computation.formula)}` : '';
   return {
     ref: null,
     text: `${computationLabel(computation.name)}${period(computation.period_end)}${formula}`,
