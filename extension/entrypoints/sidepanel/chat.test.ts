@@ -518,7 +518,7 @@ describe('ChatController', () => {
       'An answer is still being prepared. Wait for it, or discard it to start over.',
     );
     expect($('#chat-discard').hidden).toBe(false);
-    expect($('#chat-discard').textContent).toBe('Discard this question (it still counts toward your limit)');
+    expect($('#chat-discard').textContent).toBe('Discard this question (it may still count toward your limit)');
   });
 
   it('Discard clears the pending entry, puts the question back, and unblocks starting over', async () => {

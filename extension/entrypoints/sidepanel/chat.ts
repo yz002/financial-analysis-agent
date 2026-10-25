@@ -614,8 +614,8 @@ export class ChatController {
 
   /**
    * Gives up on the pending question: stops waiting, clears the pending entry, and puts the
-   * question back in the box. The backend may still finish it, and it still counts -- the
-   * button's label says so.
+   * question back in the box. The backend may still finish it, and if the request reached it, it
+   * still counts -- the button's label says it may.
    */
   private async discard(): Promise<void> {
     const pending = this.pending ?? (await getPendingAsk());

@@ -34,7 +34,7 @@ export const ITERATION_CAP_NOTICE =
  */
 export const ANSWER_PENDING_NOTE =
   'An answer is still being prepared. Wait for it, or discard it to start over.';
-export const DISCARD_LABEL = 'Discard this question (it still counts toward your limit)';
+export const DISCARD_LABEL = 'Discard this question (it may still count toward your limit)';
 
 export type AnswerSegment =
   | { kind: 'text'; text: string }
