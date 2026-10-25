@@ -476,13 +476,14 @@ button:disabled {
   text-decoration: underline wavy var(--color-warning);
 }
 
-.figure-marker,
 .chat-source-count {
   margin-left: var(--space-xxs);
   font-size: var(--text-meta-size);
   color: var(--color-ink-mute);
 }
 
+/* The same status label in the text and in the sources: one caution color for both. */
+.figure-marker,
 .chat-source-status {
   margin-left: var(--space-xxs);
   font-size: var(--text-meta-size);
