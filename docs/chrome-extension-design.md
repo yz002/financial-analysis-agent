@@ -939,15 +939,67 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
 7. **Polish + manual QA pass** across both OAuth providers and both spreadsheet platforms
    end-to-end (sign-in → file read → mapping confirm → ask → usage/billing surfacing). No new
    endpoints or scopes — a verification session, not a feature one.
-   *(Next, after session 6. Includes the §10 item 10 polish list, and re-checking `/v1/usage`
-   latency on Render.)*
+   *(Done. Phase D session 7: the §10 item 10 polish list, the additive `/confirm`
+   `period_count` (`EXTENSION_INTEGRATION.md` §6), extension CI (`aaab7bc`), a full QA pass, a
+   fix round, and a production re-check. The QA checklist is saved as `docs/qa-checklist.md`.*
+   - ***QA, 2026-10-25, production `aaab7bc` plus local steps*** *(step numbers are
+     `docs/qa-checklist.md`'s):*
+     - *Pass: 1–23, 26, 29–33, 35–61, 63, 65–68. At 48, the waiting note showed, but its
+       clearing wasn't confirmed (confirmed in the re-check below).*
+     - *Fail: 34. A new conversation started in window 1 cleared window 2's transcript with no
+       notice (F1, fixed below).*
+     - *Not met: 64. `/v1/usage` took 0.38–3.46 s over 7 samples (median 1.42 s). The first
+       panel load took about 15 s after days idle, likely a Render cold start. See §10 item
+       15.*
+     - *Skipped:*
+       - *24–25: scale behavior is unchanged since session 5.*
+       - *27–28: no such URLs available, so §10 items 2–3 stay open.*
+       - *62: rewritten. The panel is meant to be unavailable on non-spreadsheet tabs.*
+     - *First live verification: `period_count`, answer markdown including tables, source
+       grouping, Reset to confirmed mapping, the Not-mapped line, the scale hint, and the
+       disabled-button tokens (light and dark).*
+     - *Not exercised live: A3's slow phase (the late portal follow-up; the Stripe event
+       arrived within seconds). It stays unit-tested only.*
+   - ***Fix round, commits `2a1e28f..46fe4a5`*** *(extension-only; pushed; CI green on
+     `46fe4a5`, both jobs):*
+     - *F1, the step 34 bug:*
+       - *Cause: the check ran only on a chat-storage change and compared against the
+         conversation on screen. By then, the statement change's `chat.show()` or the other
+         window's empty storage step had already replaced it with an empty one.*
+       - *Fix: compare against the last conversation shown with messages, from both paths, and
+         skip conversations the panel created itself.*
+       - *Tested with two panels wired through the real storage events, plus each event order
+         driven by hand.*
+     - *F2: "Loading your usage…" while the first `/v1/usage` request runs.*
+     - *F4: over the free cap, "Free: N questions counted today (daily limit 5)" instead of "6
+       of 5".*
+     - *F5: the Excel last-save time to the minute.*
+     - *F6: derived-figure formulas in plain words: "Gross profit / Revenue", "Prior-period
+       revenue", "Net income over the last four quarters".*
+     - *F7: a figure's status marker in the same warning color as in the sources.*
+     - *F8: the "Not mapped" line is kept with the statement and restored on a reopened card.*
+     - *F9: "Couldn't connect. Check your connection and try again." when Connect data gets no
+       response.*
+     - *F10: the Discard label says the question "may still count".*
+     - *F11 (the same account for Google and Microsoft): no change. It's a link made before the
+       linking fix, owner-reviewed (`backend/SECURITY.md` §7).*
+   - ***Production re-check, 2026-10-25:***
+     - *Verified live:*
+       - *F1: step 34 now passes. The notice showed in window 2, and none in window 1.*
+       - *F2's loading line.*
+       - *F4: "Free: 7 questions counted today (daily limit 5)".*
+       - *F5, F6, F8 and F10.*
+       - *Step 48: the waiting note cleared after about 1 minute.*
+     - *Not seen live: F7 (CSS only; no ambiguous figure came up).*
+     - *Unit-tested only: F9, and A3's slow phase.)*
 
 ---
 
-## 10. Open items (from Phase D sessions 3a, 3b and 4)
+## 10. Open items (from Phase D sessions 3a, 3b and 4 onward)
 
 Recorded so they aren't rediscovered later. Items 1–5 come from 3a, and none of them blocked 3b.
-Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from session 4.
+Items 6–9 come from 3b; session 4 closed 6 and 8, and session 7 closed 9. Items 10–12 come from
+session 4. Items 15–17 come from session 7.
 
 1. **Verify Microsoft identity with a validated ID token, not a Graph access token.** Today
    `/v1/auth/exchange` verifies Microsoft sign-in by calling Graph `/me` with an access token.
@@ -960,10 +1012,13 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
    - It has to keep `oauth-identity-session-design.md`'s stable-subject and email-fallback
      rules, and those rules' anti-takeover reasoning (`SECURITY.md` §7).
 2. **`officeapps.live.com` URLs still resolve through `/shares`, unverified.** No live test
-   has opened a file on that host (§4).
+   has opened a file on that host (§4). *Still unverified after session 7: QA step 28 was
+   skipped, with no such URL available.*
 3. **`excel.cloud.microsoft` shapes other than `/open/onedrive/` are unverified**, for example
    work/school or SharePoint files. They're reported as unsupported for now rather than sent to
-   `/shares`, which rejected the one cloud.microsoft shape tested (§4).
+   `/shares`, which rejected the one cloud.microsoft shape tested (§4). *Still unverified after
+   session 7: QA step 27 (`excel.cloud.microsoft/open/onedrive/`) was skipped, with no such URL
+   available.*
 4. **3b idea: remember the data account per file, not one per provider.** Today the extension
    keeps one data-account email per provider. A person who reads Sheets from two Google
    accounts will hit "can't open this file", and then the chooser, each time they switch.
@@ -1023,65 +1078,86 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
        used to get "$" (`NOTES.md`, `CLAUDE.md`).
      - Not done: detecting a scale from a title row. Title rows aren't in the range that's
        sent.
-9. **Google mid-edit freshness: "press Enter before reading."** A cell still being typed into
+9. ~~**Google mid-edit freshness: "press Enter before reading."** A cell still being typed into
    isn't visible to the API. Committed edits are immediate, including recalculated formulas.
    The panel doesn't say this yet. A short hint near Preview (session 7 polish) would cover
-   it.
+   it.~~ Done in session 7: a hint under Preview, for Google only. Verified in production (QA
+   steps 7, 10 and 11).
 
 **From Phase D session 4** (items 10–12; details in `NOTES.md`):
 
 10. **Session 7 polish for the mapping screen and statement card**, from the live test:
     - ~~The card repeats the name when the business and file names match ("FA Spike Test —
       FA Spike Test").~~ Done in session 5 (statement labels).
-    - Show the period count ("4 quarterly periods").
-    - Unmapped-concept warnings use internal names (`operating_cash_flow`). Use friendly
-      labels, grouped on one line.
-    - Change mapping's editor has no suggestion, so it has no Reset button. Offer "Reset to
-      confirmed mapping".
-    - Strip the file extension from the pre-filled business name.
-    - A restored card has no actions. Add "Read another range".
-    - Add a test that changing the sheet hides Send and clears the preview. Only the range
-      edit is tested today.
-    - The preview shows only the first 10 rows. Consider a "Show all rows" toggle.
-    - The disabled mint button looks murky in dark mode, because it's opacity-based. Consider
-      a dedicated disabled color token.
+    - ~~Show the period count ("4 quarterly periods").~~ Done in session 7 (QA step 19).
+    - ~~Unmapped-concept warnings use internal names (`operating_cash_flow`). Use friendly
+      labels, grouped on one line.~~ Done in session 7 (QA step 20). The fix round (F8) also
+      restores the line on a reopened card.
+    - ~~Change mapping's editor has no suggestion, so it has no Reset button. Offer "Reset to
+      confirmed mapping".~~ Done in session 7 (QA steps 22–23).
+    - ~~Strip the file extension from the pre-filled business name.~~ Done in session 7 (QA
+      step 17).
+    - ~~A restored card has no actions. Add "Read another range".~~ Done in session 7 (QA steps
+      31–33).
+    - ~~Add a test that changing the sheet hides Send and clears the preview. Only the range
+      edit is tested today.~~ Done in session 7 (QA step 13).
+    - ~~The preview shows only the first 10 rows. Consider a "Show all rows" toggle.~~ Done in
+      session 7 (QA steps 14–15).
+    - ~~The disabled mint button looks murky in dark mode, because it's opacity-based. Consider
+      a dedicated disabled color token.~~ Done in session 7 (QA step 38, light and dark).
     - Optional: a manual light/dark/system theme switch. Today the panel follows the system
       setting only.
     - ~~**Before the session 6 Stripe work:** delete the `manual_test` `subscriptions` row
       that raises the owner's question cap for session 5 live testing. It exists, for account
       `36f87f76-1ff4-4a13-809d-2d54d23b5745` (`backend/DEPLOYMENT.md`).~~ Done: 1 row deleted
       during session 6 L0. The date and the printed row were not recorded at the time.
-    - Answer markdown shows as raw text (`**`, backticks, tables). Consider a safe formatter
-      (bold, code, lists, tables) built with createElement, or plain-text answers.
-    - The source list repeats the same figure once per mention. Group it by figure and
-      provenance.
-    - Make it clearer which file and tab the chat is about. The chat follows the active
-      statement, even while another document is open.
-    - A newly added tab appeared only after reconnecting. Refresh the sheet list.
+    - ~~Answer markdown shows as raw text (`**`, backticks, tables). Consider a safe formatter
+      (bold, code, lists, tables) built with createElement, or plain-text answers.~~ Done in
+      session 7 (QA step 37).
+    - ~~The source list repeats the same figure once per mention. Group it by figure and
+      provenance.~~ Done in session 7 (QA step 35).
+    - ~~Make it clearer which file and tab the chat is about. The chat follows the active
+      statement, even while another document is open.~~ Done in session 7 as 22(a): the boxed
+      "Asking about … Answers use this statement, whichever tab is open." line (QA steps 21 and
+      36). 22(b), a warning when the open tab isn't the statement's file, is item 17.
+    - ~~A newly added tab appeared only after reconnecting. Refresh the sheet list.~~ Done in
+      session 7 as a hint, not an automatic refresh: "Added a tab? Click Connect data again to
+      see it." (QA steps 8–9).
     - Optional: a soft warning when the chosen scale gives implausible values (e.g. revenue in
       billions from a small sheet). *Session 6 live test: the owner confirmed the P&L tab as
-      thousands by mistake twice.*
+      thousands by mistake twice.* *Session 7 added a static hint under the scale menu (QA
+      step 18). A check on the values themselves is still open.*
     - From the session 6 local live test (usage card):
-      - The reset time shows seconds. Show date and time to the minute.
-      - "More questions from …" reads oddly at 0 used. Show it only when some are used, or
-        say "Resets …".
+      - ~~The reset time shows seconds. Show date and time to the minute.~~ Done in session 7
+        (QA step 39).
+      - ~~"More questions from …" reads oddly at 0 used. Show it only when some are used, or
+        say "Resets …".~~ Done in session 7: "Resets daily at 00:00 UTC (… your time)." (QA
+        step 39).
       - `GET /v1/usage` took 3–8 s locally (shared production database). Re-check on Render
-        before optimizing.
+        before optimizing. *Re-checked in session 7: 0.38–3.46 s on Render, median 1.42 s (QA
+        step 64, not met). The diagnosis plan is item 15.*
     - From the session 6 production run (2026-10-20):
-      - The Refresh button gives no visible feedback. Show a brief "Updating…" or disable it
-        while loading.
-      - The poll after Manage subscription (every 3 s for up to a minute) can end before
+      - ~~The Refresh button gives no visible feedback. Show a brief "Updating…" or disable it
+        while loading.~~ Done in session 7 (QA step 40).
+      - ~~The poll after Manage subscription (every 3 s for up to a minute) can end before
         `customer.subscription.updated` arrives, so a scheduled cancellation appears late (the
         next refresh shows it). Consider a longer window after Manage, or a single later
-        re-check.
-      - The free-tier reset time is shown in local time (e.g. "10/21/2026, 3:00:00 AM"). Make
-        it clear this is the reset at 00:00 UTC.
+        re-check.~~ Done in session 7: quiet checks every 15 s for about 2 more minutes after
+        the portal (QA steps 47–48). The slow phase itself was never needed live; it's
+        unit-tested only.
+      - ~~The free-tier reset time is shown in local time (e.g. "10/21/2026, 3:00:00 AM"). Make
+        it clear this is the reset at 00:00 UTC.~~ Done in session 7 (QA step 39).
     - From the session 5 production run:
-      - When another window starts a new conversation, show a short notice instead of the
-        transcript silently disappearing.
+      - ~~When another window starts a new conversation, show a short notice instead of the
+        transcript silently disappearing.~~ Done in session 7. It failed QA step 34 at first,
+        was fixed in the fix round (F1), and was verified in production.
       - The model sometimes writes loose estimates ("low-60s", "roughly 380x"). They're
         correctly flagged "Not traced"; consider a prompt nudge to avoid them.
       - The answer sometimes puts a percentage in quotes ("-4.6%"). Minor prompt polish.
+      - *From the session 7 production QA, the same prompt polish:* the model adds an
+        unnecessary hedge about a "public ticker" when a confirmed statement is the data
+        source. A confirmed statement is the person's own data, so the answer shouldn't raise
+        tickers at all.
 11. **Legacy confirmed `csv_statements` rows** with NULL `confirmed_at` and no
     `statement_attrs` exist in production, predating the current confirm code. One belongs to
     account `b90f9f33…`. In session 5, check whether `/v1/ask` handles them
@@ -1128,6 +1204,46 @@ Items 6–9 come from 3b; session 4 closed 6 and 8. Items 10–12 come from sess
 14. **Decide access-log IP retention/redaction before live mode** (see `backend/SECURITY.md`
     §4). The uvicorn access log on Render records each request's client IP address. It's not a
     secret, but it is personal data.
+
+**From Phase D session 7** (backlog):
+
+15. **`/v1/usage` latency: diagnose before fixing.** QA step 64 measured 0.38–3.46 s on Render
+    (median 1.42 s, 7 samples). The first panel load took about 15 s after days idle, which
+    is likely a Render cold start rather than the queries.
+    - **What one request does** (code read, no DB access). There are two DB sessions, each
+      checking out a pooled connection with `pool_pre_ping=True`, so each costs a `SELECT 1`:
+      - `get_current_account`: the pre-ping, the session lookup by token hash, the account,
+        an `UPDATE sessions` plus `COMMIT`, and a `refresh` of the account. About 6 round trips.
+      - `usage()`: the pre-ping, then `evaluate_ask_gate` (the BYO key only if set, the
+        subscription, and the `usage_events` count). Then `account_billing_status` reads the
+        subscription **again**, then the rollback. About 5–6 round trips.
+      - **Total:** about 11–12 sequential round trips. At 50–100 ms each, that's 0.6–1.2 s
+        before any query cost, which matches the median.
+    - **Read-only checks first** (the owner runs them; nothing is changed):
+      1. **Regions:** the Render service's region against the Postgres host's, read in the
+         dashboards. This is the most likely factor.
+      2. **Indexes:** `SELECT indexname, indexdef FROM pg_indexes WHERE tablename IN
+         ('usage_events','sessions','subscriptions');`. Look for an `(account_id,
+         occurred_at)` index on `usage_events` and a `token_hash` index on `sessions`.
+      3. **The count's plan:** `EXPLAIN (ANALYZE, BUFFERS)` on the count query for one account,
+         inside a `READ ONLY` transaction that's rolled back.
+      4. **Render logs:** per-request timing, to tell the server's time from the network's.
+    - **Fix candidates afterwards, not before:**
+      - drop the duplicate subscription query;
+      - skip the `refresh` by reading the account before the commit;
+      - write `last_used_at` at most once a minute;
+      - keep Render warm (a plan or Render change).
+16. **Overlapping storage reads in the chat panel (`extension/entrypoints/sidepanel/chat.ts`).**
+    `show()` and `syncFromStorage()` each read the stored conversation and then render it. Both
+    can be in flight at once, for example a statement change and a chat-storage change arriving
+    together. An older read that finishes last can then overwrite a newer one on screen until
+    the next storage change. This predates session 7, and the F1 fix doesn't change it. No test
+    reaches it. A fix would make each panel apply only its latest read, e.g. with a sequence
+    counter.
+17. **22(b): warn when the open tab isn't the statement's file.** Compare the active browser
+    tab to the statement's file, and show a warning when they differ. This needs tab-change
+    listeners and the file id stored on the statement. Session 7 did only 22(a): the clearer
+    "Asking about … Answers use this statement, whichever tab is open." line (item 10).
 
 **Migrations are manual** (session 4): Render never runs them. Its Pre-Deploy command isn't
 available on the current plan. Run an additive migration with `alembic upgrade head` against

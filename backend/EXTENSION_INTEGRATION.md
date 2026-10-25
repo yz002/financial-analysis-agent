@@ -540,8 +540,9 @@ optional, so older callers keep working.)
 - Tool results the agent sees for a confirmed statement now carry `units`, and each value's
   citation carries `sheet_scale`. That's internal, not part of this HTTP contract.
 
-(Amended Phase D session 7, pending live verification: unit-tested only, not yet seen live or
-in production. One additive response field. Older callers that ignore it keep working.)
+(Amended Phase D session 7, verified in production 2026-10-25: a confirmed quarterly statement's
+card read "4 quarterly periods". One additive response field. Older callers that ignore it keep
+working.)
 - **`period_count`** (integer or `null`, default `null`): how many periods the confirmed
   statement holds, counted by the backend from the rows it stored. It's set only when
   `confirmed` is `true`, and is `null` on every refusal and acknowledgement request.

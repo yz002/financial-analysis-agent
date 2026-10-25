@@ -164,6 +164,15 @@ The fake request fails before account resolution, so it creates no rows.
 
 ## Production deploys
 
+- **`46fe4a5`, pushed 2026-10-25 (Phase D session 7 fix round, `2a1e28f..46fe4a5`).**
+  Extension-only: no backend file changed after `aaab7bc`, so the backend is the same code. CI
+  green on `46fe4a5`, both jobs (pytest and extension). The production re-check is recorded in
+  `docs/chrome-extension-design.md` §9 item 7.
+- **`aaab7bc`, deployed to Render and confirmed via `/v1/health` on 2026-10-20 (Phase D
+  session 7).** The production code for the session 7 QA on 2026-10-25.
+  The one backend change since `c5b4474` is `/confirm`'s additive `period_count` (`20aab70`;
+  `EXTENSION_INTEGRATION.md` §6). No migration and no env change. `aaab7bc` itself adds the
+  extension job to CI.
 - **`c5b4474`, verified 2026-10-20 (Phase D session 6).** Stripe in test mode (sandbox "Fintel
   sandbox"), with the webhook endpoint above. No new migrations beyond `0006_usage_event_tier`,
   which was applied before the push (2026-10-08). The production results are recorded in
@@ -235,16 +244,20 @@ the **production** database (`fin_agent_db`). As a result:
 A separate dev/test database, with its own `DATABASE_URL` and `BYO_KEY_ENCRYPTION_KEY` in
 `backend/.env`, is needed **before real users**.
 
-## Backlog: CI coverage and dependency audit (review in Phase D session 7)
+## Backlog: CI coverage and dependency audit (reviewed in Phase D session 7)
 
-- **CI runs only the root `pytest` suite.** `.github/workflows/tests.yml` installs
-  `requirements-lock.txt`, seeds the EDGAR cache and runs `pytest` from the repo root. It
-  doesn't run these, so a push to `main` (which deploys) isn't gated on them:
-  - the backend suite (`backend/tests/`), which also needs a database (see the risk above);
-  - the extension's `npm run compile` and `npm test`.
-  Today they're run by hand before each push.
-- **`npm audit` in `extension/` reports 5 high-severity findings, all in dev tooling.** They
-  all come through `web-ext` (via `addons-linter`/`image-size` and
-  `@devicefarmer/adbkit`/`node-forge`), which is used only for running and packaging builds. None
-  is in code the extension ships. SheetJS (`xlsx` 0.20.3, from the `cdn.sheetjs.com` tarball)
-  has no findings. Re-check, and update `web-ext`, in session 7.
+- **CI coverage.** `.github/workflows/tests.yml` has two jobs:
+  - the root `pytest` suite (installs `requirements-lock.txt` and seeds the EDGAR cache);
+  - since `aaab7bc` (session 7), the extension: `npm ci`, `npm run compile` and `npm test` in
+    `extension/`.
+  - **Still not in CI:** the backend suite (`backend/tests/`). It needs a database, and today
+    that's production (see the risk above), so it's run by hand before each backend push.
+- **`npm audit` in `extension/`, 2026-10-20: 8 findings (3 critical, 5 high), all in dev
+  tooling.**
+  - They come through `web-ext`, `vite` and `wxt`, which are used only to build, run and package
+    the extension. None is in code the extension ships.
+  - SheetJS (`xlsx` 0.20.3, from the `cdn.sheetjs.com` tarball) had no findings at the earlier
+    check.
+  - **The fix is a tooling bump**, including a semver-major `addons-scanner-utils`. Check that
+    `npm run compile`, `npm test` and a build still pass.
+  - **First small item of the next session.**
