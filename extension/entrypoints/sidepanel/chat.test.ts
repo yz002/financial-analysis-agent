@@ -2,8 +2,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type AskRequestBody, type AskResponse, type Citation } from '../../lib/backendApi';
-import { clearPendingAsk, getConversation, getPendingAsk, setConversation, setPendingAsk } from '../../lib/conversationStorage';
-import type { ActiveStatement } from '../../lib/sessionStorage';
+import {
+  clearChatState,
+  clearPendingAsk,
+  getConversation,
+  getPendingAsk,
+  onChatStateChanged,
+  setConversation,
+  setPendingAsk,
+} from '../../lib/conversationStorage';
+import { onActiveStatementChanged, setActiveStatement, type ActiveStatement } from '../../lib/sessionStorage';
 import { ChatController, NEW_CONVERSATION_ELSEWHERE_NOTE, renderAnswer, type ChatDeps } from './chat';
 
 const MARKUP = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script>';
@@ -68,8 +76,10 @@ interface Harness {
   sent: AskRequestBody[];
 }
 
-function makeChat(responses: Array<AskResponse | Error | 'hang'>): Harness {
-  document.body.innerHTML = PANEL;
+/** A chat panel built into `root` (the whole document by default; a second window gets its own root). */
+function makeChat(responses: Array<AskResponse | Error | 'hang'>, root: HTMLElement = document.body): Harness {
+  root.innerHTML = PANEL;
+  const $ = <T extends HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
   const sent: AskRequestBody[] = [];
   let clock = 1_000_000;
   const send = vi.fn((_token: string, body: AskRequestBody, signal: AbortSignal) => {
@@ -705,5 +715,160 @@ describe('ChatController.syncFromStorage (another window)', () => {
     const { chat } = makeChat([]);
     await chat.show({ ...STATEMENT, entityName: 'FA Spike Test', label: "FA Spike Test · 'P&L'!A3:G7" });
     expect($('#chat-statement').textContent).not.toContain('FA Spike Test — FA Spike Test');
+  });
+});
+
+describe('a new conversation started in another window (F1)', () => {
+  const NEXT: ActiveStatement = { ...STATEMENT, csvContextId: 'ctx-2', confirmedAt: '2026-10-06T00:00:00Z' };
+
+  interface PanelWindow extends Harness {
+    root: HTMLElement;
+    /** main.ts's renderStatementCard: the card follows the statement, and the chat with it. */
+    showStatement(statement: ActiveStatement | null): void;
+    in<T extends HTMLElement>(selector: string): T;
+  }
+
+  /**
+   * One side panel, wired to storage the way main.ts wires it: the real onActiveStatementChanged
+   * (skipping the statement the card already shows) calling chat.show, and the real
+   * onChatStateChanged calling syncFromStorage.
+   */
+  function openWindow(responses: Array<AskResponse | Error | 'hang'>): PanelWindow {
+    const root = document.createElement('div');
+    document.body.append(root);
+    const harness = makeChat(responses, root);
+    let displayedStatementId: string | null = null;
+    const showStatement = (statement: ActiveStatement | null) => {
+      displayedStatementId = statement?.csvContextId ?? null;
+      void harness.chat.show(statement);
+    };
+    onActiveStatementChanged((statement) => {
+      if ((statement?.csvContextId ?? null) === displayedStatementId) return; // this panel's own write
+      showStatement(statement);
+    });
+    onChatStateChanged(() => {
+      void harness.chat.syncFromStorage();
+    });
+    return {
+      ...harness,
+      root,
+      showStatement,
+      in: <T extends HTMLElement>(selector: string) => root.querySelector<T>(selector)!,
+    };
+  }
+
+  async function askIn(panel: PanelWindow, question: string): Promise<void> {
+    panel.in<HTMLTextAreaElement>('#chat-input').value = question;
+    panel.in<HTMLFormElement>('#chat-form').requestSubmit();
+    await settle();
+  }
+
+  /** main.ts's statementConfirmed, in order: the statement, a new conversation, the card. */
+  async function confirmIn(panel: PanelWindow, statement: ActiveStatement): Promise<void> {
+    await setActiveStatement(statement);
+    await panel.chat.startNewConversation(statement);
+    panel.showStatement(statement);
+    await settle();
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('two windows, real storage events: a confirm in window 1 clears window 2 with the notice', async () => {
+    const window1 = openWindow([]);
+    const window2 = openWindow([answer()]);
+    await setActiveStatement(STATEMENT);
+    await settle();
+
+    await askIn(window2, 'What was revenue?');
+    expect(window2.in('#chat-log').querySelectorAll('.chat-answer')).toHaveLength(1);
+    expect(window1.in('#chat-log').querySelectorAll('.chat-answer')).toHaveLength(1); // synced
+
+    await confirmIn(window1, NEXT);
+
+    expect(window2.in('#chat-log').children).toHaveLength(0);
+    expect(window2.in('#chat-notice').textContent).toBe(NEW_CONVERSATION_ELSEWHERE_NOTE);
+    expect(window1.in('#chat-log').children).toHaveLength(0);
+    expect(window1.in('#chat-notice').textContent).toBe('');
+    expect(await getConversation()).toEqual(expect.objectContaining({ csvContextId: 'ctx-2', messages: [] }));
+
+    await askIn(window2, 'And now?'); // the notice clears on window 2's next question
+    expect(window2.in('#chat-notice').textContent).toBe('');
+  });
+
+  it("this panel's own confirm shows no notice, its own empty step included (real storage events)", async () => {
+    const panel = openWindow([answer()]);
+    await setActiveStatement(STATEMENT);
+    await settle();
+    await askIn(panel, 'What was revenue?');
+
+    await confirmIn(panel, NEXT);
+
+    expect(panel.in('#chat-log').children).toHaveLength(0);
+    expect(panel.in('#chat-notice').textContent).toBe('');
+  });
+
+  // The same confirm, with this panel's two reactions (show for the statement change, sync for
+  // each chat-state change) driven by hand, in each order relative to the other window's writes.
+  const otherWindowsConversation = {
+    localId: 'other-window', csvContextId: 'ctx-2', statementLabel: 'Acme', conversationId: null, messages: [],
+  };
+  it.each<[string, (chat: ChatController) => Promise<void>]>([
+    ['show before the clear', async (chat) => {
+      await chat.show(NEXT);
+      await clearChatState();
+      await chat.syncFromStorage();
+      await setConversation(otherWindowsConversation);
+      await chat.syncFromStorage();
+    }],
+    ['show between the clear and the new conversation', async (chat) => {
+      await clearChatState();
+      await chat.syncFromStorage();
+      await chat.show(NEXT);
+      await setConversation(otherWindowsConversation);
+      await chat.syncFromStorage();
+    }],
+    ['show after the new conversation', async (chat) => {
+      await clearChatState();
+      await chat.syncFromStorage();
+      await setConversation(otherWindowsConversation);
+      await chat.syncFromStorage();
+      await chat.show(NEXT);
+    }],
+  ])('hand-driven order, %s: the transcript clears with the notice', async (_order, steps) => {
+    const { chat } = makeChat([answer()]);
+    await chat.show(STATEMENT);
+    await ask('What was revenue?');
+
+    await steps(chat);
+
+    expect($('#chat-log').children).toHaveLength(0);
+    expect($('#chat-notice').textContent).toBe(NEW_CONVERSATION_ELSEWHERE_NOTE);
+  });
+
+  it('no notice after a sign-out reset', async () => {
+    const { chat } = makeChat([answer()]);
+    await chat.show(STATEMENT);
+    await ask('What was revenue?');
+
+    chat.reset();
+    await setConversation(otherWindowsConversation);
+    await chat.show(NEXT);
+    await chat.syncFromStorage();
+
+    expect($('#chat-notice').textContent).toBe('');
+  });
+
+  it('no notice for a conversation stored without a localId', async () => {
+    const { chat } = makeChat([answer()]);
+    await chat.show(STATEMENT);
+    await ask('What was revenue?');
+
+    await setConversation({ csvContextId: 'ctx-2', statementLabel: 'Acme', conversationId: null, messages: [] });
+    await chat.syncFromStorage();
+
+    expect($('#chat-log').children).toHaveLength(0);
+    expect($('#chat-notice').textContent).toBe('');
   });
 });

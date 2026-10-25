@@ -270,16 +270,6 @@ function renderMessage(message: ChatMessage): HTMLElement {
   return renderAnswer(message.response);
 }
 
-function freshConversation(statement: ActiveStatement): StoredConversation {
-  return {
-    localId: crypto.randomUUID(),
-    csvContextId: statement.csvContextId,
-    statementLabel: describeStatement(statement),
-    conversationId: null,
-    messages: [],
-  };
-}
-
 const ELSEWHERE_NOTE =
   'An answer is being prepared in another window. It will appear here when it arrives, or check again.';
 
@@ -297,6 +287,13 @@ export class ChatController {
   private pending: PendingAsk | null = null;
   /** The request id this panel sent or resumed itself, to tell its own writes from another window's. */
   private ownRequestId: string | null = null;
+  /** Every conversation this panel created, to tell its own new conversation from another window's. */
+  private readonly ownLocalIds = new Set<string>();
+  /**
+   * The last conversation this panel showed with messages in it. A different conversation
+   * replacing it, started elsewhere, gets the "new conversation" notice.
+   */
+  private lastShownWithMessages: { localId: string | undefined } | null = null;
 
   constructor(
     private readonly el: ChatElements,
@@ -334,10 +331,7 @@ export class ChatController {
     );
     this.el.panel.removeAttribute('hidden');
 
-    const stored = await getConversation();
-    this.conversation = stored ?? freshConversation(statement);
-    this.renderTranscript();
-    this.renderMismatch();
+    this.adoptStored(await getConversation(), statement);
 
     if (!this.running) {
       // A reopened panel with a question still pending: blocked state first, then resume.
@@ -354,17 +348,7 @@ export class ChatController {
    */
   async syncFromStorage(): Promise<void> {
     if (this.running || !this.statement) return;
-    const shown = this.conversation;
-    const stored = await getConversation();
-    this.conversation = stored ?? freshConversation(this.statement);
-    this.renderTranscript();
-    this.renderMismatch();
-    // Another window started a new conversation: say so rather than let the transcript
-    // silently disappear. Not for this panel's own new conversation (same id), nor when
-    // nothing was shown yet.
-    if (stored && shown && shown.messages.length > 0 && stored.localId !== shown.localId) {
-      this.setNotice(NEW_CONVERSATION_ELSEWHERE_NOTE);
-    }
+    this.adoptStored(await getConversation(), this.statement);
     const pending = await getPendingAsk();
     if (this.running) return; // this panel started waiting meanwhile
     this.setPending(pending);
@@ -389,7 +373,7 @@ export class ChatController {
     await clearChatState();
     this.setPending(null);
     this.statement = statement;
-    this.conversation = freshConversation(statement);
+    this.conversation = this.freshConversation(statement);
     await setConversation(this.conversation);
     this.setNotice('');
     this.el.checkButton.hidden = true;
@@ -404,6 +388,8 @@ export class ChatController {
     this.running = null;
     this.statement = null;
     this.conversation = null;
+    this.ownLocalIds.clear();
+    this.lastShownWithMessages = null;
     this.setPending(null);
     this.el.log.replaceChildren();
     this.el.input.value = '';
@@ -414,8 +400,49 @@ export class ChatController {
     this.el.panel.setAttribute('hidden', '');
   }
 
+  private freshConversation(statement: ActiveStatement): StoredConversation {
+    const localId = crypto.randomUUID();
+    this.ownLocalIds.add(localId);
+    return {
+      localId,
+      csvContextId: statement.csvContextId,
+      statementLabel: describeStatement(statement),
+      conversationId: null,
+      messages: [],
+    };
+  }
+
+  /**
+   * Shows the stored conversation (or a fresh one when there's none), for both a statement
+   * change (show) and a chat-state change (syncFromStorage). Another window's confirm empties
+   * storage and then writes its own fresh conversation, and either path can run first; so the
+   * check compares against the last conversation shown with messages, not the one on screen,
+   * which an empty step may already have replaced. An empty store changes nothing in that
+   * tracking. The notice is only for a conversation started elsewhere: never this panel's own,
+   * nor one stored without a localId.
+   */
+  private adoptStored(stored: StoredConversation | null, statement: ActiveStatement): void {
+    const last = this.lastShownWithMessages;
+    if (
+      stored &&
+      last &&
+      stored.localId !== undefined &&
+      stored.localId !== last.localId &&
+      !this.ownLocalIds.has(stored.localId)
+    ) {
+      this.setNotice(NEW_CONVERSATION_ELSEWHERE_NOTE);
+    }
+    if (stored) this.lastShownWithMessages = stored.messages.length > 0 ? { localId: stored.localId } : null;
+    this.conversation = stored ?? this.freshConversation(statement);
+    this.renderTranscript();
+    this.renderMismatch();
+  }
+
   private renderTranscript(): void {
-    this.el.log.replaceChildren(...(this.conversation?.messages ?? []).map(renderMessage));
+    const messages = this.conversation?.messages ?? [];
+    // This panel's own questions and answers count as shown too.
+    if (messages.length > 0) this.lastShownWithMessages = { localId: this.conversation!.localId };
+    this.el.log.replaceChildren(...messages.map(renderMessage));
   }
 
   /**
@@ -576,7 +603,7 @@ export class ChatController {
       this.renderMismatch(true);
       this.setNotice(failureMessage(failure));
     } else if (failure.kind === 'conversation_not_found') {
-      if (this.statement) this.conversation = freshConversation(this.statement);
+      if (this.statement) this.conversation = this.freshConversation(this.statement);
       this.setNotice(failureMessage(failure));
     } else {
       this.conversation?.messages.push({ role: 'notice', text: failureMessage(failure) });
