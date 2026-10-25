@@ -252,12 +252,22 @@ A separate dev/test database, with its own `DATABASE_URL` and `BYO_KEY_ENCRYPTIO
     `extension/`.
   - **Still not in CI:** the backend suite (`backend/tests/`). It needs a database, and today
     that's production (see the risk above), so it's run by hand before each backend push.
-- **`npm audit` in `extension/`, 2026-10-20: 8 findings (3 critical, 5 high), all in dev
-  tooling.**
-  - They come through `web-ext`, `vite` and `wxt`, which are used only to build, run and package
-    the extension. None is in code the extension ships.
-  - SheetJS (`xlsx` 0.20.3, from the `cdn.sheetjs.com` tarball) had no findings at the earlier
-    check.
-  - **The fix is a tooling bump**, including a semver-major `addons-scanner-utils`. Check that
-    `npm run compile`, `npm test` and a build still pass.
-  - **First small item of the next session.**
+- **`npm audit` in `extension/`: fixed in `641de9c` (session 8), except the node-forge chain.**
+  - 2026-10-20 there were 8 findings. By session 8 (2026-10-25) there were 13 (3 critical,
+    7 high, 3 moderate), all in dev tooling.
+  - **Cleared by plain `npm audit fix`** (never `--force`), lockfile only: shell-quote
+    (critical), vite, source-map-js, undici, image-size/addons-linter, fx-runner,
+    `@vitest/mocker` and fast-uri. vite 8.3.0 → 8.3.5, vitest 5.0.1 → 5.0.5 and web-ext
+    10.6.0 → 10.8.0, all within their existing ranges. Transitively, `addons-scanner-utils`
+    went 15 → 16 (semver-major). `npm run compile`, `npm test`, `npm run build:local` and
+    `npm run build` all passed.
+  - **Accepted risk: 4 high findings remain**, all one chain: node-forge →
+    `@devicefarmer/adbkit` → web-ext → wxt.
+    - node-forge has no fixed version (every version is affected). npm's only offer is
+      `--force` to web-ext 5.1.0, which wxt (needs web-ext >=9.2.0) can't use.
+    - It's dev-only. adbkit is web-ext's Firefox-for-Android runner, which `wxt build` doesn't
+      use. None of it is in code the extension ships.
+    - **Re-check each session** with `npm audit` in `extension/`, and clear it once node-forge
+      or adbkit ships a fix.
+  - **Runtime dependencies are clean:** `npm audit --omit=dev` = 0 vulnerabilities. That covers
+    SheetJS (`xlsx` 0.20.3, from the `cdn.sheetjs.com` tarball).
