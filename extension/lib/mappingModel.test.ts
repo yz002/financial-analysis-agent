@@ -3,6 +3,7 @@ import {
   buildConfirmRequest,
   carryOver,
   confirmedStatementDetails,
+  notMappedLine,
   defaultEntityName,
   newDraft,
   ROLE_OPTIONS,
@@ -35,6 +36,13 @@ describe('defaultEntityName', () => {
     ['.xlsx', '.xlsx'], // never an empty name
   ])('%s -> %s', (fileName, expected) => {
     expect(defaultEntityName(fileName)).toBe(expected);
+  });
+});
+
+describe('notMappedLine', () => {
+  it('names the concepts in plain labels on one line, or nothing when there are none', () => {
+    expect(notMappedLine(['net_income', 'capex'])).toBe('Not mapped: Net income, Capital expenditure.');
+    expect(notMappedLine([])).toBeNull();
   });
 });
 

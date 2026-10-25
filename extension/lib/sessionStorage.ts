@@ -51,6 +51,12 @@ export interface ActiveStatement {
   cadence: string | null;
   /** The backend's period count at confirm (session 7); absent on statements stored before it. */
   periodCount?: number;
+  /**
+   * The concepts no column was mapped to, as the backend named them at confirm (session 7), so a
+   * restored card keeps its "Not mapped" line. Concept names only; absent when there were none or
+   * on statements stored before it.
+   */
+  conceptsUnavailable?: string[];
   scale: string;
   currency: string | null;
 }

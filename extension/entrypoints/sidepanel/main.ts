@@ -30,6 +30,7 @@ import {
   CURRENCY_OPTIONS,
   defaultEntityName,
   newDraft,
+  notMappedLine,
   ROLE_OPTIONS,
   roleLabel,
   rolesFromProposal,
@@ -596,7 +597,12 @@ function describeScale(scale: string): string {
 /** The statement the card currently shows, so a storage change that repeats it is ignored. */
 let displayedStatementId: string | null = null;
 
-function renderStatementCard(statement: ActiveStatement | null, details: string[] = []): void {
+/**
+ * `details` are the confirm response's lines, given only right after this panel's own confirm.
+ * Otherwise (a reopened panel, another window's confirm) the card shows the one line kept with
+ * the statement: which concepts weren't mapped.
+ */
+function renderStatementCard(statement: ActiveStatement | null, details?: string[]): void {
   displayedStatementId = statement?.csvContextId ?? null;
   void chat.show(statement); // chat needs a confirmed statement
   if (!statement) {
@@ -611,7 +617,8 @@ function renderStatementCard(statement: ActiveStatement | null, details: string[
       `numbers in ${describeScale(statement.scale).toLowerCase()}; currency ` +
       `${statement.currency ?? 'not specified'}. Ready for questions.`;
   }
-  statementWarnings?.replaceChildren(...listItems(details));
+  const storedLine = notMappedLine(statement.conceptsUnavailable ?? []);
+  statementWarnings?.replaceChildren(...listItems(details ?? (storedLine ? [storedLine] : [])));
   if (changeMappingButton) changeMappingButton.hidden = lastConfirmed === null;
   statementCard?.removeAttribute('hidden');
 }
@@ -1174,6 +1181,9 @@ async function statementConfirmed(m: MappingSession, response: ConfirmMappingRes
     cadence: response.cadence,
     // The backend's own count, kept with the statement so a restored card shows it too.
     ...(typeof response.period_count === 'number' ? { periodCount: response.period_count } : {}),
+    // Only the unmapped concepts are kept, so a restored card can repeat its "Not mapped" line;
+    // other warnings are tied to this confirm and shown only now.
+    ...(response.concepts_unavailable?.length ? { conceptsUnavailable: [...response.concepts_unavailable] } : {}),
     scale,
     currency: m.draft.currency,
   };

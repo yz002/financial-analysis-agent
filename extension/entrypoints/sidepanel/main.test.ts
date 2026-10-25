@@ -1260,6 +1260,24 @@ describe('mapping screen (session 4)', () => {
     const lines = [...el('#statement-warnings').querySelectorAll('li')].map((li) => li.textContent);
     expect(lines).toEqual(['Not mapped: Net income, Operating cash flow.']);
     expect(el('#statement-warnings').textContent).not.toMatch(/_/);
+    // Kept with the statement (concept names only), so a restored card can show the line too.
+    expect(setActiveStatementMock).toHaveBeenCalledWith(
+      expect.objectContaining({ conceptsUnavailable: ['net_income', 'operating_cash_flow'] }),
+    );
+  });
+
+  it('only the unmapped concepts are kept: other warnings and "No value for" stay confirm-time only', async () => {
+    confirmMappingMock.mockResolvedValue(
+      confirmResponse({ concepts_unavailable: [], warnings: ['Two columns look like revenue.'] }),
+    );
+    await openMapping();
+    choose('#scale-select', 'thousands');
+    await click('#confirm-mapping');
+
+    expect(el('#statement-warnings').textContent).toContain('Two columns look like revenue.');
+    const saved = setActiveStatementMock.mock.calls[0]![0];
+    expect(saved).not.toHaveProperty('conceptsUnavailable');
+    expect(JSON.stringify(saved)).not.toContain('Two columns');
   });
 
   it("the shipped scale hint names the menu's own Ones label, and computes nothing", async () => {
@@ -1777,6 +1795,22 @@ describe('active statement across panel loads and sign-ins (session 4)', () => {
     expect(proposeMappingMock).not.toHaveBeenCalled();
   });
 
+  it('a restored card shows the stored "Not mapped" line', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue({ ...stored, conceptsUnavailable: ['net_income', 'total_assets'] });
+    await loadSidepanel();
+    const lines = [...el('#statement-warnings').querySelectorAll('li')].map((li) => li.textContent);
+    expect(lines).toEqual(['Not mapped: Net income, Total assets.']);
+  });
+
+  it('a statement stored without unmapped concepts (or before they were kept) shows no line', async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    getActiveStatementMock.mockResolvedValue(stored);
+    await loadSidepanel();
+    expect(isHidden('#statement-card')).toBe(false);
+    expect(el('#statement-warnings').children).toHaveLength(0);
+  });
+
   it("a restored card shows the stored period count; one stored before it still loads", async () => {
     getStoredSessionMock.mockResolvedValue(existingSession);
     getActiveStatementMock.mockResolvedValue({ ...stored, periodCount: 6 });
@@ -1937,6 +1971,17 @@ describe('a statement confirmed in another window (session 5)', () => {
     expect(isHidden('#statement-card')).toBe(false);
     expect(el('#statement-summary').textContent).toContain('Other Co — Other File');
     expect(chatShowMock).toHaveBeenLastCalledWith(OTHER);
+  });
+
+  it("shows the other window's stored \"Not mapped\" line", async () => {
+    getStoredSessionMock.mockResolvedValue(existingSession);
+    await loadSidepanel();
+
+    storageListeners.activeStatement!({ ...OTHER, conceptsUnavailable: ['operating_cash_flow'] });
+    await flushAsync();
+
+    const lines = [...el('#statement-warnings').querySelectorAll('li')].map((li) => li.textContent);
+    expect(lines).toEqual(['Not mapped: Operating cash flow.']);
   });
 
   it('a cleared statement hides the card and the chat', async () => {

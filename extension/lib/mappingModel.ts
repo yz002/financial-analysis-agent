@@ -203,8 +203,17 @@ function unmappedConceptWarning(concept: string): string {
 export function confirmedStatementDetails(warnings: string[], conceptsUnavailable: string[]): string[] {
   const replaced = new Set(conceptsUnavailable.map(unmappedConceptWarning));
   const others = warnings.filter((w) => !replaced.has(w));
-  if (conceptsUnavailable.length === 0) return others;
-  return [`Not mapped: ${conceptsUnavailable.map(roleLabel).join(', ')}.`, ...others];
+  const notMapped = notMappedLine(conceptsUnavailable);
+  return notMapped ? [notMapped, ...others] : others;
+}
+
+/**
+ * The card's one line naming the concepts no column was mapped to, in plain labels; null when
+ * there are none. Shared by the confirm response and a card restored from storage.
+ */
+export function notMappedLine(conceptsUnavailable: readonly string[]): string | null {
+  if (conceptsUnavailable.length === 0) return null;
+  return `Not mapped: ${conceptsUnavailable.map(roleLabel).join(', ')}.`;
 }
 
 export interface ConfirmRequestBody {
