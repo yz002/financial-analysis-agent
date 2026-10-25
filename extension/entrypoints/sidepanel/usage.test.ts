@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { BackendApiError, type UsageResponse } from '../../lib/backendApi';
 import {
+  LOADING_USAGE_LINE,
   PORTAL_SLOW_POLL_ATTEMPTS,
   PORTAL_SLOW_POLL_INTERVAL_MS,
   REFRESHING_LABEL,
@@ -140,6 +141,49 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+describe('the first load', () => {
+  it('shows the panel with a loading line while the first request is in flight, then the usage', async () => {
+    const pending = deferred<UsageResponse>();
+    const { panel } = makePanel([free()], { getUsage: vi.fn(() => pending.promise) });
+    const done = panel.refresh();
+    await settle();
+    expect($('#usage-panel').hidden).toBe(false);
+    expect($('#usage-line').textContent).toBe(LOADING_USAGE_LINE);
+    expect(LOADING_USAGE_LINE).toBe('Loading your usage…');
+    expect($('#usage-reset').textContent).toBe('');
+
+    pending.resolve(free());
+    await done;
+    expect($('#usage-line').textContent).toBe('Free: 1 of 5 questions today');
+  });
+
+  it('the loading line gives way to the failure line on an error', async () => {
+    const pending = deferred<UsageResponse>();
+    const { panel } = makePanel([free()], { getUsage: vi.fn(() => pending.promise) });
+    const done = panel.refresh();
+    await settle();
+    pending.reject(backend(500, 'boom'));
+    await done;
+    expect($('#usage-line').textContent).toBe("Couldn't load your usage. Select Refresh to try again.");
+  });
+
+  it('a later refresh keeps the last values on screen, with no loading line', async () => {
+    const second = deferred<UsageResponse>();
+    const getUsage = vi.fn().mockResolvedValueOnce(free()).mockReturnValueOnce(second.promise);
+    const { panel } = makePanel([free()], { getUsage });
+    await panel.refresh();
+
+    const done = panel.refresh();
+    await settle();
+    expect($('#usage-line').textContent).toBe('Free: 1 of 5 questions today');
+    expect($('#usage-reset').textContent).toBe('Resets daily at 00:00 UTC (<2026-10-09T00:00:00Z> your time).');
+
+    second.resolve(free({ questions_today: 2 }));
+    await done;
+    expect($('#usage-line').textContent).toBe('Free: 2 of 5 questions today');
+  });
+});
 
 describe('the Refresh button', () => {
   it('says "Updating…" and is disabled while its refresh runs, then restores', async () => {

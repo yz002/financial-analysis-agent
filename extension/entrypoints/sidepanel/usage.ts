@@ -73,6 +73,9 @@ type PollResult = 'changed' | 'unchanged' | 'stopped' | 'hidden';
 
 export const WAITING_FOR_STRIPE_NOTE = 'Waiting for Stripe to confirm…';
 
+/** The usage line while the first GET /v1/usage is in flight. */
+export const LOADING_USAGE_LINE = 'Loading your usage…';
+
 /** The Refresh button's label while its own refresh is in flight. */
 export const REFRESHING_LABEL = 'Updating…';
 
@@ -165,6 +168,13 @@ export class UsageController {
   private async load(): Promise<UsageResponse | null> {
     const session = await this.deps.getSession();
     if (!session) return null;
+    if (this.last === null) {
+      // Nothing shown yet (a cold start can take many seconds): say it's loading rather than
+      // leave the card empty. Later refreshes keep the last values on screen.
+      this.el.panel.hidden = false;
+      this.el.line.textContent = LOADING_USAGE_LINE;
+      this.el.resetLine.textContent = '';
+    }
     try {
       const usage = await this.deps.getUsage(session.sessionToken);
       this.last = usage;
