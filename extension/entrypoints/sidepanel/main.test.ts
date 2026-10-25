@@ -759,6 +759,16 @@ describe('Connect data error handling', () => {
     expect(statusText()).toBe("Google didn't complete the authorization — try again.");
   });
 
+  it("a request that never got a response (fetch's TypeError) says it couldn't connect", async () => {
+    getDataTokenMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await loadSidepanel();
+
+    await clickConnect();
+
+    expect(clearStoredSessionMock).not.toHaveBeenCalled();
+    expect(statusText()).toBe("Couldn't connect. Check your connection and try again.");
+  });
+
   it('a failed interactive window after a silent attempt says to click again, never silently', async () => {
     getDataTokenMock.mockRejectedValue(
       new InteractiveAfterSilentFailedError(

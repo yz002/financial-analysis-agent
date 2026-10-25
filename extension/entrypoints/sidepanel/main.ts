@@ -837,6 +837,9 @@ function connectErrorMessage(err: unknown): string {
     if (err.status === 400) return "Google didn't complete the authorization — try again.";
     if (err.status === 500) return 'Google access is currently unavailable.';
   }
+  // fetch rejects with a TypeError when the request never got a response: ours, Google's or
+  // Microsoft's, so the message doesn't say which.
+  if (err instanceof TypeError) return "Couldn't connect. Check your connection and try again.";
   return 'Something went wrong — please try again.';
 }
 
