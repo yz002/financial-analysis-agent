@@ -341,7 +341,7 @@ function showConnectedFile(file: ConnectedFile): void {
   if (rangeInput) rangeInput.value = file.defaultRange ?? '';
   if (fileAsOf) {
     fileAsOf.textContent = file.modifiedAt
-      ? `Data as of last save: ${new Date(file.modifiedAt).toLocaleString()}. Edits from the ` +
+      ? `Data as of last save: ${defaultFormatTime(file.modifiedAt)}. Edits from the ` +
         'last minute or two may not appear yet.'
       : '';
   }

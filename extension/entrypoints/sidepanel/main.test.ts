@@ -855,8 +855,11 @@ describe('read panel: sheet, range, preview and send (session 3b)', () => {
 
     await clickConnect();
 
-    expect(el('#file-as-of').textContent).toContain('Data as of last save:');
-    expect(el('#file-as-of').textContent).toContain('may not appear yet');
+    const { defaultFormatTime } = await import('../../lib/usageModel');
+    expect(el('#file-as-of').textContent).toBe(
+      `Data as of last save: ${defaultFormatTime('2026-09-30T12:17:57Z')}. Edits from the last minute or two may not appear yet.`,
+    );
+    expect(el('#file-as-of').textContent).not.toContain(':57'); // to the minute, no seconds
     expect(isHidden('#enter-hint')).toBe(true); // Excel reads the last save, not the live sheet
   });
 
