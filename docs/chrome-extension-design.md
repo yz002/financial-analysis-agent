@@ -993,6 +993,8 @@ version of that session's layer, rather than finishing Sheets end-to-end before 
      - *Not seen live: F7 (CSS only; no ambiguous figure came up).*
      - *Unit-tested only: F9, and A3's slow phase.)*
 
+**Phase E** (the road to a public launch) is planned in §11.
+
 ---
 
 ## 10. Open items (from Phase D sessions 3a, 3b and 4 onward)
@@ -1255,6 +1257,285 @@ Related, already tracked elsewhere: live-testing against the local backend write
 production database, because there's no separate dev/test database (`backend/DEPLOYMENT.md`,
 "Known risk / backlog"). In the 3a test run, a sign-in as the second Google account created a
 real, separate account there.
+
+---
+
+## 11. Phase E plan (the road to a public launch)
+
+Planned in Phase D session 8 (Part B), 2026-10-28, and approved by the owner. Each session is
+sized for about one focused day: **S** is about half a day, **M** a full day. Anything bigger was
+split. Statements marked *unverified* are assumptions to confirm before acting on them.
+
+### Why this order
+
+- **Outside waits start early.** Google OAuth verification is the longest wait, and it can't be
+  submitted without three things:
+  - a domain the owner controls, verified in Search Console, hosting the homepage, privacy
+    policy and terms (`*.onrender.com` can't be verified as ours);
+  - a fixed extension ID (see E3);
+  - a privacy policy that states the access-log IP decision (§10 item 14).
+- **Fixed extension ID.** `extension/wxt.config.ts` sets no manifest `key`, so today's ID comes
+  from the unpacked folder path. A Chrome Web Store upload gets a different ID, which changes
+  the `https://<id>.chromiumapp.org/` redirect URI registered on both the Google client and the
+  Azure app. Pinning the store ID comes before the Google demo video.
+- **Microsoft ID tokens get a spike first** (E5, then E6). *Unverified:* for a personal
+  Microsoft account, Graph `/me`'s `id` (the stored subject today) may be a short hex id, while
+  the ID token's `oid` is a GUID. If so, a naive switch would give every existing Microsoft user
+  a new, empty account.
+- **Live payments need a cleanup.** Production `subscriptions` rows hold test-mode Stripe
+  customer and subscription ids. Checkout reuses the stored customer, and the portal looks it
+  up, so with a live key both would fail. E4 inventories them; E7 cleans them up.
+- **The Web Store submission follows the Microsoft change**, which edits the extension (the
+  `openid` scope, sending the ID token). Submitting earlier would mean a second review.
+- **A launch gate closes the phase** (E9).
+
+### Start now (outside waits, the owner)
+
+- **Check Stripe country support** for a Kuwait-based business (stripe.com/global). Feeds the
+  payments gate below.
+- **Register the Chrome Web Store developer account** (one-time fee, account verification).
+- **Choose and buy the domain.**
+
+### Gate: payments provider (decided by the end of E2)
+
+The terms (E2) describe billing, so the provider has to be known by then. *Unverified:* Stripe
+likely doesn't support Kuwait-based businesses; the owner is checking.
+- **(a) A US entity** (Stripe Atlas or similar). Keeps today's Stripe code; E7 is the live-mode
+  switch described below. Adds entity setup and its own outside wait.
+- **(b) A merchant-of-record provider** (e.g. Paddle, Lemon Squeezy). Needs a new billing
+  integration (checkout, webhook, portal, subscription state), which replaces E7's scope and is
+  likely more than one session. It also changes what the privacy policy and terms say.
+
+Record the decision, and the evidence for it, here.
+
+### E1. Separate dev/test database, backend suite in CI (M)
+
+- **Goal:** local runs, the backend tests and local `alembic` stop touching production.
+- **Closes:**
+  - `backend/DEPLOYMENT.md` "Known risk / backlog: no separate dev/test database";
+  - its CI backlog item (the backend suite isn't in CI);
+  - `backend/SECURITY.md` §6's note that one instance serves everything.
+- **Depends on:** nothing.
+- **Decision at the start:** local Postgres 18 (prod runs 18.6), by native installer or Docker,
+  plus a Postgres service container in CI.
+- **Owner:**
+  - installs Postgres;
+  - points `backend/.env` at it, with a **new** dev `BYO_KEY_ENCRYPTION_KEY`;
+  - keeps the production URL out of `.env`, in a password manager;
+  - runs one read-only `pg_dump --schema-only` of production for the comparison below.
+- **Claude:**
+  - a test guard that refuses to run unless `DATABASE_URL` points at an allowed dev/test
+    database;
+  - a CI job for `backend/tests/`: a fresh database, `alembic upgrade head`, a throwaway Fernet
+    key, and `-k "not hits_real_sandbox"`;
+  - a rewritten migration procedure in `DEPLOYMENT.md`: production migrations take an explicit,
+    one-command production URL, never `.env`.
+- **Risks and tests:**
+  - 0001–0003 were applied by hand and never recorded, so a from-scratch `upgrade head` may not
+    reproduce production's schema. Diff the fresh schema against the production dump.
+  - Tests may rely on rows that exist only in production. Do a full run against the empty
+    database.
+- **Acceptance:**
+  - the backend suite passes locally against the dev database (count from the real run);
+  - CI is green on all three jobs;
+  - the guard is shown refusing a non-allowed URL;
+  - the schema diff is clean or explained;
+  - the `DEPLOYMENT.md` risk section is marked closed.
+
+### E2. Public site, privacy policy, terms, IP-retention decision (M)
+
+- **Goal:** the domain and documents that Google, the Web Store, the payments provider and Azure
+  all point to.
+- **Closes:** §10 item 14, the §8 "privacy policy / terms" exclusion, and the payments gate.
+- **Depends on:** the domain (Start now). It can run before E1.
+- **Owner:**
+  - sets up hosting (e.g. GitHub Pages on the custom domain);
+  - verifies the domain in Search Console;
+  - decides the payments provider;
+  - reviews the legal text (Claude drafts it; that isn't legal advice).
+- **Claude:**
+  - a data inventory from the code: emails, statements, conversations, encrypted BYO keys,
+    usage events, payment-provider ids, logs, and the 12-month inactivity retention;
+  - the subprocessors: Render, Anthropic, the payments provider, Google, Microsoft;
+  - Google API "Limited Use" wording for sheet data;
+  - draft privacy policy, terms (billing, cancellation, refunds) and homepage;
+  - the IP-retention change once decided. Candidates: uvicorn `--no-access-log` plus an app
+    access log of method, path and status without the IP, or keep the log and state Render's
+    retention period.
+- **Account deletion, v1:** by email request, with a stated response time, and a documented
+  cascade-delete runbook. Self-serve deletion goes to Phase F. (No deletion route exists today.)
+- **Risk:** *unverified:* Render may log client IPs at its own proxy layer too. Check the
+  dashboard before the policy claims anything.
+- **Acceptance:**
+  - the pages are live on the verified domain;
+  - production logs or code match the stated IP behavior;
+  - every claim in the policy traces to code or config;
+  - the payments decision is recorded in the gate above.
+
+### E3. Pin the extension ID, submit Google OAuth verification (M)
+
+- **Goal:** start the Google review clock.
+- **Closes:** §10 item 5 (submitted here; closed on approval).
+- **Depends on:** E2 and the Web Store developer account.
+- **Owner:**
+  - uploads a draft package and copies its public key;
+  - adds the new redirect URI to the Google web client and the Azure app;
+  - adds homepage, privacy and terms URLs to Google's consent screen and Azure's branding
+    (optionally Azure's publisher domain);
+  - switches Google to "In production";
+  - records the demo video and submits.
+- **Claude:** the manifest `key` in `extension/wxt.config.ts`, the scope justification for
+  `spreadsheets.readonly`, a video script, and a submission checklist.
+- **Risk:** a missed redirect URI breaks sign-in. Test Google and Microsoft sign-in, plus a
+  sheet read, on the local and production builds before submitting.
+- **Acceptance:** both providers sign in under the pinned ID, locally and in production. The
+  submission date is recorded.
+
+### E4. Production cleanup and readiness checks (M)
+
+- **Goal:** clean production data and diagnose `/v1/usage`.
+- **Closes:**
+  - §10 item 13 (the 8 leftover test accounts);
+  - §10 item 15 (the diagnosis; fixes come after);
+  - §10 item 11's cleanup decision;
+  - `SECURITY.md` §6's dashboard checks.
+- **Depends on:** E1, so the run leaves nothing new behind.
+- **Owner:** runs Claude's read-only SELECTs and shares the results, approves any write, and runs
+  the approved writes.
+- **Read-only first:**
+  - the 8 `sub-*@example.com` accounts (the cascade also removes the fake BYO key on
+    `51b10836…`);
+  - re-count the legacy `csv_statements` rows. Session 5 decided "reject, never backfill, rows
+    stay"; deleting them is a new owner decision;
+  - inventory test-mode `subscriptions` rows (for E7);
+  - re-run `backend/scripts/audit_linked_identities.py`;
+  - §10 item 15's four checks: regions, indexes, a read-only `EXPLAIN`, Render timing;
+  - `SECURITY.md` §6: internal database URL, public-access allow-list, Postgres plan and backups;
+  - the web service plan (spin-down would explain the ~15 s first load);
+  - whether the retention cron job exists and has run (the privacy policy promises it).
+- **Writes:** select the exact rows, the owner approves the printed list, delete inside a
+  transaction, check the count, then commit.
+- **Acceptance:**
+  - before and after counts are recorded;
+  - item 15 has a named cause;
+  - §6's checks are recorded as passed or failed, with follow-ups.
+
+### E5. Microsoft ID-token spike (S)
+
+- **Goal:** verify the claims before any design change.
+- **Settles the design for:** §10 item 1 and `SECURITY.md` §7 residual item 2.
+- **Depends on:** E1 (the spike runs against the dev database).
+- **Questions:**
+  - Does a personal account's `oid` equal Graph `/me` `id`, or map to it (unverified until
+    this spike)?
+  - What are `tid` and the issuer for consumer and organization accounts?
+  - Are `email` and `preferred_username` present?
+- **Owner:** signs in with their personal Microsoft account through a throwaway spike build.
+- **Claude:** the spike, its results, and the amended design. That includes how existing rows
+  keep resolving (an additive `tid` column or rewritten subjects) and whether to relax the
+  residual item 3 no-email gate.
+- **Acceptance:** the mapping is verified live and the design is amended.
+
+### E6. Microsoft ID-token implementation (M)
+
+- **Goal:** the backend never holds a Graph token at sign-in.
+- **Closes:** §10 item 1, and `SECURITY.md` §7 residual items 2–3 as E5 decides.
+- **Depends on:** E5.
+- **Claude:**
+  - the extension requests `openid` and sends the ID token;
+  - the backend validates signature (cached published keys), issuer (multi-tenant template),
+    audience, expiry and nonce, and keeps the stable-subject and no-email-linking rules
+    (`oauth-identity-session-design.md`, `SECURITY.md` §7).
+- **Tests:**
+  - unit tests for a forged signature, wrong audience or issuer, expired token and wrong nonce;
+  - an existing-subject test;
+  - local live test against the dev database, then production.
+- **Acceptance:**
+  - the owner's existing Microsoft identity still resolves to account `36f87f76…`;
+  - no Graph call at sign-in in the logs;
+  - CI is green.
+
+### E7. Live payments (M if option (a); likely split if option (b))
+
+- **Goal:** real payments, switched on deliberately.
+- **Depends on:**
+  - the payments gate;
+  - the provider's account being activated;
+  - the terms being live (E2);
+  - E4's subscriptions inventory.
+- **If (a), Stripe on a US entity:**
+  - *Owner:* live product and price; live webhook endpoint (the same four events, API version
+    recorded); live portal configuration; Render env vars; one real purchase, then cancel and
+    refund it.
+  - *Claude:*
+    - replace the hard `sk_test_` guard with an explicit mode setting that must agree with the
+      key prefix and with the webhook's `livemode`;
+    - the cleanup SQL for test-mode `subscriptions` rows (an approved write);
+    - optionally stop prefilling `customer_email` for Microsoft identities (`SECURITY.md` §7
+      residual item 4);
+    - updated runbooks.
+  - *Tests:* unit tests for every mode and prefix combination. Locally, a live key without the
+    mode set gives 503. Run a checkout for an account that used to have a test subscription.
+- **If (b), a merchant of record:** this scope is replaced by a new integration, planned
+  separately before any code.
+- **Both:** the owner sets an Anthropic spend limit on the master key (each new account gets
+  free daily questions).
+- **Acceptance:**
+  - one real charge, with its webhook delivered;
+  - the panel shows Paid;
+  - the refund is done;
+  - the logs grep clean for secret prefixes.
+
+### E8. Chrome Web Store submission (S–M)
+
+- **Goal:** submit the build that will launch.
+- **Depends on:** E3 (the ID), E6 (final extension code), E2 (policy URL).
+- **Owner:** screenshots, the listing and data-use disclosures, then submit with manual publish
+  after approval.
+- **Claude:**
+  - the single-purpose statement;
+  - a justification for each permission (`tabs`, `identity`, `storage`, every host permission;
+    broad host permissions slow review);
+  - listing copy that says Excel works for personal OneDrive only (§10 items 2–3);
+  - an `npm audit` re-check and the production build.
+- **Acceptance:** submitted, with the package hash and date recorded.
+
+### E9. Launch gate (S)
+
+- **Depends on:** Google verified, the Web Store approved, and E7 done.
+- **Both:** re-run `docs/qa-checklist.md` against production, publish the listing, and record the
+  results in §9.
+
+### Outside waits
+
+| Wait | Starts | Typical | Runs meanwhile |
+|---|---|---|---|
+| Google OAuth verification (sensitive scope; possible follow-up questions) | E3 | days to weeks, more per question round | E4–E8 |
+| Chrome Web Store developer registration | Start now | hours to days | E1, E2 |
+| Payments provider onboarding (US entity, or merchant-of-record approval) | after the gate | unknown until decided | everything before E7 |
+| Chrome Web Store review (broad host permissions) | E8 | days, sometimes longer | waiting on Google |
+
+On weekend sessions, launch is about nine weekends away at the earliest. Google is the likely
+critical path, unless option (a)'s entity setup takes longer.
+
+### Not in Phase E
+
+- **Phase F, product:**
+  - §10 item 7 (periods-across-columns layouts);
+  - items 2–3 (other Excel URL shapes, work/school and SharePoint);
+  - item 4 (data account per file);
+  - item 17 (22(b): open-tab warning);
+  - item 10's optional theme switch and implausible-scale warning;
+  - self-serve account deletion.
+- **Phase F, quality:**
+  - §10 item 16 (overlapping storage reads in `chat.ts`);
+  - item 10's prompt polish (loose estimates, quoted percentages, the "public ticker" hedge).
+- **Later:**
+  - `SECURITY.md` §7 residual item 5 (explicitly linking a second provider);
+  - item 15's fix candidates, if E4 shows they aren't needed for launch.
+- **Ongoing:**
+  - `npm audit` in `extension/` each session (the node-forge chain, `DEPLOYMENT.md`);
+  - a re-check of item 12 whenever a "latest row" query is added.
 
 ---
 
